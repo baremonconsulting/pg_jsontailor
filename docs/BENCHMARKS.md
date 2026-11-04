@@ -12,19 +12,38 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The current reference run used commit `e81a432399f924056e5a07e543541c45bfc5c072`. It completed 1,650 of 1,650 measurements with PASS status. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster.
+The current reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster.
 
 ## Set-based reconciliation result
 
 | Items | Operation | Median | p95 | Direct SQL median |
 | ---: | --- | ---: | ---: | ---: |
-| 10 | complete replacement | 1.922 ms | 1.963 ms | 0.121 ms |
-| 100 | complete replacement | 5.626 ms | 5.725 ms | 0.520 ms |
-| 1,000 | read | 4.228 ms | 4.379 ms | 2.913 ms |
-| 1,000 | insert | 22.934 ms | 23.182 ms | 5.989 ms |
-| 1,000 | root-only update | 25.174 ms | 25.293 ms | 0.051 ms |
-| 1,000 | complete replacement | 39.452 ms | 39.651 ms | 5.877 ms |
-| 1,000 | ETag-checked delete | 11.168 ms | 11.229 ms | 1.974 ms |
+| 10 | complete replacement | 1.913 ms | 1.930 ms | 0.128 ms |
+| 100 | complete replacement | 5.589 ms | 5.656 ms | 0.519 ms |
+| 1,000 | read | 4.205 ms | 4.224 ms | 2.874 ms |
+| 1,000 | insert | 26.433 ms | 26.769 ms | 9.419 ms |
+| 1,000 | root-only update | 25.180 ms | 25.314 ms | 0.054 ms |
+| 1,000 | complete replacement | 39.613 ms | 39.773 ms | 5.866 ms |
+| 1,000 | ETag-checked delete | 11.323 ms | 11.475 ms | 2.065 ms |
+
+## Native MERGE result
+
+The MERGE groups execute native PostgreSQL MERGE against both the generated document view and relational targets. The document path retains validation, ETag, locking, RLS and stored-document semantics.
+
+| Items | MERGE action | Median | p95 | Relational MERGE median |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | INSERT | 0.481 ms | 0.519 ms | 0.074 ms |
+| 0 | UPDATE | 0.729 ms | 0.748 ms | 0.055 ms |
+| 0 | ETag-checked DELETE | 0.488 ms | 0.526 ms | 0.084 ms |
+| 10 | INSERT | 0.918 ms | 0.956 ms | 0.298 ms |
+| 10 | UPDATE | 1.908 ms | 1.938 ms | 0.136 ms |
+| 10 | ETag-checked DELETE | 0.734 ms | 0.764 ms | 0.100 ms |
+| 100 | INSERT | 3.281 ms | 3.368 ms | 1.119 ms |
+| 100 | UPDATE | 5.598 ms | 5.645 ms | 0.519 ms |
+| 100 | ETag-checked DELETE | 1.885 ms | 1.911 ms | 0.166 ms |
+| 1,000 | INSERT | 22.712 ms | 22.979 ms | 6.515 ms |
+| 1,000 | UPDATE | 41.855 ms | 42.133 ms | 6.104 ms |
+| 1,000 | ETag-checked DELETE | 17.215 ms | 17.367 ms | 2.778 ms |
 
 Against `acecaae` on the same Azure VM, complete replacement improved by 7.6% at zero children, 30.9% at one, 26.2% at ten, 14.3% at 100 and 7.3% at 1,000. Insert medians increased by 18.1–38.7% depending on document size; this is the main path selected for further profiling. Read medians remained within approximately ±5%.
 
