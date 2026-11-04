@@ -5,7 +5,7 @@ The repository contains the workflows and templates needed for routine developme
 ## General
 
 - Set `main` as the default branch.
-- Add the description: `Oracle JSON Relational Duality View-like functionality for PostgreSQL.`
+- Add the description: `Generate writable JSON views over relational PostgreSQL tables, with full-document writes and optimistic concurrency.`
 - Add topics: `postgresql`, `postgresql-extension`, `json`, `postgrest`, `database-migration`, `optimistic-concurrency`.
 - Enable Issues and Discussions if community support is planned.
 - Allow squash merging and automatically delete merged branches.
@@ -55,6 +55,7 @@ Protect tags matching `v*`. Restrict creation and deletion to maintainers. A rel
 ## Release process
 
 1. Update `pg_jsontailor.control`, `CHANGELOG.md` and `CITATION.cff` to the same version.
-2. Merge through a pull request after all required checks pass.
+2. Merge through a pull request after all required checks pass on the exact commit that will be tagged.
 3. Create and push an annotated tag such as `v0.2.0`.
-4. Verify the generated GitHub release, source archive and checksum.
+4. The release workflow verifies the required successful check runs for the tagged SHA before packaging it.
+5. Verify the generated GitHub release, source archive and checksum.

@@ -27,4 +27,19 @@ Direct SQL is not semantically equivalent: the document path additionally valida
 
 These measurements are diagnostic results, not a production capacity claim. They exclude network latency, TLS, PostgREST, connection-pool contention, WAL pressure and simultaneous writers. Define an item-count limit and p95 write SLO for each pilot, then run a representative concurrent workload.
 
-Reproduce the measurement with `bench/duality_overhead.py` after reviewing its database connection and disposable-schema settings.
+Run a measurement with explicit connection, workload and output settings:
+
+```sh
+python3 bench/duality_overhead.py \
+  --pg-bin /usr/lib/postgresql/18/bin \
+  --pg-host /var/run/postgresql \
+  --pg-port 5432 \
+  --pg-user benchmark_user \
+  --database jsontailor_duality_benchmark \
+  --sizes 0,1,10,100,1000 \
+  --warmups 3 \
+  --repetitions 30 \
+  --output results/duality-benchmark-reference
+```
+
+The target database is dropped and recreated, so use a dedicated disposable name. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together with the exact source commit when publishing results. Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline.

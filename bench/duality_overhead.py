@@ -2,26 +2,42 @@
 """Benchmark generated duality-view operations against direct relational SQL."""
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import statistics
 import subprocess
 import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-PG = Path("/home/adam/workspaces/pg-jsontailor-2026-11-03/.tools/pgsql-18.6/bin")
-DB = "jsontailor_duality_benchmark"
-SIZES = (0, 1, 10, 100, 1000)
-WARMUPS = 3
-REPETITIONS = 30
+parser = argparse.ArgumentParser()
+parser.add_argument("--pg-bin", type=Path,
+                    default=Path(os.environ["PG_JSONTAILOR_PG_BIN"])
+                    if os.environ.get("PG_JSONTAILOR_PG_BIN")
+                    else Path(shutil.which("pg_config") or "/usr/bin/pg_config").parent)
+parser.add_argument("--database", default="jsontailor_duality_benchmark")
+parser.add_argument("--sizes", default="0,1,10,100,1000")
+parser.add_argument("--warmups", type=int, default=3)
+parser.add_argument("--repetitions", type=int, default=30)
+parser.add_argument("--output", type=Path)
+parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run" / "socket")))
+parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
+parser.add_argument("--pg-user", default=os.environ.get("PGUSER", os.environ.get("USER", "postgres")))
+args = parser.parse_args()
+PG = args.pg_bin
+DB = args.database
+SIZES = tuple(int(value) for value in args.sizes.split(","))
+WARMUPS = args.warmups
+REPETITIONS = args.repetitions
 OPERATIONS = ("read", "insert", "root_update", "update", "delete")
 RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-OUT = ROOT / "results" / f"duality-benchmark-{RUN_ID}"
-ENV = {**os.environ, "PGHOST": str(ROOT / ".run" / "socket"), "PGPORT": "55433", "PGUSER": "adam"}
+OUT = args.output or ROOT / "results" / f"duality-benchmark-{RUN_ID}"
+ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port), "PGUSER": args.pg_user}
 
 
 def run(args, input_text=None, check=True):
@@ -154,7 +170,7 @@ def statements(operation, implementation, size):
                 f"INSERT INTO bench_dv.items(item_id,order_id,product,quantity,unit_price) SELECT x.\"itemId\",p.insert_id,x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.insert_doc->'items') x(\"itemId\" bigint,product text,qty integer,price numeric) WHERE p.size={size}"]
     if operation == "delete":
         if implementation == "duality":
-            return [f"DELETE FROM bench_dv.orders_dv WHERE _id={source_id}"]
+            return [f"SELECT bench_dv.orders_dv__delete_document({source_id},(SELECT data#>>'{{_metadata,etag}}' FROM bench_dv.orders_dv WHERE _id={source_id}))"]
         return [f"DELETE FROM bench_dv.items WHERE order_id={source_id}",f"DELETE FROM bench_dv.orders WHERE order_id={source_id}"]
     raise ValueError(operation)
 

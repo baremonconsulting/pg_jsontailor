@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -78,11 +79,24 @@ INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');""")
     stale = db.run("SELECT jt_integrity.documents__delete_document(1,'stale');", False)
     preserved = db.value("SELECT count(*) FROM jt_integrity.root WHERE id=1;")
     etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_integrity.root SET value='concurrent' WHERE id=1;"
+                       "SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    started = time.monotonic()
+    raced = db.run(f"SELECT jt_integrity.documents__delete_document(1,{quote(etag)});", False)
+    elapsed = time.monotonic() - started
+    writer.wait(timeout=10)
+    etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
     valid = db.run(f"SELECT jt_integrity.documents__delete_document(1,{quote(etag)});", False)
     record("delete requires expected ETag",
            db.state(direct) == "PT428" and db.state(missing) == "PT428"
-           and db.state(stale) == "PT412" and preserved == "1" and valid.returncode == 0,
-           f"direct={db.state(direct)},missing={db.state(missing)},stale={db.state(stale)},valid={valid.returncode}")
+           and db.state(stale) == "PT412" and db.state(raced) == "PT412" and elapsed > .6
+           and preserved == "1" and valid.returncode == 0,
+           f"direct={db.state(direct)},missing={db.state(missing)},stale={db.state(stale)},"
+           f"race={db.state(raced)}/{elapsed:.3f}s,valid={valid.returncode}")
 
     db.run("INSERT INTO jt_integrity.root VALUES(1.00,7,'one');"
            "INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');")
@@ -90,6 +104,8 @@ INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');""")
         '{"_id":2,"reference":7,"items":[]}',
         '{"_id":2,"reference":{"id":7,"unknown":1},"items":[]}',
         '{"_id":2,"reference":{"id":7},"items":[{"id":null,"value":"x"}]}',
+        '{"_id":2,"reference":{"id":7},"items":[{"id":null},{"id":null}]}',
+        '{"_id":2,"reference":{"id":7},"items":[{}, {"id":null}, {"id":200}]}',
         '{"_id":2,"reference":{"id":7},"items":[{"unknown":"x"}]}',
     ]
     states = []
@@ -105,17 +121,28 @@ INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');""")
     create_view(db, "jt_integrity.key_only_documents", key_only)
     inserted = db.run("""INSERT INTO jt_integrity.key_only_documents(data)
 VALUES('{"_id":2,"value":"two","reference":{"id":7},"items":[{},{}]}'::jsonb);""", False)
+    key_only_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.key_only_documents WHERE _id=2;"))
+    key_only_doc["items"].extend([{}, {}])
+    updated_key_only = db.run("UPDATE jt_integrity.key_only_documents SET data=" +
+                              quote(json.dumps(key_only_doc)) + "::jsonb WHERE _id=2;", False)
     child_count = db.value("SELECT count(*) FROM jt_integrity.child WHERE parent=2;")
     record("key-only child mappings accept generated keys",
-           inserted.returncode == 0 and child_count == "2", f"insert={inserted.returncode},children={child_count}")
+           inserted.returncode == 0 and updated_key_only.returncode == 0 and child_count == "4",
+           f"insert={inserted.returncode},update={updated_key_only.returncode},children={child_count}")
 
     numeric_doc = db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;")
     changed = json.loads(numeric_doc)
     changed["items"][0]["value"] = "changed"
     numeric = db.run("UPDATE jt_integrity.documents SET data=" + quote(json.dumps(changed)) +
                      "::jsonb WHERE _id=1;", False)
-    record("numeric keys use typed identity", numeric.returncode == 0,
-           f"update={numeric.returncode},state={db.state(numeric)}")
+    typed_predicates = db.value("SELECT position('to_jsonb(t.' in string_agg(pg_get_functiondef(p.oid),''))=0 "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jt_integrity' "
+        "AND p.proname LIKE 'documents__%';")
+    db.run("INSERT INTO jt_integrity.root(id,value) SELECT g,'bulk' FROM generate_series(3,5000)g;")
+    plan = db.run("EXPLAIN (COSTS OFF,FORMAT JSON) SELECT * FROM jt_integrity.root WHERE id=1;").stdout
+    record("numeric keys use typed indexed identity", numeric.returncode == 0
+           and typed_predicates == "t" and "Index" in plan,
+           f"update={numeric.returncode},typed={typed_predicates},indexed={'Index' in plan}")
 
     immutable = json.loads(json.dumps(spec))
     immutable["root"]["update"] = False
@@ -143,10 +170,23 @@ SET data=jsonb_set(data,'{reference,id}','8'::jsonb) WHERE _id=1;""", False)
         f"SELECT jt_integrity.documents__delete_document(1,{quote(current_etag)});", False)
     original = db.value("SELECT value FROM jt_integrity.root_original WHERE id=1;")
     replacement = db.value("SELECT count(*) FROM jt_integrity.root;")
+    db.run("DROP TABLE jt_integrity.root; ALTER TABLE jt_integrity.root_original RENAME TO root;"
+           "DROP VIEW jt_integrity.documents CASCADE;"
+           "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
+           "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+           "WHERE n.nspname='jt_integrity' AND p.proname=ANY(ARRAY['documents__insert',"
+           "'documents__update','documents__delete','documents__delete_document']) LOOP "
+           "EXECUTE format('DROP FUNCTION %s',item); END LOOP; END$$;")
+    create_view(db, "jt_integrity.documents", spec)
+    regenerated_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;"))
+    regenerated_doc["value"] = "regenerated"
+    regenerated = db.run("UPDATE jt_integrity.documents SET data=" +
+                         quote(json.dumps(regenerated_doc)) + "::jsonb WHERE _id=1;", False)
     record("source relation replacement requires regeneration",
            db.state(swapped_update) == "PT422" and db.state(swapped_delete) == "PT422"
-           and original == "one" and replacement == "0",
-           f"update={db.state(swapped_update)},delete={db.state(swapped_delete)},original={original},replacement={replacement}")
+           and original == "one" and replacement == "0" and regenerated.returncode == 0,
+           f"update={db.state(swapped_update)},delete={db.state(swapped_delete)},"
+           f"original={original},replacement={replacement},regenerated={regenerated.returncode}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))

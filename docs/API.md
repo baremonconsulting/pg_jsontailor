@@ -84,3 +84,7 @@ The caller needs `CREATE` on the target schema and the relevant privileges on so
 - `42501`: insufficient privilege or RLS coverage failure.
 
 Run DDL returned by `duality_view_ddl` in one transaction with stop-on-error behaviour.
+
+## Native SQL MERGE
+
+Native PostgreSQL `MERGE` can use the generated view for a tested subset of insert, complete replacement and `DO NOTHING` actions. It reuses the generated action-specific triggers. Match only on the typed root identity and make source keys unique before the statement. See [`MERGE.md`](MERGE.md) for the exact contract, staging example and concurrency limits.

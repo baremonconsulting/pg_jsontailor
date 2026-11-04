@@ -16,5 +16,6 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Added typed key reconciliation, nested input validation and source-relation binding checks.
 - Added synthetic pilot and reproducible benchmark tooling.
 - Added PostgreSQL 17, 18 and 19 compatibility and continuous-test coverage.
+- Documented and tested native SQL MERGE for insert, complete replacement and DO NOTHING actions.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

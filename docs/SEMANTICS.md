@@ -34,6 +34,10 @@ The extension functions and generated objects use invoker rights. Generated SQL 
 
 PostgREST can expose a schema containing generated views. Keep source tables in a separate, unexposed schema. Use the generated delete function through `/rpc/<view>__delete_document` with `expected_id` and `expected_etag`. PostgreSQL errors map to the REST responses used by the deployment; authentication, role switching and TLS are outside the extension.
 
+## MERGE
+
+Native SQL `MERGE` uses the same insert and update semantics as direct writes to the generated view. A matched update must supply the complete document and the client's ETag. A not-matched insert expresses explicit permission to create or recreate that identity. Source keys must be unique. Delete actions are outside the supported subset; use the generated ETag-aware delete function. The complete contract is in [`MERGE.md`](MERGE.md).
+
 ## Known limits
 
 - one root table, one optional referenced object and one optional child array;

@@ -123,7 +123,23 @@ FROM api.orders_dv
 WHERE _id = 1001;
 ```
 
-For updates, send back the complete document including the `_metadata.etag` value from the preceding read. A stale ETag is rejected atomically.
+For updates, retain the complete document including the `_metadata.etag` value from the preceding read, change the intended field and send the complete replacement:
+
+```sql
+CREATE TEMP TABLE client_document AS
+SELECT data FROM api.orders_dv WHERE _id = 1001;
+
+UPDATE api.orders_dv
+SET data = jsonb_set(
+    (SELECT data FROM client_document),
+    '{status}',
+    '"approved"'::jsonb
+)
+WHERE _id = 1001
+RETURNING data;
+```
+
+A stale ETag is rejected atomically. Reading `data` directly inside the `UPDATE` would not test an external client's earlier token.
 
 Delete through the generated function and pass the identifier and ETag explicitly:
 
@@ -135,6 +151,10 @@ Direct `DELETE` on the view is rejected because SQL has no portable way to carry
 
 The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). The detailed API and document rules are described in [`docs/API.md`](docs/API.md) and [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
 
+Generated functions contain copied write logic. Follow [`docs/UPGRADING.md`](docs/UPGRADING.md) to regenerate existing mappings transactionally after relevant extension or source-schema changes.
+
+PostgreSQL 17, 18 and 19 can also route a documented subset of native SQL `MERGE` through the generated insert and update paths. The source key must be unique, updates remain complete ETag-checked replacements, and the `WHEN NOT MATCHED` branch must be used only when creation is intended. See [`docs/MERGE.md`](docs/MERGE.md) for the supported subset and a copyable staging example.
+
 ## Testing
 
 The repository contains several layers of verification:
@@ -143,6 +163,7 @@ The repository contains several layers of verification:
 - `tests/core_operations.py` for the core document operations;
 - `tests/validation_security.py` for validation, security, RLS and edge cases;
 - `tests/integrity_regressions.py` for generated write-path and integrity regressions;
+- `tests/merge_operations.py` for native SQL MERGE compatibility and concurrency;
 - `tests/run_postgrest.py` for the optional REST surface;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;

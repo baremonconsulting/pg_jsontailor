@@ -150,12 +150,18 @@ jobs:
             --schema examples/shop_schema.sql \
             --spec examples/orders_dv.spec.json \
             --output "$RUNNER_TEMP/setbased-results.json"
+          python3 tests/merge_operations.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --output "$RUNNER_TEMP/merge-results.jsonl"
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 5
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/validation-results.jsonl")" -eq 13
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 7
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/merge-results.jsonl")" -eq 10
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/core-results.jsonl"
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/validation-results.jsonl"
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/integrity-results.jsonl"
+          ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/merge-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 
       - name: Show PostgreSQL log on failure

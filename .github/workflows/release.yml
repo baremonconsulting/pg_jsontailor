@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  checks: read
 
 jobs:
   release:
@@ -26,11 +27,28 @@ jobs:
           set -euo pipefail
           version=$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)
           test "$GITHUB_REF_NAME" = "v$version"
+          required_checks=(
+            'Repository checks'
+            'PostgreSQL 17'
+            'PostgreSQL 18'
+            'PostgreSQL 19'
+            'CodeQL (Python)'
+          )
+          check_runs=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
+            --jq '.check_runs[] | [.name,.status,.conclusion] | @tsv')
+          for required in "${required_checks[@]}"; do
+            awk -F '\t' -v name="$required" \
+              '$1==name && $2=="completed" && $3=="success" {found=1} END {exit !found}' \
+              <<<"$check_runs"
+          done
           archive="pg_jsontailor-$version.tar.gz"
           git archive --format=tar.gz --prefix="pg_jsontailor-$version/" \
             -o "$archive" "$GITHUB_SHA"
           sha256sum "$archive" > "$archive.sha256"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Create GitHub release
         env:
