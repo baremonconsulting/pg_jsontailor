@@ -1,0 +1,9 @@
+{
+  "_id": 202,
+  "status": "processing",
+  "created": "2026-11-02",
+  "customer": {"customerId": 8, "name": "Globex"},
+  "items": [
+    {"itemId": 2021, "product": "Datový kabel", "qty": 2, "price": 99.90}
+  ]
+}

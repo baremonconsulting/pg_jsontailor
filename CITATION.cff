@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: If you use pg_jsontailor in published work, please cite this software.
+title: pg_jsontailor
+type: software
+version: 0.2.0
+date-released: 2026-11-04
+authors:
+  - name: Baremon Consulting
+repository-code: https://github.com/baremonconsulting/pg_jsontailor
+url: https://www.baremon.eu/
+license: PostgreSQL
+abstract: Writable JSON document views over relational PostgreSQL tables with optimistic concurrency and PostgREST support.

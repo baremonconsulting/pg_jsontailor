@@ -1,0 +1,10 @@
+.tools/
+.run/
+results/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/output/
+tests/output_iso/
+output_iso/
+tmp_check_iso/

@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish source release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag and package source
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)
+          test "$GITHUB_REF_NAME" = "v$version"
+          archive="pg_jsontailor-$version.tar.gz"
+          git archive --format=tar.gz --prefix="pg_jsontailor-$version/" \
+            -o "$archive" "$GITHUB_SHA"
+          sha256sum "$archive" > "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "pg_jsontailor $GITHUB_REF_NAME"

@@ -1,0 +1,126 @@
+name: PostgreSQL test matrix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-checks:
+    name: Repository checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Compile Python tools
+        run: python3 -m compileall -q bench pilot tests tools
+
+      - name: Verify extension SQL
+        run: python3 tools/verify_extension_sql.py
+
+      - name: Check repository hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --short)"
+          ! git grep -nE '[[:space:]]+$' -- '*.md' '*.py' '*.sql' '*.yml' '*.yaml'
+          ! git ls-files | grep -E '(^|/)(__pycache__|results|\.run|\.tools)(/|$)'
+
+  postgres:
+    name: PostgreSQL ${{ matrix.postgresql }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        postgresql: ['17', '18', '19']
+    env:
+      PGHOST: ${{ github.workspace }}/.pgsocket
+      PGPORT: '55432'
+      PGUSER: runner
+      PGDATABASE: postgres
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.postgresql }}/bin/pg_config
+      PGBIN: /usr/lib/postgresql/${{ matrix.postgresql }}/bin
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install PostgreSQL ${{ matrix.postgresql }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          curl --proto '=https' --tlsv1.2 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | gpg --dearmor \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            "postgresql-${{ matrix.postgresql }}" \
+            "postgresql-server-dev-${{ matrix.postgresql }}"
+
+      - name: Start isolated PostgreSQL instance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PGHOST" "$RUNNER_TEMP/pgdata"
+          "$PGBIN/initdb" --auth=trust --encoding=UTF8 --no-locale -D "$RUNNER_TEMP/pgdata"
+          "$PGBIN/pg_ctl" -D "$RUNNER_TEMP/pgdata" \
+            -o "-F -k $PGHOST -p $PGPORT" \
+            -l "$RUNNER_TEMP/postgresql.log" start
+
+      - name: Build and install extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          make PG_CONFIG="$PG_CONFIG"
+          sudo make PG_CONFIG="$PG_CONFIG" install
+
+      - name: Run regression and isolation tests
+        run: make PG_CONFIG="$PG_CONFIG" installcheck
+
+      - name: Run functional and security suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PGBIN/createdb" jsontailor_ci
+          "$PGBIN/psql" -X -v ON_ERROR_STOP=1 -d jsontailor_ci \
+            -c 'CREATE EXTENSION pg_jsontailor'
+          python3 tests/core_operations.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --schema examples/shop_schema.sql \
+            --spec examples/orders_dv.spec.json \
+            --output "$RUNNER_TEMP/core-results.jsonl"
+          python3 tests/validation_security.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --schema examples/shop_schema.sql \
+            --spec examples/orders_dv.spec.json \
+            --output "$RUNNER_TEMP/validation-results.jsonl"
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 5
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/validation-results.jsonl")" -eq 13
+          ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/core-results.jsonl"
+          ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/validation-results.jsonl"
+
+      - name: Show PostgreSQL log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/postgresql.log"
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: |
+          "$PGBIN/pg_ctl" -D "$RUNNER_TEMP/pgdata" -m fast stop || true

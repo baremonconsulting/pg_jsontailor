@@ -1,0 +1,29 @@
+{
+  "root": {
+    "table": "pilot.orders",
+    "key": "order_id",
+    "fields": {"status": "status", "created": "created_at"},
+    "insert": true,
+    "update": true,
+    "delete": true
+  },
+  "object": {
+    "name": "customer",
+    "table": "pilot.customers",
+    "key": "customer_id",
+    "root_fk": "customer_id",
+    "fields": {"customerId": "customer_id", "name": "name"},
+    "etag": false
+  },
+  "array": {
+    "name": "items",
+    "table": "pilot.order_items",
+    "key": "item_id",
+    "parent_fk": "order_id",
+    "order_by": "item_id",
+    "fields": {"itemId": "item_id", "product": "product", "qty": "quantity", "price": "unit_price"},
+    "insert": true,
+    "update": true,
+    "delete": true
+  }
+}

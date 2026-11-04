@@ -1,0 +1,61 @@
+name: Bug report
+description: Report reproducible incorrect behaviour in pg_jsontailor.
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve pg_jsontailor. Remove credentials and customer data from all examples.
+  - type: input
+    id: version
+    attributes:
+      label: pg_jsontailor version or commit
+      placeholder: 0.2.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: postgresql
+    attributes:
+      label: PostgreSQL version
+      options:
+        - '17'
+        - '18'
+        - '19'
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: schema
+    attributes:
+      label: Minimal schema and specification
+      description: Provide a synthetic, minimal reproduction.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour and SQLSTATE
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed credentials, personal data and customer identifiers.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true

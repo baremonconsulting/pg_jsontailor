@@ -1,0 +1,11 @@
+{
+  "_id": 203,
+  "status": "fulfilled",
+  "created": "2026-11-03",
+  "customer": {"customerId": 7, "name": "ACME"},
+  "items": [
+    {"itemId": 2031, "product": "Adaptér", "qty": 1, "price": 17.50},
+    {"itemId": 2032, "product": "Konektor", "qty": 10, "price": 4.50},
+    {"itemId": 2033, "product": "Pouzdro", "qty": 1, "price": 250.00}
+  ]
+}

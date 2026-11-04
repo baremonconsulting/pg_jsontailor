@@ -1,0 +1,10 @@
+Parsed test spec with 2 sessions
+
+starting permutation: begin_writer write_row begin_waiter wait_row commit_writer commit_waiter
+step begin_writer: BEGIN;
+step write_row: UPDATE jt_iso_probe SET value=1 WHERE id=1;
+step begin_waiter: BEGIN;
+step wait_row: UPDATE jt_iso_probe SET value=2 WHERE id=1; <waiting ...>
+step commit_writer: COMMIT;
+step wait_row: <... completed>
+step commit_waiter: COMMIT;

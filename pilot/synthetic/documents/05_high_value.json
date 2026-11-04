@@ -1,0 +1,13 @@
+{
+  "_id": 205,
+  "status": "approved",
+  "created": "2026-11-03",
+  "customer": {"customerId": 9, "name": "Northwind"},
+  "items": [
+    {"itemId": 2051, "product": "Server", "qty": 2, "price": 99999.99},
+    {"itemId": 2052, "product": "Podpora", "qty": 12, "price": 1250.00},
+    {"itemId": 2053, "product": "Instalace", "qty": 1, "price": 8750.75},
+    {"itemId": 2054, "product": "Školení", "qty": 5, "price": 640.40},
+    {"itemId": 2055, "product": "Dokumentace", "qty": 1, "price": 310.10}
+  ]
+}

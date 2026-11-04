@@ -1,0 +1,7 @@
+# pg_jsontailor extension
+comment = 'Writable JSON documents over relational PostgreSQL tables'
+default_version = '0.2.0'
+module_pathname = '$libdir/pg_jsontailor'
+relocatable = false
+schema = 'jsontailor'
+

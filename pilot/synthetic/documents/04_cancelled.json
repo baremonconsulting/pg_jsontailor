@@ -1,0 +1,9 @@
+{
+  "_id": 204,
+  "status": "cancelled",
+  "created": "2026-10-31",
+  "customer": {"customerId": 9, "name": "Northwind"},
+  "items": [
+    {"itemId": 2041, "product": "Licence", "qty": 1, "price": 0.01}
+  ]
+}
