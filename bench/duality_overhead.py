@@ -34,7 +34,8 @@ DB = args.database
 SIZES = tuple(int(value) for value in args.sizes.split(","))
 WARMUPS = args.warmups
 REPETITIONS = args.repetitions
-OPERATIONS = ("read", "insert", "root_update", "update", "delete")
+OPERATIONS = ("read", "insert", "root_update", "update", "delete",
+              "merge_insert", "merge_update", "merge_delete")
 RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 OUT = args.output or ROOT / "results" / f"duality-benchmark-{RUN_ID}"
 ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port), "PGUSER": args.pg_user}
@@ -172,6 +173,50 @@ def statements(operation, implementation, size):
         if implementation == "duality":
             return [f"SELECT bench_dv.orders_dv__delete_document({source_id},(SELECT data#>>'{{_metadata,etag}}' FROM bench_dv.orders_dv WHERE _id={source_id}))"]
         return [f"DELETE FROM bench_dv.items WHERE order_id={source_id}",f"DELETE FROM bench_dv.orders WHERE order_id={source_id}"]
+    if operation == "merge_insert":
+        if implementation == "duality":
+            return [f"""MERGE INTO bench_dv.orders_dv AS target
+USING (SELECT insert_id AS root_id,insert_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
+ON target._id=source.root_id
+WHEN NOT MATCHED THEN INSERT(data) VALUES(source.doc)"""]
+        return [f"""MERGE INTO bench_dv.orders AS target
+USING (SELECT insert_id,insert_doc FROM bench_dv.payloads WHERE size={size}) AS source
+ON target.order_id=source.insert_id
+WHEN NOT MATCHED THEN INSERT(order_id,customer_id,status,created_at)
+VALUES(source.insert_id,(source.insert_doc#>>'{{customer,customerId}}')::bigint,source.insert_doc->>'status',(source.insert_doc->>'created')::date)""",
+                f"""MERGE INTO bench_dv.items AS target
+USING (SELECT x."itemId",p.insert_id,x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.insert_doc->'items') x("itemId" bigint,product text,qty integer,price numeric) WHERE p.size={size}) AS source
+ON target.item_id=source."itemId"
+WHEN NOT MATCHED THEN INSERT(item_id,order_id,product,quantity,unit_price)
+VALUES(source."itemId",source.insert_id,source.product,source.qty,source.price)"""]
+    if operation == "merge_update":
+        if implementation == "duality":
+            return [f"""MERGE INTO bench_dv.orders_dv AS target
+USING (SELECT source_id AS root_id,update_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
+ON target._id=source.root_id
+WHEN MATCHED THEN UPDATE SET data=source.doc"""]
+        return [f"""MERGE INTO bench_dv.orders AS target
+USING (SELECT source_id,update_doc FROM bench_dv.payloads WHERE size={size}) AS source
+ON target.order_id=source.source_id
+WHEN MATCHED THEN UPDATE SET status=source.update_doc->>'status',created_at=(source.update_doc->>'created')::date,customer_id=(source.update_doc#>>'{{customer,customerId}}')::bigint""",
+                f"""MERGE INTO bench_dv.items AS target
+USING (SELECT p.source_id,x."itemId",x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.update_doc->'items') x("itemId" bigint,product text,qty integer,price numeric) WHERE p.size={size}) AS source
+ON target.order_id=source.source_id AND target.item_id=source."itemId"
+WHEN MATCHED THEN UPDATE SET product=source.product,quantity=source.qty,unit_price=source.price"""]
+    if operation == "merge_delete":
+        if implementation == "duality":
+            return [f"""MERGE INTO bench_dv.orders_dv AS target
+USING (SELECT source_id AS root_id,root_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
+ON target._id=source.root_id
+WHEN MATCHED AND target.data#>>'{{_metadata,etag}}'=source.doc#>>'{{_metadata,etag}}' THEN DELETE"""]
+        return [f"""MERGE INTO bench_dv.items AS target
+USING (SELECT source_id FROM bench_dv.payloads WHERE size={size}) AS source
+ON target.order_id=source.source_id
+WHEN MATCHED THEN DELETE""",
+                f"""MERGE INTO bench_dv.orders AS target
+USING (SELECT source_id FROM bench_dv.payloads WHERE size={size}) AS source
+ON target.order_id=source.source_id
+WHEN MATCHED THEN DELETE"""]
     raise ValueError(operation)
 
 
