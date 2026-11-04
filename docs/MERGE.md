@@ -9,6 +9,7 @@ The tested subset on PostgreSQL 17, 18 and 19 is:
 - `WHEN MATCHED THEN UPDATE SET data = source.doc`;
 - `WHEN NOT MATCHED THEN INSERT(data) VALUES(source.doc)`;
 - conditional `WHEN` clauses and `DO NOTHING`;
+- `WHEN MATCHED AND` client-ETag checks followed by `DELETE`;
 - `RETURNING merge_action(), target._id, target.data`.
 
 Match only on the typed root identity. Do not include the ETag in the `ON` expression: a stale token must reach the update trigger and return `PT412`, rather than changing the action into an insert.
@@ -53,8 +54,22 @@ An update is a complete replacement. Missing ETags return `PT428`, stale ETags r
 
 Two concurrent inserts for the same absent key retain native PostgreSQL MERGE behaviour: one statement may fail with `23505`. Retry only after reading the current target and deciding whether the operation is now an update. The extension does not promise `INSERT ... ON CONFLICT DO UPDATE` semantics.
 
-## Excluded actions
+## ETag-checked delete
 
-The supported subset does not include `MERGE` actions that delete a target or mutate targets absent from the source. Safe document deletion requires an explicit client ETag and uses the generated `<view>__delete_document(expected_id, expected_etag)` function. A direct delete action is rejected with `PT428`.
+Keep identity matching in `ON` and put the client token in the matched-action condition:
+
+```sql
+MERGE INTO api.orders_dv AS target
+USING document_stage AS source
+ON target._id = source.root_id
+WHEN MATCHED
+     AND target.data #>> '{_metadata,etag}' = source.doc #>> '{_metadata,etag}'
+THEN DELETE
+RETURNING merge_action(), target._id;
+```
+
+The delete trigger locks the state included in the ETag, reads the document again and compares it with `OLD.data`. A concurrent change after action selection returns `PT412`. A token that does not match during initial action selection produces no delete action and no error.
+
+The supported subset does not include actions that mutate targets absent from the source. The generated `<view>__delete_document(expected_id, expected_etag)` function remains available for an explicit-argument SQL or PostgREST RPC contract.
 
 All mapping flags, input validation, invoker privileges, row-level security policies and relation-binding checks remain applicable because MERGE reuses the generated insert and update paths.

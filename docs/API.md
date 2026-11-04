@@ -85,6 +85,8 @@ The caller needs `CREATE` on the target schema and the relevant privileges on so
 
 Run DDL returned by `duality_view_ddl` in one transaction with stop-on-error behaviour.
 
+For direct SQL deletion, constrain the generated view by both `_id` and `data #>> '{_metadata,etag}'`. A token that is already stale selects no row (`DELETE 0`). If the document changes while the trigger waits for locks, its post-lock check returns `PT412`. The generated delete function provides the alternative explicit-argument contract and returns `PT412` for both stale and missing documents.
+
 ## Native SQL MERGE
 
 Native PostgreSQL `MERGE` can use the generated view for a tested subset of insert, complete replacement and `DO NOTHING` actions. It reuses the generated action-specific triggers. Match only on the typed root identity and make source keys unique before the statement. See [`MERGE.md`](MERGE.md) for the exact contract, staging example and concurrency limits.

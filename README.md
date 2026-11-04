@@ -147,7 +147,16 @@ Delete through the generated function and pass the identifier and ETag explicitl
 SELECT api.orders_dv__delete_document(1001, 'ETAG_FROM_THE_PRECEDING_READ');
 ```
 
-Direct `DELETE` on the view is rejected because SQL has no portable way to carry the client's expected ETag in that operation.
+SQL clients can also include both values in a direct delete:
+
+```sql
+DELETE FROM api.orders_dv
+WHERE _id = 1001
+  AND data #>> '{_metadata,etag}' = 'ETAG_FROM_THE_PRECEDING_READ'
+RETURNING _id;
+```
+
+The trigger locks the relational state, reads the document again and compares its current ETag with `OLD.data`. A concurrent change therefore returns `PT412`. An ETag that does not match during the initial `WHERE` evaluation selects no row and returns `DELETE 0`.
 
 The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). The detailed API and document rules are described in [`docs/API.md`](docs/API.md) and [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
 

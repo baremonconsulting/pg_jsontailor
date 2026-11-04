@@ -22,9 +22,18 @@ An update is a complete document replacement, not a partial patch. The root iden
 
 ## Delete
 
-Call the generated `<view>__delete_document(expected_id, expected_etag)` function. It locks the configured document state, reads it back after acquiring the lock, verifies the caller's ETag and then removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
+Call the generated `<view>__delete_document(expected_id, expected_etag)` function when an explicit-argument API is preferable. It locks the configured document state, reads it back after acquiring the lock, verifies the caller's ETag and then removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
 
-Direct `DELETE` on the generated view returns `PT428`. Use the function from SQL or expose it as a PostgREST RPC so that the expected ETag is explicit.
+Direct SQL deletion is supported when the caller filters by both identity and ETag:
+
+```sql
+DELETE FROM api.orders_dv
+WHERE _id = $1
+  AND data #>> '{_metadata,etag}' = $2
+RETURNING _id;
+```
+
+`OLD.data` contains the document selected by the statement. After locking the root and included child state, the trigger reads the current document again and rejects a changed ETag with `PT412`. If the ETag fails the initial `WHERE` condition, no trigger runs and PostgreSQL returns `DELETE 0`. PostgreSQL triggers cannot inspect whether a particular predicate was written, so clients that require an explicit precondition must follow this statement shape or use the generated function.
 
 ## Security and RLS
 
@@ -36,7 +45,7 @@ PostgREST can expose a schema containing generated views. Keep source tables in 
 
 ## MERGE
 
-Native SQL `MERGE` uses the same insert and update semantics as direct writes to the generated view. A matched update must supply the complete document and the client's ETag. A not-matched insert expresses explicit permission to create or recreate that identity. Source keys must be unique. Delete actions are outside the supported subset; use the generated ETag-aware delete function. The complete contract is in [`MERGE.md`](MERGE.md).
+Native SQL `MERGE` uses the same insert, update and delete triggers as direct writes to the generated view. A matched update must supply the complete document and the client's ETag. A matched delete must put the client ETag in a `WHEN MATCHED AND` condition while `ON` matches only the identity. A not-matched insert expresses explicit permission to create or recreate that identity. Source keys must be unique. The complete contract is in [`MERGE.md`](MERGE.md).
 
 ## Known limits
 

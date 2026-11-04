@@ -74,7 +74,8 @@ INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');""")
     }
     create_view(db, "jt_integrity.documents", spec)
 
-    direct = db.run("DELETE FROM jt_integrity.documents WHERE _id=1;", False)
+    mismatch = db.run("DELETE FROM jt_integrity.documents WHERE _id=1 "
+                      "AND data#>>'{_metadata,etag}'='wrong';", False)
     missing = db.run("SELECT jt_integrity.documents__delete_document(1,NULL);", False)
     stale = db.run("SELECT jt_integrity.documents__delete_document(1,'stale');", False)
     preserved = db.value("SELECT count(*) FROM jt_integrity.root WHERE id=1;")
@@ -86,17 +87,37 @@ INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');""")
                        "SELECT pg_sleep(1);COMMIT;")
     writer.stdin.close(); time.sleep(.2)
     started = time.monotonic()
-    raced = db.run(f"SELECT jt_integrity.documents__delete_document(1,{quote(etag)});", False)
+    raced = db.run("DELETE FROM jt_integrity.documents WHERE _id=1 "
+                   f"AND data#>>'{{_metadata,etag}}'={quote(etag)};", False)
     elapsed = time.monotonic() - started
     writer.wait(timeout=10)
+    related_races = []
+    for concurrent_sql in (
+        "UPDATE jt_integrity.child SET value='concurrent-child' WHERE parent=1;",
+        "UPDATE jt_integrity.ref SET label='concurrent-object' WHERE id=7;",
+    ):
+        etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
+        writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        assert writer.stdin
+        writer.stdin.write("BEGIN;" + concurrent_sql + "SELECT pg_sleep(1);COMMIT;")
+        writer.stdin.close(); time.sleep(.2)
+        started_related = time.monotonic()
+        related = db.run("DELETE FROM jt_integrity.documents WHERE _id=1 "
+                         f"AND data#>>'{{_metadata,etag}}'={quote(etag)};", False)
+        related_elapsed = time.monotonic() - started_related
+        writer.wait(timeout=10)
+        related_races.append((db.state(related), related_elapsed))
     etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
-    valid = db.run(f"SELECT jt_integrity.documents__delete_document(1,{quote(etag)});", False)
-    record("delete requires expected ETag",
-           db.state(direct) == "PT428" and db.state(missing) == "PT428"
+    valid = db.run("DELETE FROM jt_integrity.documents WHERE _id=1 "
+                   f"AND data#>>'{{_metadata,etag}}'={quote(etag)};", False)
+    record("delete rechecks the selected ETag after locking",
+           mismatch.returncode == 0 and db.state(missing) == "PT428"
            and db.state(stale) == "PT412" and db.state(raced) == "PT412" and elapsed > .6
+           and all(state == "PT412" and duration > .6 for state, duration in related_races)
            and preserved == "1" and valid.returncode == 0,
-           f"direct={db.state(direct)},missing={db.state(missing)},stale={db.state(stale)},"
-           f"race={db.state(raced)}/{elapsed:.3f}s,valid={valid.returncode}")
+           f"mismatch={mismatch.returncode},missing={db.state(missing)},stale={db.state(stale)},"
+           f"root_race={db.state(raced)}/{elapsed:.3f}s,related={related_races},valid={valid.returncode}")
 
     db.run("INSERT INTO jt_integrity.root VALUES(1.00,7,'one');"
            "INSERT INTO jt_integrity.child(parent,value) VALUES(1.00,'first');")

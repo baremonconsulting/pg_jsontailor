@@ -104,8 +104,10 @@ class Runner:
 
     def test8(self):
         obs=[]; passed=True
-        self.reset(); direct=self.state(self.run("DELETE FROM shop.orders_dv WHERE _id=42;",False)); deleted=self.run(self.delete_sql(),False); remain=self.scalar("SELECT count(*) FROM shop.order_items WHERE order_id=42;")
-        obs.append(f"v1={direct}/{deleted.returncode}/{remain}"); passed &= direct=="PT428" and deleted.returncode==0 and remain=="0"
+        self.reset(); etag=self.scalar("SELECT data#>>'{_metadata,etag}' FROM shop.orders_dv WHERE _id=42;")
+        mismatch=self.run("DELETE FROM shop.orders_dv WHERE _id=42 AND data#>>'{_metadata,etag}'='wrong';",False)
+        deleted=self.run("DELETE FROM shop.orders_dv WHERE _id=42 AND data#>>'{_metadata,etag}'="+lit(etag)+";",False); remain=self.scalar("SELECT count(*) FROM shop.order_items WHERE order_id=42;")
+        obs.append(f"v1={mismatch.returncode}/{deleted.returncode}/{remain}"); passed &= mismatch.returncode==0 and deleted.returncode==0 and remain=="0"
         v4=json.loads(self.spec.read_text()); v4["array"]["delete"]=False
         self.reset(v4); p=self.run(self.delete_sql(),False); state=self.state(p)
         obs.append("not_null="+str(state)); passed &= state=="23502"

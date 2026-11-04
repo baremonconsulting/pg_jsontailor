@@ -123,13 +123,18 @@ def main() -> int:
     incomplete = document(db); incomplete.pop("label")
     incomplete_result = db.run(merge_sql("VALUES(1," + literal(json.dumps(incomplete)) + "::jsonb)",
         "WHEN MATCHED THEN UPDATE SET data=source.doc"), False)
-    delete_result = db.run(merge_sql("VALUES(1," + literal(json.dumps(document(db))) + "::jsonb)",
-        "WHEN MATCHED THEN DELETE"), False)
+    delete_doc = document(db)
+    wrong_delete = json.loads(json.dumps(delete_doc)); wrong_delete["_metadata"]["etag"] = "wrong"
+    skipped_delete = db.run(merge_sql("VALUES(1," + literal(json.dumps(wrong_delete)) + "::jsonb)",
+        "WHEN MATCHED AND target.data#>>'{_metadata,etag}'=source.doc#>>'{_metadata,etag}' THEN DELETE"), False)
+    delete_result = db.run(merge_sql("VALUES(1," + literal(json.dumps(delete_doc)) + "::jsonb)",
+        "WHEN MATCHED AND target.data#>>'{_metadata,etag}'=source.doc#>>'{_metadata,etag}' THEN DELETE"), False)
     record("replacement preconditions",
            [db.state(stale_result), db.state(missing_result), db.state(incomplete_result),
-            db.state(delete_result)] == ["PT412", "PT428", "PT422", "PT428"],
+            db.state(delete_result)] == ["PT412", "PT428", "PT422", None]
+           and skipped_delete.returncode == 0 and delete_result.returncode == 0,
            str([db.state(stale_result), db.state(missing_result), db.state(incomplete_result),
-                db.state(delete_result)]))
+                db.state(delete_result), skipped_delete.returncode]))
 
     # An invalid action rolls back every row change made by the statement.
     setup(db)
@@ -244,7 +249,7 @@ CREATE POLICY merge_update ON jt_merge.roots FOR UPDATE TO jt_merge_user USING(f
            and db.value("SELECT count(*) FROM jt_merge.roots WHERE id=50;") == "1",
            f"writer={writer.returncode},contender={db.state(contender)}")
 
-    # A client token remains effective across a concurrent update; recreation is explicit.
+    # A client token remains effective across concurrent UPDATE and DELETE; recreation is explicit.
     setup(db); stale_update = document(db); stale_update["label"] = "client"
     writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -254,15 +259,27 @@ CREATE POLICY merge_update ON jt_merge.roots FOR UPDATE TO jt_merge_user USING(f
     concurrent = db.run(merge_sql("VALUES(1," + literal(json.dumps(stale_update)) + "::jsonb)",
         "WHEN MATCHED THEN UPDATE SET data=source.doc"), False)
     writer.wait(timeout=10)
+    setup(db); stale_delete = document(db)
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_merge.roots SET label='concurrent' WHERE id=1;SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    concurrent_delete = db.run(merge_sql(
+        "VALUES(1," + literal(json.dumps(stale_delete)) + "::jsonb)",
+        "WHEN MATCHED AND target.data#>>'{_metadata,etag}'=source.doc#>>'{_metadata,etag}' THEN DELETE"), False)
+    writer.wait(timeout=10)
     deleted = document(db); etag = deleted["_metadata"]["etag"]
     db.run("SELECT jt_merge.documents__delete_document(1," + literal(etag) + ");")
     recreate = db.run(merge_sql("VALUES(1," + literal(json.dumps(deleted)) + "::jsonb)",
         "WHEN MATCHED THEN UPDATE SET data=source.doc",
         "WHEN NOT MATCHED THEN INSERT(data) VALUES(source.doc)"), False)
     record("concurrent update and explicit recreation",
-           db.state(concurrent) == "PT412" and recreate.returncode == 0
+           db.state(concurrent) == "PT412" and db.state(concurrent_delete) == "PT412"
+           and recreate.returncode == 0
            and db.value("SELECT count(*) FROM jt_merge.roots WHERE id=1;") == "1",
-           f"concurrent={db.state(concurrent)},recreate={recreate.returncode}")
+           f"update={db.state(concurrent)},delete={db.state(concurrent_delete)},"
+           f"recreate={recreate.returncode}")
 
     # Reused insert/update paths retain nested validation and relation-binding checks.
     setup(db)

@@ -314,10 +314,16 @@ BEGIN
   ELSE
     IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
     root_id:=OLD._id;
-    RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='expected_etag is required; use the generated delete function';
     n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',%L,%L,%L) INTO n USING root_id;IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE %%I=$1)',%L,%L,%L) INTO changed USING root_id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RETURN NULL;END IF;END IF;
-    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO n USING root_id;IF n<(SELECT jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;END IF;
-    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN expected:=n;IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',%L,%L,%L) USING root_id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE %%I=$1',%L,%L,%L,%L) USING root_id;END IF;GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;END IF;
+    IF cfg?'object' AND (cfg#>>'{object,etag}')::boolean AND jsonb_typeof(OLD.data->(cfg#>>'{object,name}'))='object' THEN
+      EXECUTE format('SELECT count(*) FROM (SELECT o.%%I FROM %%I.%%I o JOIN %%I.%%I r ON o.%%I=r.%%I WHERE r.%%I=$1 FOR UPDATE OF o)s',cfg#>>'{object,key}',(parse_ident(cfg#>>'{object,table}'))[1],(parse_ident(cfg#>>'{object,table}'))[2],(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{object,key}',cfg#>>'{object,root_fk}',cfg#>>'{root,key}') INTO n USING root_id;
+      IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking referenced object';END IF;
+    END IF;
+    expected:=0;IF cfg?'array' THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO expected USING root_id;END IF;
+    EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING root_id INTO cur;
+    IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM OLD.data#>>'{_metadata,etag}' THEN RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='etag does not match after locking';END IF;
+    IF cfg?'array' AND expected<jsonb_array_length(cur->(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;
+    IF cfg?'array' AND expected>0 THEN IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',%L,%L,%L) USING root_id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE %%I=$1',%L,%L,%L,%L) USING root_id;END IF;GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;END IF;
     EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',%L,%L,%L) USING root_id;GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;RETURN OLD;
   END IF;
 END
@@ -387,6 +393,7 @@ $body$,
  array_table,
  cfg#>>'{array,parent_fk}',
  cfg#>>'{array,key}',
+ qview,
  array_schema,
  array_table,
  cfg#>>'{array,parent_fk}',
@@ -405,11 +412,17 @@ BEGIN
   IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
   n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO n USING expected_id;
   IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE %%I=$1)',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO changed USING expected_id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='document no longer exists';END IF;END IF;
+  IF cfg?'object' AND (cfg#>>'{object,etag}')::boolean THEN
+    EXECUTE format('SELECT count(*) FROM (SELECT o.%%I FROM %%I.%%I o JOIN %%I.%%I r ON o.%%I=r.%%I WHERE r.%%I=$1 FOR UPDATE OF o)s',cfg#>>'{object,key}',(parse_ident(cfg#>>'{object,table}'))[1],(parse_ident(cfg#>>'{object,table}'))[2],(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{object,key}',cfg#>>'{object,root_fk}',cfg#>>'{root,key}') INTO n USING expected_id;
+  END IF;
+  expected:=0;IF cfg?'array' THEN
+    EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}') INTO expected USING expected_id;
+  END IF;
   EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING expected_id INTO cur;
   IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM expected_etag THEN RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='etag does not match';END IF;
-  IF cfg?'array' AND jsonb_array_length(cur->(cfg#>>'{array,name}'))>0 THEN
-    EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}') INTO expected USING expected_id;
-    IF expected<jsonb_array_length(cur->(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;
+  IF cfg?'object' AND (cfg#>>'{object,etag}')::boolean AND jsonb_typeof(cur->(cfg#>>'{object,name}'))='object' AND n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking referenced object';END IF;
+  IF cfg?'array' AND expected<jsonb_array_length(cur->(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;
+  IF cfg?'array' AND expected>0 THEN
     IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}') USING expected_id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE %%I=$1',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,parent_fk}') USING expected_id;END IF;
     GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;
   END IF;
