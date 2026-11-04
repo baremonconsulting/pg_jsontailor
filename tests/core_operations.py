@@ -198,6 +198,61 @@ WHERE _id=42;
         deleter.wait(timeout=10); state=self.state(result); observations.append(f"d:{state}"); passed &= state=="PT412"
         self.record("5", "direct-write race semantics", ";".join(observations), passed)
 
+    def test6(self) -> None:
+        observations = []
+        self.reset()
+        correlated = self.run("""
+UPDATE shop.orders_dv AS target
+SET data=jsonb_set(
+    (SELECT source.data FROM shop.orders_dv AS source WHERE source._id=target._id),
+    '{status}', '"correlated"'::jsonb)
+WHERE target._id=42;
+""", False)
+        correlated_value = self.scalar("SELECT status FROM shop.orders WHERE order_id=42;")
+        observations.append(f"correlated={correlated.returncode}/{correlated_value}")
+
+        self.reset()
+        materialised = self.run("""
+WITH source AS MATERIALIZED (
+    SELECT data FROM shop.orders_dv WHERE _id=42
+)
+UPDATE shop.orders_dv
+SET data=jsonb_set((SELECT data FROM source),'{status}','"materialised"'::jsonb)
+WHERE _id=42;
+""", False)
+        materialised_value = self.scalar("SELECT status FROM shop.orders WHERE order_id=42;")
+        observations.append(f"materialised={materialised.returncode}/{materialised_value}")
+
+        self.reset()
+        old_etag = self.scalar("SELECT data#>>'{_metadata,etag}' FROM shop.orders_dv WHERE _id=42;")
+        self.run("UPDATE shop.orders SET status='direct' WHERE order_id=42;")
+        filtered = self.run("UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"client\"') "
+                            "WHERE _id=42 AND data#>>'{_metadata,etag}'=" + literal(old_etag) + ";", False)
+        filtered_value = self.scalar("SELECT status FROM shop.orders WHERE order_id=42;")
+        observations.append(f"filtered={filtered.returncode}/{filtered_value}")
+
+        self.reset()
+        old_etag = self.scalar("SELECT data#>>'{_metadata,etag}' FROM shop.orders_dv WHERE _id=42;")
+        writer = subprocess.Popen(self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        assert writer.stdin is not None
+        writer.stdin.write("BEGIN;UPDATE shop.orders SET status='concurrent' WHERE order_id=42;"
+                           "SELECT pg_sleep(1);COMMIT;")
+        writer.stdin.close(); time.sleep(.2)
+        started = time.monotonic()
+        raced = self.run("UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"client\"') "
+                         "WHERE _id=42 AND data#>>'{_metadata,etag}'=" + literal(old_etag) + ";", False)
+        elapsed = time.monotonic() - started
+        writer.wait(timeout=10)
+        race_state = self.state(raced)
+        observations.append(f"race={race_state}/{elapsed:.3f}s")
+        passed = (correlated.returncode == 0 and correlated_value == "correlated"
+                  and materialised.returncode == 0 and materialised_value == "materialised"
+                  and filtered.returncode == 0 and filtered_value == "direct"
+                  and race_state == "PT412" and elapsed >= .6)
+        self.record("6", "inline complete-document construction with client ETag",
+                    ";".join(observations), passed)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -208,7 +263,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     harness = Harness(args.psql, args.database, args.schema, args.spec)
-    for test in (harness.test1, harness.test2, harness.test3, harness.test4, harness.test5):
+    for test in (harness.test1, harness.test2, harness.test3, harness.test4, harness.test5,
+                 harness.test6):
         test()
         print(harness.results[-1])
     args.output.parent.mkdir(parents=True, exist_ok=True)

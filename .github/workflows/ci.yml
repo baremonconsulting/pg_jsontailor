@@ -154,7 +154,7 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/merge-results.jsonl"
-          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 5
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 6
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/validation-results.jsonl")" -eq 13
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 7
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/merge-results.jsonl")" -eq 10

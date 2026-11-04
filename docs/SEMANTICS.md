@@ -18,7 +18,9 @@ An insert validates the complete document, creates the root row and then creates
 
 ## Replacement
 
-An update is a complete document replacement, not a partial patch. The root identity cannot change. Child rows are reconciled by key using set-based insert, update and delete operations. Operation flags in the specification determine which changes are allowed.
+An update is a complete document replacement, not a partial patch. `NEW.data` must be a complete valid document, but the client may pass only the identity, an earlier ETag and changed values while PostgreSQL constructs that document from the current view row in the statement. The root identity cannot change. Child rows are reconciled by key using set-based insert, update and delete operations. Operation flags in the specification determine which changes are allowed.
+
+When the client ETag is included in `WHERE`, an initially stale token selects no row and returns `UPDATE 0`. If a change occurs after row selection while the trigger waits for locks, the trigger's post-lock comparison returns `PT412`.
 
 ## Delete
 

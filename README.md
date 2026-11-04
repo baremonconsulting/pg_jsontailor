@@ -123,23 +123,17 @@ FROM api.orders_dv
 WHERE _id = 1001;
 ```
 
-For updates, retain the complete document including the `_metadata.etag` value from the preceding read, change the intended field and send the complete replacement:
+Updates are complete-document replacements, but the client does not have to retain or transmit the complete JSON value. It can pass the identity, the ETag from an earlier read and the new field value; PostgreSQL can construct complete `NEW.data` inside the statement:
 
 ```sql
-CREATE TEMP TABLE client_document AS
-SELECT data FROM api.orders_dv WHERE _id = 1001;
-
 UPDATE api.orders_dv
-SET data = jsonb_set(
-    (SELECT data FROM client_document),
-    '{status}',
-    '"approved"'::jsonb
-)
-WHERE _id = 1001
+SET data = jsonb_set(data, '{status}', to_jsonb($3::text))
+WHERE _id = $1
+  AND data #>> '{_metadata,etag}' = $2
 RETURNING data;
 ```
 
-A stale ETag is rejected atomically. Reading `data` directly inside the `UPDATE` would not test an external client's earlier token.
+Here `$1` is the root identity, `$2` is the ETag retained from the client's earlier read and `$3` is the new status. An ETag that is already stale selects no row and returns `UPDATE 0`. If the document changes after row selection while the trigger waits for locks, the post-lock check returns `PT412`. The value ultimately passed to the trigger must still be a complete valid document; it may be assembled from `data`, a correlated subquery or a materialised CTE in the same statement.
 
 Delete through the generated function and pass the identifier and ETag explicitly:
 
