@@ -29,6 +29,9 @@ jobs:
       - name: Verify extension SQL
         run: python3 tools/verify_extension_sql.py
 
+      - name: Verify repository consistency
+        run: python3 tools/verify_repository_consistency.py
+
       - name: Check repository hygiene
         shell: bash
         run: |

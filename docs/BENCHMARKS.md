@@ -12,7 +12,7 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The current reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster.
+The current reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster. The complete [reference evidence](../bench/reference/azure-04d053e/) and [baseline evidence](../bench/reference/azure-acecaae/) are versioned with this repository.
 
 ## Set-based reconciliation result
 
@@ -45,7 +45,7 @@ The MERGE groups execute native PostgreSQL MERGE against both the generated docu
 | 1,000 | UPDATE | 41.855 ms | 42.133 ms | 6.104 ms |
 | 1,000 | ETag-checked DELETE | 17.215 ms | 17.367 ms | 2.778 ms |
 
-Against `acecaae` on the same Azure VM, complete replacement improved by 7.6% at zero children, 30.9% at one, 26.2% at ten, 14.3% at 100 and 7.3% at 1,000. Insert medians increased by 18.1–38.7% depending on document size; this is the main path selected for further profiling. Read medians remained within approximately ±5%.
+Against `acecaae` on the same Azure VM, complete replacement improved by 7.9% at zero children, 32.1% at one, 26.6% at ten, 14.9% at 100 and 6.9% at 1,000. Insert medians increased by 5.5–56.7% depending on document size; this is the main path selected for further profiling. Read medians remained within approximately ±5%.
 
 Delete results are not equivalent to the old baseline. The current path locks the root, ETag-covered referenced object and child rows, reads the document again and validates its post-lock ETag before mutation. The baseline did not provide that contract.
 
@@ -68,4 +68,4 @@ python3 bench/duality_overhead.py \
   --output results/duality-benchmark-reference
 ```
 
-The target database is dropped and recreated, so use a dedicated disposable name. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together with the exact source commit when publishing results. Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline.
+The target database is dropped and recreated, so use a dedicated disposable name. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together with the exact source commit when publishing results. Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline. Run `python3 tools/verify_repository_consistency.py` before publishing changed reference data or release metadata.

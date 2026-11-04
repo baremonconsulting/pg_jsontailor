@@ -91,4 +91,4 @@ The same predicate pattern applies to updates. The client may provide only the i
 
 ## Native SQL MERGE
 
-Native PostgreSQL `MERGE` can use the generated view for a tested subset of insert, complete replacement and `DO NOTHING` actions. It reuses the generated action-specific triggers. Match only on the typed root identity and make source keys unique before the statement. See [`MERGE.md`](MERGE.md) for the exact contract, staging example and concurrency limits.
+Native PostgreSQL `MERGE` can use the generated view for a tested subset of insert, complete replacement, ETag-checked delete and `DO NOTHING` actions. It reuses the generated action-specific triggers. Match only on the typed root identity, place a delete ETag check in the matched-action condition and make source keys unique before the statement. See [`MERGE.md`](MERGE.md) for the exact contract, staging examples and concurrency limits.

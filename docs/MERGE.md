@@ -1,6 +1,6 @@
 # Native SQL MERGE
 
-PostgreSQL `MERGE` can route document inserts and complete replacements through a generated `pg_jsontailor` view. PostgreSQL selects the existing `INSTEAD OF INSERT` or `INSTEAD OF UPDATE` trigger for each action; the extension does not implement a separate MERGE engine.
+PostgreSQL `MERGE` can route document inserts, complete replacements and ETag-checked deletes through a generated `pg_jsontailor` view. PostgreSQL selects the existing action-specific `INSTEAD OF` trigger; the extension does not implement a separate MERGE engine.
 
 ## Supported subset
 
@@ -72,4 +72,4 @@ The delete trigger locks the state included in the ETag, reads the document agai
 
 The supported subset does not include actions that mutate targets absent from the source. The generated `<view>__delete_document(expected_id, expected_etag)` function remains available for an explicit-argument SQL or PostgREST RPC contract.
 
-All mapping flags, input validation, invoker privileges, row-level security policies and relation-binding checks remain applicable because MERGE reuses the generated insert and update paths.
+All mapping flags, input validation, invoker privileges, row-level security policies and relation-binding checks remain applicable because MERGE reuses the generated insert, update and delete paths.
