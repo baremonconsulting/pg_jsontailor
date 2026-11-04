@@ -50,13 +50,17 @@ jobs:
       PGPORT: '55432'
       PGUSER: runner
       PGDATABASE: postgres
-      PG_CONFIG: /usr/lib/postgresql/${{ matrix.postgresql }}/bin/pg_config
-      PGBIN: /usr/lib/postgresql/${{ matrix.postgresql }}/bin
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install PostgreSQL ${{ matrix.postgresql }}
+      - name: Set PostgreSQL paths
+        run: |
+          echo "PG_CONFIG=$RUNNER_TEMP/pgsql/bin/pg_config" >> "$GITHUB_ENV"
+          echo "PGBIN=$RUNNER_TEMP/pgsql/bin" >> "$GITHUB_ENV"
+
+      - name: Install PostgreSQL ${{ matrix.postgresql }} packages
+        if: matrix.postgresql != '19'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,6 +75,29 @@ jobs:
           sudo apt-get install --no-install-recommends \
             "postgresql-${{ matrix.postgresql }}" \
             "postgresql-server-dev-${{ matrix.postgresql }}"
+          ln -s "/usr/lib/postgresql/${{ matrix.postgresql }}" "$RUNNER_TEMP/pgsql"
+
+      - name: Build PostgreSQL 19 release candidate
+        if: matrix.postgresql == '19'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/postgresql-19rc1.tar.bz2"
+          source_dir="$RUNNER_TEMP/postgresql-19rc1"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://ftp.postgresql.org/pub/source/v19rc1/postgresql-19rc1.tar.bz2 \
+            -o "$archive"
+          echo 'af105fc8e960fc836a09fc2cd7f582b49fd17675d9d36631abe3a565bfd7d701  '"$archive" \
+            | sha256sum --check --strict
+          tar -xjf "$archive" -C "$RUNNER_TEMP"
+          cd "$source_dir"
+          ./configure \
+            --prefix="$RUNNER_TEMP/pgsql" \
+            --without-icu \
+            --without-readline \
+            --without-zlib
+          make -s -j2
+          make -s install
 
       - name: Start isolated PostgreSQL instance
         shell: bash
@@ -118,7 +145,7 @@ jobs:
 
       - name: Show PostgreSQL log on failure
         if: failure()
-        run: cat "$RUNNER_TEMP/postgresql.log"
+        run: test ! -f "$RUNNER_TEMP/postgresql.log" || cat "$RUNNER_TEMP/postgresql.log"
 
       - name: Stop PostgreSQL
         if: always()
