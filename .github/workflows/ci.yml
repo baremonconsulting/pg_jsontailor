@@ -65,7 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-          curl --proto '=https' --tlsv1.2 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
+            --connect-timeout 20 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
             | gpg --dearmor \
             | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
           . /etc/os-release
@@ -84,7 +85,8 @@ jobs:
           set -euo pipefail
           archive="$RUNNER_TEMP/postgresql-19rc1.tar.bz2"
           source_dir="$RUNNER_TEMP/postgresql-19rc1"
-          curl --proto '=https' --tlsv1.2 -fsSL \
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
+            --connect-timeout 20 -fsSL \
             https://ftp.postgresql.org/pub/source/v19rc1/postgresql-19rc1.tar.bz2 \
             -o "$archive"
           echo 'af105fc8e960fc836a09fc2cd7f582b49fd17675d9d36631abe3a565bfd7d701  '"$archive" \
