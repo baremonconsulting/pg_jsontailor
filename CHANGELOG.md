@@ -6,13 +6,14 @@ All notable changes to `pg_jsontailor` are documented in this file.
 
 - Added catalogue-driven generation of writable JSON document views.
 - Added root, optional object and optional array mappings.
-- Added insert, full-document replacement and delete triggers.
+- Added insert, full-document replacement and ETag-guarded delete paths.
 - Added document ETags and optimistic concurrency checks.
 - Added validation for specifications, catalogue objects and supported types.
 - Added invoker-rights and row-level security coverage.
 - Added PGXS regression and isolation tests.
 - Added PostgREST and Oracle ORDS comparison scenarios.
 - Reworked array reconciliation to use set-based operations.
+- Added typed key reconciliation, nested input validation and source-relation binding checks.
 - Added synthetic pilot and reproducible benchmark tooling.
 - Added PostgreSQL 17, 18 and 19 compatibility and continuous-test coverage.
 

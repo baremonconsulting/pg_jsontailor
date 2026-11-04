@@ -56,6 +56,11 @@ class Runner:
     def error_for_doc(self, expression):
         return self.state(self.run(f"UPDATE shop.orders_dv SET data={expression} WHERE _id=42;", False))
 
+    def delete_sql(self, view="shop.orders_dv", ident="42"):
+        function = view + "__delete_document"
+        return (f"SELECT {function}({ident},"
+                f"(SELECT data#>>'{{_metadata,etag}}' FROM {view} WHERE _id={ident}));")
+
     def test6(self):
         self.reset()
         states = {
@@ -99,17 +104,17 @@ class Runner:
 
     def test8(self):
         obs=[]; passed=True
-        self.reset(); deleted=self.scalar("DELETE FROM shop.orders_dv WHERE _id=42 RETURNING _id;"); remain=self.scalar("SELECT count(*) FROM shop.order_items WHERE order_id=42;")
-        obs.append(f"v1={deleted}/{remain}"); passed &= remain=="0"
+        self.reset(); direct=self.state(self.run("DELETE FROM shop.orders_dv WHERE _id=42;",False)); deleted=self.run(self.delete_sql(),False); remain=self.scalar("SELECT count(*) FROM shop.order_items WHERE order_id=42;")
+        obs.append(f"v1={direct}/{deleted.returncode}/{remain}"); passed &= direct=="PT428" and deleted.returncode==0 and remain=="0"
         v4=json.loads(self.spec.read_text()); v4["array"]["delete"]=False
-        self.reset(v4); p=self.run("DELETE FROM shop.orders_dv WHERE _id=42;",False); state=self.state(p)
+        self.reset(v4); p=self.run(self.delete_sql(),False); state=self.state(p)
         obs.append("not_null="+str(state)); passed &= state=="23502"
         self.reset();self.run("DELETE FROM shop.order_items WHERE order_id=42;CREATE TABLE shop.notes(note_id bigint PRIMARY KEY,order_id bigint REFERENCES shop.orders(order_id),value text);INSERT INTO shop.notes VALUES(1,42,'n');")
         nv={"root":{"table":"shop.orders","key":"order_id","fields":{"status":"status"},"delete":True},"array":{"name":"notes","table":"shop.notes","key":"note_id","parent_fk":"order_id","fields":{"noteId":"note_id","value":"value"},"delete":False}}
-        self.run("SELECT jsontailor.create_duality_view('shop.notes_dv',"+lit(json.dumps(nv))+"::jsonb);");p=self.run("DELETE FROM shop.notes_dv WHERE _id=42;",False);unlinked=self.scalar("SELECT count(*) FROM shop.notes WHERE note_id=1 AND order_id IS NULL;")
+        self.run("SELECT jsontailor.create_duality_view('shop.notes_dv',"+lit(json.dumps(nv))+"::jsonb);");p=self.run(self.delete_sql("shop.notes_dv"),False);unlinked=self.scalar("SELECT count(*) FROM shop.notes WHERE note_id=1 AND order_id IS NULL;")
         obs.append(f"v4={p.returncode}/{self.state(p)}/{unlinked}");passed &= p.returncode==0 and unlinked=="1"
         v2=json.loads(self.spec.read_text()); v2["root"]["delete"]=False
-        self.reset(v2); state=self.state(self.run("DELETE FROM shop.orders_dv WHERE _id=42;",False)); obs.append("forbidden="+str(state)); passed &= state=="PT422"
+        self.reset(v2); state=self.state(self.run(self.delete_sql(),False)); obs.append("forbidden="+str(state)); passed &= state=="PT422"
         self.reset(); self.run("DELETE FROM shop.order_items WHERE order_id=42; DELETE FROM shop.orders WHERE order_id=42;"); count=self.scalar("SELECT count(*) FROM shop.orders_dv WHERE _id=42;")
         obs.append("absent="+count); passed &= count=="0"
         self.add(8,"V1,V4","PASS" if passed else "FAIL","delete, unlink/NOT NULL, absent and forbidden cases",";".join(obs))
@@ -133,20 +138,20 @@ class Runner:
         self.run("ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY c_sel ON shop.order_items FOR SELECT TO jt_test_data USING(item_id<>2);CREATE POLICY c_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(true);CREATE POLICY c_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
         visible=self.scalar("SET ROLE jt_test_data;SELECT jsonb_array_length(data->'items') FROM shop.orders_dv WHERE _id=42;")
         p=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"rls\"') WHERE _id=42;RESET ROLE;",False); hidden=self.scalar("SELECT count(*) FROM shop.order_items WHERE item_id=2;")
-        d=self.run("SET ROLE jt_test_data;DELETE FROM shop.orders_dv WHERE _id=42;",False);obs.append(f"c={visible}/{p.returncode}/{hidden}/{self.state(d)}");passed &= visible=="1" and p.returncode==0 and hidden=="1" and self.state(d)=="23503"
+        d=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False);obs.append(f"c={visible}/{p.returncode}/{hidden}/{self.state(d)}");passed &= visible=="1" and p.returncode==0 and hidden=="1" and self.state(d)=="23503"
         # d: hidden referenced object reads null and an unrelated update preserves the FK.
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.customers ENABLE ROW LEVEL SECURITY;CREATE POLICY d_sel ON shop.customers FOR SELECT TO jt_test_data USING(customer_id<>7);")
         obj=self.scalar("SET ROLE jt_test_data;SELECT jsonb_typeof(data->'customer') FROM shop.orders_dv WHERE _id=42;");p=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"rls\"') WHERE _id=42;",False);fk=self.scalar("SELECT customer_id FROM shop.orders WHERE order_id=42;");obs.append(f"d={obj}/{p.returncode}/{fk}");passed &= obj=="null" and p.returncode==0 and fk=="7"
         # f: root visible for SELECT but filtered by UPDATE; both replacement and delete fail atomically.
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.orders ENABLE ROW LEVEL SECURITY;CREATE POLICY f_sel ON shop.orders FOR SELECT TO jt_test_data USING(true);CREATE POLICY f_upd ON shop.orders FOR UPDATE TO jt_test_data USING(false);CREATE POLICY f_del ON shop.orders FOR DELETE TO jt_test_data USING(true);")
-        fu=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"blocked\"') WHERE _id=42;",False);fd=self.run("SET ROLE jt_test_data;DELETE FROM shop.orders_dv WHERE _id=42;",False);obs.append(f"f={self.state(fu)}/{self.state(fd)}");passed &= self.state(fu)=="42501" and self.state(fd)=="42501"
+        fu=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"blocked\"') WHERE _id=42;",False);fd=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False);obs.append(f"f={self.state(fu)}/{self.state(fd)}");passed &= self.state(fu)=="42501" and self.state(fd)=="42501"
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY fd_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY fd_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(true);CREATE POLICY fd_del ON shop.order_items FOR DELETE TO jt_test_data USING(false);")
-        fdu=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items}',(data->'items')-0) WHERE _id=42;",False);fdd=self.run("SET ROLE jt_test_data;DELETE FROM shop.orders_dv WHERE _id=42;",False);obs.append(f"f_child_delete={self.state(fdu)}/{self.state(fdd)}");passed &= self.state(fdu)=="42501" and self.state(fdd)=="42501"
+        fdu=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items}',(data->'items')-0) WHERE _id=42;",False);fdd=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False);obs.append(f"f_child_delete={self.state(fdu)}/{self.state(fdd)}");passed &= self.state(fdu)=="42501" and self.state(fdd)=="42501"
         # e and g: hostile path; visible but non-lockable children.
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;CREATE SCHEMA IF NOT EXISTS rusive_schema;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
         status=self.run("SET ROLE jt_test_data;SET search_path=rusive_schema,pg_catalog;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"ok\"') WHERE _id=42;",False)
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
-        changed=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items,0,qty}','3') WHERE _id=42;",False);deleted=self.run("SET ROLE jt_test_data;DELETE FROM shop.orders_dv WHERE _id=42;",False)
+        changed=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items,0,qty}','3') WHERE _id=42;",False);deleted=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False)
         # g1: an uncommitted direct child change must not make the view deletion wait.
         direct=subprocess.Popen(self.cmd(),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert direct.stdin
         direct.stdin.write("BEGIN;UPDATE shop.order_items SET quantity=9 WHERE item_id=1;SELECT pg_sleep(1);COMMIT;");direct.stdin.close();time.sleep(.2)

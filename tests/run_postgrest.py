@@ -56,8 +56,13 @@ def main() -> int:
                     "items": [{"product": "REST item", "qty": 1, "price": 2.50}]}
     post_status, _, raw = call("POST", "/orders_dv", {"data": new_document},
                                {"Prefer": "return=representation"})
-    new_id = json.loads(raw)[0]["_id"]
-    delete_status, _, _ = call("DELETE", f"/orders_dv?_id=eq.{new_id}")
+    inserted = json.loads(raw)[0]
+    new_id = inserted["_id"]
+    direct_delete_status, _, _ = call("DELETE", f"/orders_dv?_id=eq.{new_id}")
+    delete_status, _, _ = call("POST", "/rpc/orders_dv__delete_document", {
+        "expected_id": new_id,
+        "expected_etag": inserted["data"]["_metadata"]["etag"],
+    })
     options_status, options_headers, _ = call("OPTIONS", "/orders_dv")
     table_get, _, _ = call("GET", "/orders")
     table_patch, _, _ = call("PATCH", "/order_items?id=eq.1", {"quantity": 99})
@@ -65,7 +70,8 @@ def main() -> int:
     allow = options_headers.get("Allow", "")
     expected = [status == 200, patch_status == 200, stale_status == 412,
                 missing_status == 428, incomplete_status == 422,
-                post_status == 201, delete_status == 204, options_status == 200,
+                post_status == 201, direct_delete_status == 428,
+                delete_status == 200, options_status == 200,
                 all(method in allow for method in ("POST", "PATCH", "DELETE")),
                 table_get == 404, table_patch == 404]
     passed = all(expected)
@@ -79,10 +85,11 @@ def main() -> int:
     args.transcript.parent.mkdir(parents=True, exist_ok=True)
     args.transcript.write_text("\n".join(lines))
     result = {"id": "13", "variant": "V1/api", "status": "PASS" if passed else "FAIL",
-              "expected": "200/201/204, PT412=412, PT428=428, PT422=422, hidden tables=404",
+              "expected": "200/201, PT412=412, PT428=428, PT422=422, hidden tables=404",
               "observed": {"get": status, "patch": patch_status, "stale": stale_status,
                            "missing": missing_status, "incomplete": incomplete_status,
-                           "post": post_status, "delete": delete_status, "options": options_status,
+                           "post": post_status, "direct_delete": direct_delete_status,
+                           "delete_rpc": delete_status, "options": options_status,
                            "allow": allow, "table_get": table_get, "table_patch": table_patch},
               "evidence": str(args.transcript), "notes": "PATCH replaces the data document"}
     args.result.write_text(json.dumps(result, sort_keys=True) + "\n")

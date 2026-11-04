@@ -65,8 +65,8 @@ def normalise(doc):
     return value
 
 
-def http(label, method="GET", query="", document=None, prefer=False):
-    body = None if document is None else {"data": document}
+def http(label, method="GET", query="", document=None, prefer=False, raw_body=False):
+    body = None if document is None else (document if raw_body else {"data": document})
     payload = None if body is None else json.dumps(body, separators=(",", ":")).encode()
     headers = {"Accept": "application/json"}
     if payload is not None: headers["Content-Type"] = "application/json"
@@ -190,10 +190,16 @@ try:
     BASE=old_base
     add_check("rest-surface", hidden_status==404, hidden_status, 404)
 
-    # Delete one of the five documents.
-    sd,_,_=http("delete document 205", "DELETE", "?_id=eq.205")
+    # Delete one of the five documents through the ETag-aware RPC.
+    _, rows, _ = http("read document 205 for deletion", query="?_id=eq.205")
+    delete_etag = rows[0]["data"]["_metadata"]["etag"]
+    old_base = BASE
+    BASE = "http://127.0.0.1:3060/rpc/orders_dv__delete_document"
+    sd,_,_=http("delete document 205", "POST", document={
+        "expected_id": 205, "expected_etag": delete_etag}, raw_body=True)
+    BASE = old_base
     left=scalar("SELECT count(*) FROM pilot.orders WHERE order_id=205;")
-    add_check("delete", sd==204 and left == "0", {"status":sd,"rows":left}, "204 and zero rows")
+    add_check("delete", sd==200 and left == "0", {"status":sd,"rows":left}, "200 and zero rows")
 
     # Small operational sample, not a benchmark claim.
     timings=[]

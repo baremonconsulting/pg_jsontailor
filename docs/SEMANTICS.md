@@ -22,7 +22,9 @@ An update is a complete document replacement, not a partial patch. The root iden
 
 ## Delete
 
-A delete verifies the ETag, locks the configured document state and removes or unlinks children according to the schema and specification before deleting the root row.
+Call the generated `<view>__delete_document(expected_id, expected_etag)` function. It locks the configured document state, reads it back after acquiring the lock, verifies the caller's ETag and then removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
+
+Direct `DELETE` on the generated view returns `PT428`. Use the function from SQL or expose it as a PostgREST RPC so that the expected ETag is explicit.
 
 ## Security and RLS
 
@@ -30,7 +32,7 @@ The extension functions and generated objects use invoker rights. Generated SQL 
 
 ## REST
 
-PostgREST can expose a schema containing generated views. Keep source tables in a separate, unexposed schema. PostgreSQL errors map to the REST responses used by the deployment; authentication, role switching and TLS are outside the extension.
+PostgREST can expose a schema containing generated views. Keep source tables in a separate, unexposed schema. Use the generated delete function through `/rpc/<view>__delete_document` with `expected_id` and `expected_etag`. PostgreSQL errors map to the REST responses used by the deployment; authentication, role switching and TLS are outside the extension.
 
 ## Known limits
 

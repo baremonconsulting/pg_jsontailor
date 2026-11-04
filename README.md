@@ -1,8 +1,8 @@
 # pg_jsontailor
 
-`pg_jsontailor` brings Oracle JSON Relational Duality View-like functionality to PostgreSQL. It exposes relational data as writable JSON documents by generating a view and `INSTEAD OF` triggers from a compact JSON specification, while keeping the underlying data in ordinary PostgreSQL tables.
+`pg_jsontailor` generates writable JSON documents over relational PostgreSQL tables. From a compact JSON specification it creates a view, guarded write paths and optimistic concurrency controls, while the source of truth remains in ordinary PostgreSQL tables.
 
-The project is aimed at Oracle-to-PostgreSQL migrations and other integrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
+It is useful for APIs, integration layers and migrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
 
 The design follows the same core idea as Oracle JSON Relational Duality Views: one logical JSON document can be read from and written back to normalised relational tables. `pg_jsontailor` provides a focused PostgreSQL implementation rather than a drop-in implementation of every Oracle feature or ORDS interface.
 
@@ -15,7 +15,7 @@ The current implementation supports:
 - one root table;
 - an optional read-only many-to-one object;
 - an optional writable one-to-many array;
-- document reads, inserts, full replacements and deletes;
+- document reads, inserts, full replacements and guarded deletes;
 - optimistic concurrency using SHA-256 ETags;
 - PostgreSQL row-level security and invoker rights;
 - generated DDL that has no runtime dependency on the extension.
@@ -123,7 +123,15 @@ FROM api.orders_dv
 WHERE _id = 1001;
 ```
 
-For updates and deletes, return the `_metadata.etag` value from the preceding read. A stale ETag is rejected atomically.
+For updates, send back the complete document including the `_metadata.etag` value from the preceding read. A stale ETag is rejected atomically.
+
+Delete through the generated function and pass the identifier and ETag explicitly:
+
+```sql
+SELECT api.orders_dv__delete_document(1001, 'ETAG_FROM_THE_PRECEDING_READ');
+```
+
+Direct `DELETE` on the view is rejected because SQL has no portable way to carry the client's expected ETag in that operation.
 
 The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). The detailed API and document rules are described in [`docs/API.md`](docs/API.md) and [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
 
@@ -134,6 +142,7 @@ The repository contains several layers of verification:
 - `make installcheck` for PGXS regression and isolation tests;
 - `tests/core_operations.py` for the core document operations;
 - `tests/validation_security.py` for validation, security, RLS and edge cases;
+- `tests/integrity_regressions.py` for generated write-path and integrity regressions;
 - `tests/run_postgrest.py` for the optional REST surface;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;

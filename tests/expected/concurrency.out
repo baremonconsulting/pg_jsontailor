@@ -1,10 +1,11 @@
 Parsed test spec with 2 sessions
 
-starting permutation: begin_writer write_row begin_waiter wait_row commit_writer commit_waiter
+starting permutation: begin_writer write_root begin_waiter write_stale_document commit_writer rollback_waiter
 step begin_writer: BEGIN;
-step write_row: UPDATE jt_iso_probe SET value=1 WHERE id=1;
+step write_root: UPDATE jt_iso.root SET value='concurrent' WHERE id=1;
 step begin_waiter: BEGIN;
-step wait_row: UPDATE jt_iso_probe SET value=2 WHERE id=1; <waiting ...>
+step write_stale_document: UPDATE jt_iso.documents SET data=(SELECT data FROM jt_iso.client_document) WHERE _id=1; <waiting ...>
 step commit_writer: COMMIT;
-step wait_row: <... completed>
-step commit_waiter: COMMIT;
+step write_stale_document: <... completed>
+ERROR:  etag does not match
+step rollback_waiter: ROLLBACK;

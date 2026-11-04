@@ -1,6 +1,6 @@
 # API and specification
 
-`pg_jsontailor` provides focused Oracle JSON Relational Duality View-like behaviour for PostgreSQL. It maps one writable JSON document to ordinary relational tables; it is not a complete implementation of every Oracle duality-view or ORDS feature.
+`pg_jsontailor` maps writable JSON documents to ordinary PostgreSQL tables. Its document model can support Oracle-to-PostgreSQL migration work, but it is not a drop-in implementation of every Oracle duality-view or ORDS feature.
 
 `pg_jsontailor` exposes two functions in the `jsontailor` schema.
 
@@ -64,9 +64,12 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__insert()` and its `INSTEAD OF INSERT` trigger;
 - `api.orders_dv__update()` and its `INSTEAD OF UPDATE` trigger;
 - `api.orders_dv__delete()` and its `INSTEAD OF DELETE` trigger;
+- `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
 - a view comment containing the normalised specification.
 
-Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically.
+Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. If a source relation is renamed or replaced, generated writes fail with `PT422` until the view is regenerated. This binding check follows PostgreSQL dependencies and therefore remains valid after dump and restore.
+
+The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
 
 ## Permissions
 

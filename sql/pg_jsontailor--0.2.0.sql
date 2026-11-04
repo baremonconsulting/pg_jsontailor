@@ -14,11 +14,11 @@ DECLARE
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qinsert text; qupdate text; qdelete text;
+    qview text; qinsert text; qupdate text; qdelete text; qdelete_document text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text;
     object_key_field text; array_key_field text;
-    body text; ddl text; names text[];
+    body text; delete_body text; ddl text; names text[]; relation_checks text := ''; root_key_type text;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -27,7 +27,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must be a qualified schema.name';
     END;
     IF cardinality(vp)<>2 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must have exactly two parts'; END IF;
-    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 THEN
+    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 THEN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='generated object name exceeds 63 bytes';
     END IF;
     IF jsonb_typeof(spec) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='spec must be an object'; END IF;
@@ -86,7 +86,7 @@ BEGIN
             IF ident='a' AND (s='root' OR (s='array' AND r.value<>j->>'key')) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('GENERATED ALWAYS identity is not writable at %s.fields.%s',s,r.key); END IF;
         END LOOP;
         IF EXISTS(SELECT 1 FROM jsonb_each_text(j->'fields') GROUP BY value HAVING count(*)>1) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s maps a column twice',s); END IF;
-        IF s='root' THEN root_rel:=rel;root_pk:=att;root_schema:=tp[1];root_table:=tp[2];
+        IF s='root' THEN root_rel:=rel;root_schema:=tp[1];root_table:=tp[2];SELECT a.attnum,format_type(a.atttypid,a.atttypmod) INTO root_pk,root_key_type FROM pg_attribute a WHERE a.attrelid=rel AND a.attname=j->>'key' AND a.attnum>0 AND NOT a.attisdropped;
         ELSIF s='object' THEN object_rel:=rel;object_pk:=att;object_schema:=tp[1];object_table:=tp[2];
         ELSE array_rel:=rel;array_pk:=att;array_schema:=tp[1];array_table:=tp[2]; END IF;
     END LOOP;
@@ -100,6 +100,7 @@ BEGIN
         SELECT attnum,attidentity,attgenerated INTO att,ident,generated FROM pg_attribute WHERE attrelid=root_rel AND attname=cfg#>>'{object,root_fk}' AND attnum>0 AND NOT attisdropped;
         IF att IS NULL OR ident='a' OR generated<>'' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk is not writable'; END IF;
         SELECT a.attnum INTO object_pk FROM pg_attribute a WHERE a.attrelid=object_rel AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
+        IF cfg#>>'{object,root_fk}'=cfg#>>'{root,key}' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk must not be the root primary key'; END IF;
         SELECT oid INTO fk_oid FROM pg_constraint WHERE conrelid=root_rel AND confrelid=object_rel AND contype='f' AND conkey=ARRAY[att]::smallint[] AND confkey=ARRAY[object_pk]::smallint[] AND NOT condeferrable LIMIT 1;
         IF fk_oid IS NULL THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk requires an enforced non-deferrable foreign key'; END IF;
         IF current_setting('server_version_num')::integer>=180000 THEN
@@ -133,7 +134,7 @@ BEGIN
     IF cfg?'object' THEN
         FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{object,fields}') LOOP object_pairs:=object_pairs||CASE WHEN object_pairs='' THEN '' ELSE ',' END||format('%L,o.%I',r.key,r.value); END LOOP;
         object_expr:=format('(SELECT jsonb_build_object(%s) FROM %I.%I o WHERE o.%I=r.%I)',object_pairs,object_schema,object_table,cfg#>>'{object,key}',cfg#>>'{object,root_fk}');
-        object_lookup:=format('SELECT jsonb_build_object(%s) FROM %I.%I o WHERE to_jsonb(o.%I)=$1',object_pairs,object_schema,object_table,cfg#>>'{object,key}');
+        object_lookup:=format('SELECT jsonb_build_object(%s) FROM %I.%I o WHERE o.%I=(SELECT x.%I FROM jsonb_populate_record(NULL::%I.%I,jsonb_build_object(%L,$1))x)',object_pairs,object_schema,object_table,cfg#>>'{object,key}',cfg#>>'{object,key}',object_schema,object_table,cfg#>>'{object,key}');
         root_pairs:=root_pairs||format(',%L,%s',cfg#>>'{object,name}',object_expr);
     END IF;
     IF cfg?'array' THEN
@@ -150,12 +151,17 @@ BEGIN
     IF cfg?'object' AND NOT (cfg#>>'{object,etag}')::boolean THEN
         etag_payload:=format('jsonb_set(d.payload,ARRAY[%L],CASE WHEN jsonb_typeof(d.payload->%L)=''object'' THEN jsonb_build_object(%L,d.payload#>ARRAY[%L,%L]) ELSE ''null''::jsonb END)',cfg#>>'{object,name}',cfg#>>'{object,name}',object_key_field,cfg#>>'{object,name}',object_key_field);
     END IF;
-    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');
+    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');
+    FOR s IN SELECT unnest(ARRAY['root','object','array']) LOOP
+        IF NOT cfg?s THEN CONTINUE; END IF;
+        relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L)) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation binding changed; regenerate the duality view'';END IF;',qview,format('%I.%I',(parse_ident(cfg#>>ARRAY[s,'table']))[1],(parse_ident(cfg#>>ARRAY[s,'table']))[2]));
+    END LOOP;
     ddl:=format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
-DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; oldmap jsonb; newmap jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; locked_n int:=0; changed boolean:=false; all_full boolean:=false;
+DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %I.%I.%I%%TYPE;
 BEGIN
+  %s
   IF TG_OP='INSERT' THEN
     IF NOT (cfg#>>'{root,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root insert is disabled'; END IF;
     doc:=NEW.data;
@@ -164,14 +170,35 @@ BEGIN
     IF NEW._id IS NOT NULL AND doc->'_id' IS DISTINCT FROM to_jsonb(NEW._id) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id differs'; END IF;
     SELECT x INTO bad FROM jsonb_object_keys(doc)x WHERE x<>ALL(ARRAY['_id','_metadata']||ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'))||CASE WHEN cfg?'object' THEN ARRAY[cfg#>>'{object,name}'] ELSE ARRAY[]::text[] END||CASE WHEN cfg?'array' THEN ARRAY[cfg#>>'{array,name}'] ELSE ARRAY[]::text[] END) LIMIT 1;
     IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown field %%s',bad); END IF;
+    IF doc?'_metadata' AND jsonb_typeof(doc->'_metadata') IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_metadata must be an object';END IF;
+    IF cfg?'object' AND doc?(cfg#>>'{object,name}') THEN
+      IF jsonb_typeof(doc->(cfg#>>'{object,name}')) NOT IN ('object','null') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object field has wrong type';END IF;
+      IF jsonb_typeof(doc->(cfg#>>'{object,name}'))='object' THEN
+        SELECT x INTO bad FROM jsonb_object_keys(doc->(cfg#>>'{object,name}'))x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{object,fields}'))) LIMIT 1;
+        IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown object field %%s',bad);END IF;
+        SELECT key INTO bad FROM jsonb_each_text(cfg#>'{object,fields}') WHERE value=cfg#>>'{object,key}';
+        IF NOT (doc->(cfg#>>'{object,name}'))?bad OR doc#>ARRAY[cfg#>>'{object,name}',bad]='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key is required';END IF;
+      END IF;
+    END IF;
     IF cfg?'array' AND doc?(cfg#>>'{array,name}') AND jsonb_typeof(doc->(cfg#>>'{array,name}')) IS DISTINCT FROM 'array' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array field must be an array'; END IF;
     IF cfg?'array' AND jsonb_array_length(coalesce(doc->(cfg#>>'{array,name}'),'[]'))>0 AND NOT (cfg#>>'{array,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array insert is disabled'; END IF;
+    IF cfg?'array' THEN
+      SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
+      FOR el IN SELECT value FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]')) LOOP
+        IF jsonb_typeof(el)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element must be an object';END IF;
+        SELECT x INTO unknown_field FROM jsonb_object_keys(el)x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{array,fields}'))) LIMIT 1;
+        IF unknown_field IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown array field %%s',unknown_field);END IF;
+        IF el?bad AND el->bad='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key must not be null';END IF;
+      END LOOP;
+      IF (SELECT count(*) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad)<>(SELECT count(DISTINCT e->bad) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
+    END IF;
     cols:=ARRAY[]::text[];map:='{}';
     IF doc?'_id' THEN cols:=array_append(cols,cfg#>>'{root,key}');map:=map||jsonb_build_object(cfg#>>'{root,key}',doc->'_id'); END IF;
     FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP IF doc?bad THEN cols:=array_append(cols,keyj#>>'{}');map:=map||jsonb_build_object(keyj#>>'{}',doc->bad); END IF; END LOOP;
     IF cfg?'object' AND doc?(cfg#>>'{object,name}') THEN cols:=array_append(cols,cfg#>>'{object,root_fk}');map:=map||jsonb_build_object(cfg#>>'{object,root_fk}',doc#>ARRAY[cfg#>>'{object,name}',%L]); END IF;
-    IF cardinality(cols)=0 THEN EXECUTE format('INSERT INTO %%I.%%I DEFAULT VALUES RETURNING to_jsonb(%%I)',%L,%L,%L) INTO idj;
-    ELSE EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_record(NULL::%%I.%%I,$1) x RETURNING to_jsonb(%%I)',%L,%L,(SELECT string_agg(quote_ident(x),',') FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',') FROM unnest(cols)x),%L,%L,%L) USING map INTO idj; END IF;
+    IF cardinality(cols)=0 THEN EXECUTE format('INSERT INTO %%I.%%I DEFAULT VALUES RETURNING %%I',%L,%L,%L) INTO root_id;
+    ELSE EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_record(NULL::%%I.%%I,$1) x RETURNING %%I',%L,%L,(SELECT string_agg(quote_ident(x),',') FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',') FROM unnest(cols)x),%L,%L,%L) USING map INTO root_id; END IF;
+    idj:=to_jsonb(root_id);
     IF cfg?'array' THEN
       -- Validate element types before choosing the bulk or fallback path.
       IF EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE jsonb_typeof(e.value)<>'object') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element must be an object';END IF;
@@ -189,7 +216,7 @@ BEGIN
           EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NOT NULL',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}') USING mapped;
         END IF;
         IF expected>0 THEN
-          SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
+          SELECT format('%%I',cfg#>>'{array,parent_fk}')||coalesce(','||string_agg(format('%%I',value),','),''),format('x.%%I',cfg#>>'{array,parent_fk}')||coalesce(','||string_agg(format('x.%%I',value),','),'') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
           EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NULL',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}') USING mapped;
         END IF;
       ELSE
@@ -200,9 +227,9 @@ BEGIN
         END LOOP;
       END IF;
     END IF;
-    EXECUTE format('SELECT _id,data FROM %%s WHERE to_jsonb(_id)=$1',%L) USING idj INTO NEW._id,NEW.data;RETURN NEW;
+    EXECUTE format('SELECT _id,data FROM %%s WHERE _id=$1',%L) USING root_id INTO NEW._id,NEW.data;RETURN NEW;
   ELSIF TG_OP='UPDATE' THEN
-    doc:=NEW.data;IF NEW._id IS DISTINCT FROM OLD._id OR jsonb_typeof(doc)<>'object' OR doc->'_id' IS DISTINCT FROM to_jsonb(OLD._id) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
+    root_id:=OLD._id;doc:=NEW.data;IF NEW._id IS DISTINCT FROM OLD._id OR jsonb_typeof(doc)<>'object' OR doc->'_id' IS DISTINCT FROM to_jsonb(OLD._id) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
     SELECT x INTO bad FROM jsonb_object_keys(doc)x WHERE x<>ALL(ARRAY['_id','_metadata']||ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'))||CASE WHEN cfg?'object' THEN ARRAY[cfg#>>'{object,name}'] ELSE ARRAY[]::text[] END||CASE WHEN cfg?'array' THEN ARRAY[cfg#>>'{array,name}'] ELSE ARRAY[]::text[] END) LIMIT 1;
     IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown field %%s',bad);END IF;
     SELECT x INTO bad FROM jsonb_object_keys(cfg#>'{root,fields}')x WHERE NOT doc?x LIMIT 1;
@@ -226,47 +253,43 @@ BEGIN
     END IF;
     IF doc?'_metadata' AND jsonb_typeof(doc->'_metadata') IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_metadata must be an object';END IF;
     IF jsonb_typeof(doc#>'{_metadata,etag}') IS DISTINCT FROM 'string' THEN RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='etag is required';END IF;
-    n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1) FOR UPDATE',%L,%L,%L) INTO n USING OLD._id;
-    IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1))',%L,%L,%L) INTO changed USING OLD._id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='document no longer exists';END IF;END IF;
-    locked_n:=0;IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1) ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO locked_n USING OLD._id;END IF;
-    EXECUTE format('SELECT data FROM %%s WHERE to_jsonb(_id)=to_jsonb($1)',%L) USING OLD._id INTO cur;
+    n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',%L,%L,%L) INTO n USING root_id;
+    IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE %%I=$1)',%L,%L,%L) INTO changed USING root_id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='document no longer exists';END IF;END IF;
+    locked_n:=0;IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO locked_n USING root_id;END IF;
+    EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING root_id INTO cur;
     IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM doc#>>'{_metadata,etag}' THEN RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='etag does not match';END IF;
     IF cfg?'object' AND (cfg#>>'{object,etag}')::boolean AND jsonb_typeof(doc->(cfg#>>'{object,name}'))='object' THEN EXECUTE %L INTO el USING doc#>ARRAY[cfg#>>'{object,name}',%L];IF el IS NOT NULL AND el IS DISTINCT FROM doc->(cfg#>>'{object,name}') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object fields do not match referenced row';END IF;END IF;
     IF (doc-'_metadata') IS DISTINCT FROM (cur-'_metadata') THEN
-      IF NOT (cfg#>>'{root,update}')::boolean AND EXISTS(SELECT 1 FROM jsonb_each(cfg#>'{root,fields}')f WHERE doc->f.key IS DISTINCT FROM cur->f.key) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root update is disabled';END IF;
+      IF NOT (cfg#>>'{root,update}')::boolean AND (EXISTS(SELECT 1 FROM jsonb_each(cfg#>'{root,fields}')f WHERE doc->f.key IS DISTINCT FROM cur->f.key) OR (cfg?'object' AND doc->(cfg#>>'{object,name}') IS DISTINCT FROM cur->(cfg#>>'{object,name}'))) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root update is disabled';END IF;
       cols:=ARRAY[]::text[];map:='{}';FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP cols:=array_append(cols,keyj#>>'{}');map:=map||jsonb_build_object(keyj#>>'{}',doc->bad);END LOOP;
       IF cfg?'object' AND doc->(cfg#>>'{object,name}') IS DISTINCT FROM cur->(cfg#>>'{object,name}') THEN cols:=array_append(cols,cfg#>>'{object,root_fk}');map:=map||jsonb_build_object(cfg#>>'{object,root_fk}',doc#>ARRAY[cfg#>>'{object,name}',%L]);END IF;
-      IF cardinality(cols)>0 THEN EXECUTE format('UPDATE %%I.%%I t SET (%%s)=(SELECT %%s FROM jsonb_populate_record(NULL::%%I.%%I,$1)x) WHERE to_jsonb(t.%%I)=to_jsonb($2)',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),%L,%L,%L) USING map,OLD._id;
-      ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=%%I WHERE to_jsonb(%%I)=to_jsonb($1)',%L,%L,%L,%L,%L) USING OLD._id;END IF;
+      IF cardinality(cols)>0 THEN EXECUTE format('UPDATE %%I.%%I t SET (%%s)=(SELECT %%s FROM jsonb_populate_record(NULL::%%I.%%I,$1)x) WHERE t.%%I=$2',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),%L,%L,%L) USING map,root_id;
+      ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=%%I WHERE %%I=$1',%L,%L,%L,%L,%L) USING root_id;END IF;
       GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root update denied';END IF;
       -- Array reconciliation is key based and never rewrites unchanged elements.
       IF cfg?'array' THEN
         IF doc->(cfg#>>'{array,name}') IS DISTINCT FROM cur->(cfg#>>'{array,name}') AND locked_n<jsonb_array_length(cur->(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE=format('row-level security prevents locking changed array elements (locked %%s of %%s)',locked_n,jsonb_array_length(cur->(cfg#>>'{array,name}')));END IF;
         IF doc->(cfg#>>'{array,name}') IS DISTINCT FROM cur->(cfg#>>'{array,name}') THEN
-        -- Materialise keyed JSON objects once.  Object lookup is O(1), avoiding
-        -- the former old-array x new-array nested scans during reconciliation.
+        -- Convert the incoming array once to typed physical records.  Key
+        -- membership and DML use database equality, including numeric keys.
         SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
-        SELECT coalesce(jsonb_object_agg((value->bad)::text,value),'{}'::jsonb) INTO oldmap FROM jsonb_array_elements(cur->(cfg#>>'{array,name}')) WHERE value?bad;
-        SELECT coalesce(jsonb_object_agg((value->bad)::text,value),'{}'::jsonb) INTO newmap FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) WHERE value?bad;
-        IF EXISTS(SELECT 1 FROM jsonb_each(newmap)e WHERE NOT oldmap?e.key) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
+        SELECT coalesce(jsonb_agg((SELECT coalesce(jsonb_object_agg(f.value#>>'{}',e.value->f.key),'{}'::jsonb) FROM jsonb_each(cfg#>'{array,fields}')f WHERE e.value?f.key)||jsonb_build_object(cfg#>>'{array,parent_fk}',to_jsonb(root_id))),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e;
+        EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n WHERE n.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=$2 AND t.%%I=n.%%I))',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}',cfg#>>'{array,key}') INTO changed USING mapped,root_id;
+        IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
 
-        -- Convert document field names to physical column names once.  The
-        -- resulting recordset feeds one DELETE and one UPDATE statement.
-        SELECT coalesce(jsonb_agg((SELECT coalesce(jsonb_object_agg(f.value#>>'{}',e.value->f.key),'{}'::jsonb) FROM jsonb_each(cfg#>'{array,fields}')f WHERE e.value?f.key)||jsonb_build_object(cfg#>>'{array,parent_fk}',to_jsonb(OLD._id))),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e;
-
-        SELECT count(*) INTO expected FROM jsonb_each(oldmap)e WHERE NOT newmap?e.key;
+        EXECUTE format('SELECT count(*) FROM %%I.%%I t WHERE t.%%I=$2 AND NOT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n WHERE n.%%I=t.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') INTO expected USING mapped,root_id;
         IF expected>0 THEN
           IF NOT (cfg#>>'{array,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array delete is disabled';END IF;
-          EXECUTE format('DELETE FROM %%I.%%I t WHERE to_jsonb(t.%%I)=to_jsonb($2) AND NOT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE to_jsonb(x.%%I)=to_jsonb(t.%%I))',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') USING mapped,OLD._id;
+          EXECUTE format('DELETE FROM %%I.%%I t WHERE t.%%I=$2 AND NOT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I=t.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') USING mapped,root_id;
           GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array delete denied';END IF;
         END IF;
 
-        SELECT count(*) INTO expected FROM jsonb_each(newmap)e WHERE oldmap?e.key AND e.value IS DISTINCT FROM oldmap->e.key;
-        IF expected>0 THEN
-          IF NOT (cfg#>>'{array,update}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array update is disabled';END IF;
-          SELECT string_agg(format('%%I=x.%%I',value,value),','),string_agg(format('to_jsonb(t.%%I) IS DISTINCT FROM to_jsonb(x.%%I)',value,value),' OR ') INTO sets,diff FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
-          IF sets IS NOT NULL THEN
-            EXECUTE format('UPDATE %%I.%%I t SET %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE to_jsonb(t.%%I)=to_jsonb($2) AND to_jsonb(t.%%I)=to_jsonb(x.%%I) AND (%%s)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],sets,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}',cfg#>>'{array,key}',diff) USING mapped,OLD._id;
+        SELECT string_agg(format('%%I=x.%%I',value,value),','),string_agg(format('t.%%I IS DISTINCT FROM x.%%I',value,value),' OR ') INTO sets,diff FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
+        IF sets IS NOT NULL THEN
+          EXECUTE format('SELECT count(*) FROM %%I.%%I t JOIN jsonb_populate_recordset(NULL::%%I.%%I,$1)x ON x.%%I=t.%%I WHERE t.%%I=$2 AND (%%s)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,parent_fk}',diff) INTO expected USING mapped,root_id;
+          IF expected>0 THEN
+            IF NOT (cfg#>>'{array,update}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array update is disabled';END IF;
+            EXECUTE format('UPDATE %%I.%%I t SET %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE t.%%I=$2 AND t.%%I=x.%%I AND (%%s)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],sets,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}',cfg#>>'{array,key}',diff) USING mapped,root_id;
             GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array update denied';END IF;
           END IF;
         END IF;
@@ -276,7 +299,7 @@ BEGIN
         SELECT count(*),NOT EXISTS(SELECT 1 FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e CROSS JOIN jsonb_each_text(cfg#>'{array,fields}')f WHERE NOT e.value?bad AND f.value<>cfg#>>'{array,key}' AND NOT e.value?f.key) INTO expected,all_full FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) WHERE NOT value?bad;
         IF expected>0 AND NOT (cfg#>>'{array,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array insert is disabled';END IF;
         IF expected>1 AND all_full THEN
-          SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
+          SELECT format('%%I',cfg#>>'{array,parent_fk}')||coalesce(','||string_agg(format('%%I',value),','),''),format('x.%%I',cfg#>>'{array,parent_fk}')||coalesce(','||string_agg(format('x.%%I',value),','),'') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value<>cfg#>>'{array,key}';
           EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NULL',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}') USING mapped;
         ELSE
           FOR el IN SELECT value FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) WHERE NOT value?bad LOOP
@@ -287,17 +310,23 @@ BEGIN
         END IF;
       END IF;
     END IF;
-    EXECUTE format('SELECT data FROM %%s WHERE to_jsonb(_id)=to_jsonb($1)',%L) USING OLD._id INTO NEW.data;RETURN NEW;
+    EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING root_id INTO NEW.data;RETURN NEW;
   ELSE
     IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
-    n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1) FOR UPDATE',%L,%L,%L) INTO n USING OLD._id;IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1))',%L,%L,%L) INTO changed USING OLD._id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RETURN NULL;END IF;END IF;
-    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1) ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO n USING OLD._id;IF n<(SELECT jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;END IF;
-    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN expected:=n;IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1)',%L,%L,%L) USING OLD._id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE to_jsonb(%%I)=to_jsonb($1)',%L,%L,%L,%L) USING OLD._id;END IF;GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;END IF;
-    EXECUTE format('DELETE FROM %%I.%%I WHERE to_jsonb(%%I)=to_jsonb($1)',%L,%L,%L) USING OLD._id;GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;RETURN OLD;
+    root_id:=OLD._id;
+    RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='expected_etag is required; use the generated delete function';
+    n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',%L,%L,%L) INTO n USING root_id;IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE %%I=$1)',%L,%L,%L) INTO changed USING root_id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RETURN NULL;END IF;END IF;
+    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',%L,%L,%L,%L,%L) INTO n USING root_id;IF n<(SELECT jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;END IF;
+    IF cfg?'array' AND jsonb_array_length(OLD.data->(cfg#>>'{array,name}'))>0 THEN expected:=n;IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',%L,%L,%L) USING root_id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE %%I=$1',%L,%L,%L,%L) USING root_id;END IF;GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;END IF;
+    EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',%L,%L,%L) USING root_id;GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;RETURN OLD;
   END IF;
 END
 $body$,
  cfg,
+	 root_schema,
+	 root_table,
+	 cfg#>>'{root,key}',
+	 relation_checks,
  object_key_field,
  root_schema,
  root_table,
@@ -368,7 +397,28 @@ $body$,
  root_schema,
  root_table,
  cfg#>>'{root,key}');
-    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor duality view spec v1: '||cfg::text);
+    delete_body:=format($delete_body$
+DECLARE cfg constant jsonb:=%L::jsonb; cur jsonb; n int; expected int; changed boolean;
+BEGIN
+  %s
+  IF expected_etag IS NULL THEN RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='expected_etag is required';END IF;
+  IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
+  n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO n USING expected_id;
+  IF n IS NULL THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM %%I.%%I WHERE %%I=$1)',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO changed USING expected_id;IF changed THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking root';ELSE RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='document no longer exists';END IF;END IF;
+  EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING expected_id INTO cur;
+  IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM expected_etag THEN RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='etag does not match';END IF;
+  IF cfg?'array' AND jsonb_array_length(cur->(cfg#>>'{array,name}'))>0 THEN
+    EXECUTE format('SELECT count(*) FROM (SELECT %%I FROM %%I.%%I WHERE %%I=$1 ORDER BY %%I FOR UPDATE)s',cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}') INTO expected USING expected_id;
+    IF expected<jsonb_array_length(cur->(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security prevents locking array elements';END IF;
+    IF (cfg#>>'{array,delete}')::boolean THEN EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}') USING expected_id;ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=NULL WHERE %%I=$1',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,parent_fk}') USING expected_id;END IF;
+    GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='row-level security filtered array delete or unlink';END IF;
+  END IF;
+  EXECUTE format('DELETE FROM %%I.%%I WHERE %%I=$1',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') USING expected_id;GET DIAGNOSTICS n=ROW_COUNT;
+  IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;
+  RETURN cur;
+END
+$delete_body$,cfg,relation_checks,qview);
+    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor duality view spec v1: '||cfg::text);
     RETURN ddl;
 END
 $generator$;
