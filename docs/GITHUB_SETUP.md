@@ -5,7 +5,7 @@ The repository contains the workflows and templates needed for routine developme
 ## General
 
 - Set `main` as the default branch.
-- Add the description: `Writable JSON document views over relational PostgreSQL tables.`
+- Add the description: `Oracle JSON Relational Duality View-like functionality for PostgreSQL.`
 - Add topics: `postgresql`, `postgresql-extension`, `json`, `postgrest`, `database-migration`, `optimistic-concurrency`.
 - Enable Issues and Discussions if community support is planned.
 - Allow squash merging and automatically delete merged branches.

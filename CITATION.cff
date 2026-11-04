@@ -9,4 +9,4 @@ authors:
 repository-code: https://github.com/baremonconsulting/pg_jsontailor
 url: https://www.baremon.eu/
 license: PostgreSQL
-abstract: Writable JSON document views over relational PostgreSQL tables with optimistic concurrency and PostgREST support.
+abstract: Oracle JSON Relational Duality View-like writable JSON documents over relational PostgreSQL tables with optimistic concurrency and PostgREST support.

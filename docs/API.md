@@ -1,5 +1,7 @@
 # API and specification
 
+`pg_jsontailor` provides focused Oracle JSON Relational Duality View-like behaviour for PostgreSQL. It maps one writable JSON document to ordinary relational tables; it is not a complete implementation of every Oracle duality-view or ORDS feature.
+
 `pg_jsontailor` exposes two functions in the `jsontailor` schema.
 
 ```sql

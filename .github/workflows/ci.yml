@@ -82,7 +82,7 @@ jobs:
             -o "-F -k $PGHOST -p $PGPORT" \
             -l "$RUNNER_TEMP/postgresql.log" start
 
-      - name: Build and install extension
+      - name: Install extension files with PGXS
         shell: bash
         run: |
           set -euo pipefail

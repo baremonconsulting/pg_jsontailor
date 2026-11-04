@@ -1,7 +1,6 @@
 # pg_jsontailor extension
-comment = 'Writable JSON documents over relational PostgreSQL tables'
+comment = 'Oracle duality view-like writable JSON documents for PostgreSQL'
 default_version = '0.2.0'
-module_pathname = '$libdir/pg_jsontailor'
 relocatable = false
 schema = 'jsontailor'
 

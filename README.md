@@ -1,8 +1,10 @@
 # pg_jsontailor
 
-`pg_jsontailor` is a PostgreSQL extension for exposing relational data as writable JSON documents. It generates a view and `INSTEAD OF` triggers from a compact JSON specification, while keeping the underlying data in ordinary PostgreSQL tables.
+`pg_jsontailor` brings Oracle JSON Relational Duality View-like functionality to PostgreSQL. It exposes relational data as writable JSON documents by generating a view and `INSTEAD OF` triggers from a compact JSON specification, while keeping the underlying data in ordinary PostgreSQL tables.
 
-The project is aimed at migrations and integrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
+The project is aimed at Oracle-to-PostgreSQL migrations and other integrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
+
+The design follows the same core idea as Oracle JSON Relational Duality Views: one logical JSON document can be read from and written back to normalised relational tables. `pg_jsontailor` provides a focused PostgreSQL implementation rather than a drop-in implementation of every Oracle feature or ORDS interface.
 
 ## Status
 
@@ -18,31 +20,59 @@ The current implementation supports:
 - PostgreSQL row-level security and invoker rights;
 - generated DDL that has no runtime dependency on the extension.
 
-## Requirements
+## Runtime requirements
 
 - PostgreSQL 17, 18 or 19;
+- permission to place the extension control and SQL files in the PostgreSQL extension directory.
+
+`pg_jsontailor` is implemented entirely in SQL and PL/pgSQL. It does not compile or install a shared library.
+
+## Install
+
+The supplied PGXS Makefile provides the conventional PostgreSQL source-installation path:
+
+```sh
+make install
+```
+
+For this installation method, GNU Make, PGXS and the matching PostgreSQL server development package are required only to locate the correct installation directories and copy the files. They do not compile product code.
+
+Packagers may instead install these two files directly into PostgreSQL's `share/extension` directory:
+
+```text
+pg_jsontailor.control
+sql/pg_jsontailor--0.2.0.sql
+```
+
+The SQL file must be installed under the name `pg_jsontailor--0.2.0.sql` next to the control file.
+
+For example, an administrator can install them without PGXS or Make:
+
+```sh
+extension_dir="$(pg_config --sharedir)/extension"
+install -m 0644 pg_jsontailor.control "$extension_dir/"
+install -m 0644 sql/pg_jsontailor--0.2.0.sql "$extension_dir/"
+```
+
+After the files are installed, enable the extension in a database:
+
+```sql
+CREATE EXTENSION pg_jsontailor;
+```
+
+## Development requirements
+
+The following tools are needed only for development, regression testing and optional integration scenarios:
+
 - PostgreSQL server development files and PGXS;
 - GNU Make;
 - Python 3 for the extended test and benchmark tools;
-- PostgREST 16.5 only for the optional REST scenarios.
-
-## Build and install
-
-```sh
-make
-make install
-```
+- PostgREST 16.5 for the optional REST scenarios.
 
 Run the extension regression and isolation suites against an available test instance:
 
 ```sh
 make installcheck
-```
-
-Create the extension in the target database:
-
-```sql
-CREATE EXTENSION pg_jsontailor;
 ```
 
 ## Quick start
