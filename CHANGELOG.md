@@ -19,5 +19,7 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Documented and tested native SQL MERGE for insert, complete replacement, ETag-checked delete and DO NOTHING actions.
 - Added post-lock ETag validation for direct SQL and MERGE delete actions.
 - Documented and tested inline complete-document construction from ID, ETag and changed values.
+- Bound generated write paths to the physical source attributes selected by the view.
+- Corrected NOCHECK reference drift, GENERATED ALWAYS root touch and typed child-key duplicate handling.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

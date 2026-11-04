@@ -183,6 +183,145 @@ SET data=jsonb_set(data,'{reference,id}','8'::jsonb) WHERE _id=1;""", False)
     record("root identity cannot also be an object foreign key",
            db.state(rejected) == "22023", f"state={db.state(rejected)}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_binding CASCADE; CREATE SCHEMA jt_binding;
+CREATE TABLE jt_binding.roots(id integer PRIMARY KEY,value text);
+INSERT INTO jt_binding.roots VALUES(1,'original');""")
+    binding_spec = {
+        "root": {"table": "jt_binding.roots", "key": "id",
+                 "fields": {"value": "value"},
+                 "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_binding.documents", binding_spec)
+    binding_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_binding.documents WHERE _id=1;")
+    db.run("ALTER TABLE jt_binding.roots RENAME COLUMN value TO original_value;"
+           "ALTER TABLE jt_binding.roots ADD COLUMN value text DEFAULT 'replacement';")
+    binding_update = db.run(
+        "UPDATE jt_binding.documents SET data=jsonb_set(data,'{value}','\"wrong\"') "
+        "WHERE _id=1;", False)
+    binding_insert = db.run(
+        "INSERT INTO jt_binding.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"wrong\"}'::jsonb);", False)
+    binding_delete = db.run(
+        "DELETE FROM jt_binding.documents WHERE _id=1;", False)
+    binding_function = db.run(
+        "SELECT jt_binding.documents__delete_document(1," + quote(binding_etag) + ");", False)
+    binding_values = db.value(
+        "SELECT original_value||':'||value FROM jt_binding.roots WHERE id=1;")
+
+    db.run("""CREATE TABLE jt_binding.refs(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_binding.parents(id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding.refs(id),value text);
+INSERT INTO jt_binding.refs VALUES(1,'reference');
+INSERT INTO jt_binding.parents VALUES(1,1,'parent');""")
+    role_spec = {
+        "root": {"table": "jt_binding.parents", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "object": {"name": "reference", "table": "jt_binding.refs", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "value": "value"},
+                   "etag": False}}
+    create_view(db, "jt_binding.role_documents", role_spec)
+    db.run("ALTER TABLE jt_binding.parents RENAME TO swap;"
+           "ALTER TABLE jt_binding.refs RENAME TO parents;"
+           "ALTER TABLE jt_binding.swap RENAME TO refs;")
+    role_update = db.run(
+        "UPDATE jt_binding.role_documents SET data=jsonb_set(data,'{value}','\"wrong\"') "
+        "WHERE _id=1;", False)
+    record("source relation roles and physical columns remain bound",
+           all(db.state(result) == "PT422" for result in
+               (binding_update, binding_insert, binding_delete, binding_function, role_update))
+           and binding_values == "original:replacement",
+           "states=" + str([db.state(result) for result in
+                            (binding_update, binding_insert, binding_delete,
+                             binding_function, role_update)])
+           + f",values={binding_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_nocheck CASCADE; CREATE SCHEMA jt_nocheck;
+CREATE TABLE jt_nocheck.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_nocheck.root(id integer PRIMARY KEY,ref_id integer REFERENCES jt_nocheck.ref(id),value text);
+CREATE TABLE jt_nocheck.child(id integer PRIMARY KEY,parent integer REFERENCES jt_nocheck.root(id),value text);
+INSERT INTO jt_nocheck.ref VALUES(7,'old reference');
+INSERT INTO jt_nocheck.root VALUES(1,7,'immutable');
+INSERT INTO jt_nocheck.child VALUES(10,1,'old child');""")
+    nocheck_spec = {
+        "root": {"table": "jt_nocheck.root", "key": "id",
+                 "fields": {"value": "value"}, "update": False},
+        "object": {"name": "reference", "table": "jt_nocheck.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"},
+                   "etag": False},
+        "array": {"name": "items", "table": "jt_nocheck.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "update": True}}
+    create_view(db, "jt_nocheck.documents", nocheck_spec)
+    old_nocheck = json.loads(db.value("SELECT data::text FROM jt_nocheck.documents WHERE _id=1;"))
+    db.run("UPDATE jt_nocheck.ref SET label='current reference' WHERE id=7;")
+    old_nocheck["items"][0]["value"] = "new child"
+    nocheck_update = db.run(
+        "UPDATE jt_nocheck.documents SET data=" + quote(json.dumps(old_nocheck))
+        + "::jsonb WHERE _id=1;", False)
+    nocheck_state = db.value(
+        "SELECT r.value||':'||r.ref_id||':'||c.value FROM jt_nocheck.root r "
+        "JOIN jt_nocheck.child c ON c.parent=r.id WHERE r.id=1;")
+    record("NOCHECK display drift does not imply a root relationship change",
+           nocheck_update.returncode == 0 and nocheck_state == "immutable:7:new child",
+           f"update={nocheck_update.returncode},state={nocheck_state}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_identity_touch CASCADE; CREATE SCHEMA jt_identity_touch;
+CREATE TABLE jt_identity_touch.ref(id integer PRIMARY KEY);
+CREATE TABLE jt_identity_touch.root(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ ref_id integer REFERENCES jt_identity_touch.ref(id));
+CREATE TABLE jt_identity_touch.child(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ parent bigint REFERENCES jt_identity_touch.root(id),value text);
+INSERT INTO jt_identity_touch.ref VALUES(7);
+INSERT INTO jt_identity_touch.root(ref_id) VALUES(7);
+INSERT INTO jt_identity_touch.child(parent,value) VALUES(1,'old');""")
+    identity_spec = {
+        "root": {"table": "jt_identity_touch.root", "key": "id", "fields": {},
+                 "insert": True, "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_identity_touch.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id"}},
+        "array": {"name": "items", "table": "jt_identity_touch.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_identity_touch.documents", identity_spec)
+    identity_update = db.run(
+        "UPDATE jt_identity_touch.documents SET "
+        "data=jsonb_set(data,'{items,0,value}','\"new\"') WHERE _id=1;", False)
+    identity_value = db.value(
+        "SELECT value FROM jt_identity_touch.child WHERE id=1;")
+    record("child-only updates do not rewrite a GENERATED ALWAYS root key",
+           identity_update.returncode == 0 and identity_value == "new",
+           f"update={identity_update.returncode},value={identity_value}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_typed_duplicate CASCADE; CREATE SCHEMA jt_typed_duplicate;
+CREATE TABLE jt_typed_duplicate.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_typed_duplicate.child(id integer PRIMARY KEY,parent integer REFERENCES jt_typed_duplicate.root(id));
+INSERT INTO jt_typed_duplicate.root VALUES(1,'original');
+INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
+    duplicate_spec = {
+        "root": {"table": "jt_typed_duplicate.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_typed_duplicate.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_typed_duplicate.documents", duplicate_spec)
+    duplicate_insert = db.run(
+        "INSERT INTO jt_typed_duplicate.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"inserted\",\"items\":[{\"id\":20},{\"id\":\"20\"}]}'::jsonb);",
+        False)
+    duplicate_update = db.run(
+        "UPDATE jt_typed_duplicate.documents SET "
+        "data=jsonb_set(jsonb_set(data,'{value}','\"changed\"'),'{items}',"
+        "'[{\"id\":10},{\"id\":\"10\"}]'::jsonb) WHERE _id=1;", False)
+    duplicate_state = db.value(
+        "SELECT value||':'||(SELECT count(*) FROM jt_typed_duplicate.child WHERE parent=1) "
+        "FROM jt_typed_duplicate.root WHERE id=1;")
+    inserted_rows = db.value(
+        "SELECT count(*) FROM jt_typed_duplicate.root WHERE id=2;")
+    record("array identities are unique after conversion to the SQL key type",
+           db.state(duplicate_insert) == "PT422" and db.state(duplicate_update) == "PT422"
+           and duplicate_state == "original:1" and inserted_rows == "0",
+           f"insert={db.state(duplicate_insert)},update={db.state(duplicate_update)},"
+           f"state={duplicate_state},inserted={inserted_rows}")
+
     db.run("ALTER TABLE jt_integrity.root RENAME TO root_original;"
            "CREATE TABLE jt_integrity.root(LIKE jt_integrity.root_original INCLUDING ALL);")
     swapped_update = db.run("UPDATE jt_integrity.documents SET data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)

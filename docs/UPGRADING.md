@@ -2,12 +2,12 @@
 
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
-Keep every JSON mapping in source control. Before regeneration, record view and function grants and confirm that no application writer is active. Recreate one mapping in a transaction so that failure restores the previous objects:
+Keep every JSON mapping in source control. Before regeneration, record view and function grants, inventory objects that depend on the generated view and confirm that no application writer is active. The default procedure deliberately uses `DROP VIEW` without `CASCADE`: if a consumer depends on the view, PostgreSQL stops the operation instead of silently destroying that consumer. Recreate one mapping in a transaction so that failure restores the previous objects:
 
 ```sql
 BEGIN;
 
-DROP VIEW api.orders_dv CASCADE;
+DROP VIEW api.orders_dv;
 
 DO $cleanup$
 DECLARE
@@ -38,11 +38,14 @@ SELECT jsontailor.create_duality_view(
 -- Reapply the deployment-specific grants recorded before regeneration.
 GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO application_role;
 
+-- Run deployment-specific catalogue, read, privilege and RLS acceptance checks here.
+-- Exercise writes only against disposable test rows created inside this transaction.
+
 COMMIT;
 ```
 
-Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and `EXECUTE` on the generated delete function.
+Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and `EXECUTE` on the generated delete function. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation.
 
-After committing, read a representative document, perform an ETag-checked replacement in a disposable transaction, call the delete function against disposable data, and verify row-level security with the deployment role. A relation rename or replacement is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the dependency-based binding check because it is resolved from the restored view dependencies rather than stored numeric OIDs.
+Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the dependency-based binding check because it is resolved from restored view dependencies rather than stored numeric OIDs.
 
 If validation fails before `COMMIT`, issue `ROLLBACK`. Regeneration replaces database objects and therefore requires a planned write window; it is not an online schema migration mechanism.

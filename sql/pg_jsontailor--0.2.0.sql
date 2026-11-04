@@ -8,17 +8,17 @@ LANGUAGE plpgsql STABLE SECURITY INVOKER
 SET search_path = pg_catalog, pg_temp
 AS $generator$
 DECLARE
-    vp text[]; tp text[]; s text; j jsonb; k text; r record;
+    vp text[]; tp text[]; s text; j jsonb; k text; role_alias text; r record;
     cfg jsonb; rel oid; kind "char"; att smallint; typ text; ident "char"; generated "char";
     root_rel oid; object_rel oid; array_rel oid;
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qinsert text; qupdate text; qdelete text; qdelete_document text;
+    qview text; qrel text; qinsert text; qupdate text; qdelete text; qdelete_document text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text;
     object_key_field text; array_key_field text;
-    body text; delete_body text; ddl text; names text[]; relation_checks text := ''; root_key_type text;
+    body text; delete_body text; ddl text; names text[]; binding_columns text[]; relation_checks text := ''; role_checks text := ''; root_key_type text; root_touch_column text;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -130,6 +130,9 @@ BEGIN
     FOREACH k IN ARRAY names LOOP IF k!~'^[A-Za-z][A-Za-z0-9_]{0,62}$' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid document field %s',k); END IF; END LOOP;
     IF cardinality(names)<>(SELECT count(DISTINCT x) FROM unnest(names)x) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='duplicate document-level field'; END IF;
 
+    SELECT value INTO root_touch_column FROM jsonb_each_text(cfg#>'{root,fields}') ORDER BY key LIMIT 1;
+    root_touch_column:=coalesce(root_touch_column,cfg#>>'{object,root_fk}',cfg#>>'{root,key}');
+
     FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{root,fields}') LOOP root_pairs:=root_pairs||format(',%L,r.%I',r.key,r.value); END LOOP;
     IF cfg?'object' THEN
         FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{object,fields}') LOOP object_pairs:=object_pairs||CASE WHEN object_pairs='' THEN '' ELSE ',' END||format('%L,o.%I',r.key,r.value); END LOOP;
@@ -154,8 +157,17 @@ BEGIN
     qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');
     FOR s IN SELECT unnest(ARRAY['root','object','array']) LOOP
         IF NOT cfg?s THEN CONTINUE; END IF;
-        relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L)) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation binding changed; regenerate the duality view'';END IF;',qview,format('%I.%I',(parse_ident(cfg#>>ARRAY[s,'table']))[1],(parse_ident(cfg#>>ARRAY[s,'table']))[2]));
+        tp:=parse_ident(cfg#>>ARRAY[s,'table']);
+        qrel:=format('%I.%I',tp[1],tp[2]);
+        role_alias:=CASE s WHEN 'root' THEN 'r' WHEN 'object' THEN 'o' ELSE 'a' END;
+        role_checks:=role_checks||CASE WHEN role_checks='' THEN '' ELSE ' OR ' END||format('position(%L in v.definition)=0',qrel||' '||role_alias);
+        binding_columns:=ARRAY[cfg#>>ARRAY[s,'key']]||ARRAY(SELECT value FROM jsonb_each_text(cfg#>ARRAY[s,'fields']));
+        IF s='root' AND cfg?'object' THEN binding_columns:=array_append(binding_columns,cfg#>>'{object,root_fk}'); END IF;
+        IF s='array' THEN binding_columns:=binding_columns||ARRAY[cfg#>>'{array,parent_fk}',cfg#>>'{array,order_by}']; END IF;
+        binding_columns:=ARRAY(SELECT DISTINCT x FROM unnest(binding_columns)x);
+        relation_checks:=relation_checks||format('IF (SELECT count(DISTINCT a.attname) FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND a.attname=ANY(%L::text[]))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',qview,qrel,binding_columns::text,cardinality(binding_columns));
     END LOOP;
+    relation_checks:=format('IF (SELECT %s FROM (SELECT pg_get_viewdef(to_regclass(%L),false) AS definition)v) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',role_checks,qview)||relation_checks;
     ddl:=format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
@@ -191,6 +203,9 @@ BEGIN
         IF el?bad AND el->bad='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key must not be null';END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad)<>(SELECT count(DISTINCT e->bad) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
+      SELECT coalesce(jsonb_agg(jsonb_build_object(cfg#>>'{array,key}',e.value->bad)),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e.value?bad;
+      EXECUTE format('SELECT count(*)<>count(DISTINCT x.%%I) FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NOT NULL',cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}') INTO changed USING mapped;
+      IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate typed array key';END IF;
     END IF;
     cols:=ARRAY[]::text[];map:='{}';
     IF doc?'_id' THEN cols:=array_append(cols,cfg#>>'{root,key}');map:=map||jsonb_build_object(cfg#>>'{root,key}',doc->'_id'); END IF;
@@ -242,6 +257,7 @@ BEGIN
       END IF;
     END IF;
     IF cfg?'array' THEN
+      SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
       IF jsonb_typeof(doc->(cfg#>>'{array,name}')) IS DISTINCT FROM 'array' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array field must be an array';END IF;
       FOR el IN SELECT value FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) LOOP
         IF jsonb_typeof(el)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element must be an object';END IF;
@@ -250,6 +266,10 @@ BEGIN
         IF el?%L AND EXISTS(SELECT 1 FROM jsonb_object_keys(cfg#>'{array,fields}')x WHERE x<>%L AND NOT el?x) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='existing array element is incomplete';END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L)<>(SELECT count(DISTINCT e->%L) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
+      SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
+      SELECT coalesce(jsonb_agg(jsonb_build_object(cfg#>>'{array,key}',e.value->bad)),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e.value?bad;
+      EXECUTE format('SELECT count(*)<>count(DISTINCT x.%%I) FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NOT NULL',cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}') INTO changed USING mapped;
+      IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate typed array key';END IF;
     END IF;
     IF doc?'_metadata' AND jsonb_typeof(doc->'_metadata') IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_metadata must be an object';END IF;
     IF jsonb_typeof(doc#>'{_metadata,etag}') IS DISTINCT FROM 'string' THEN RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='etag is required';END IF;
@@ -260,7 +280,7 @@ BEGIN
     IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM doc#>>'{_metadata,etag}' THEN RAISE EXCEPTION USING ERRCODE='PT412',MESSAGE='etag does not match';END IF;
     IF cfg?'object' AND (cfg#>>'{object,etag}')::boolean AND jsonb_typeof(doc->(cfg#>>'{object,name}'))='object' THEN EXECUTE %L INTO el USING doc#>ARRAY[cfg#>>'{object,name}',%L];IF el IS NOT NULL AND el IS DISTINCT FROM doc->(cfg#>>'{object,name}') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object fields do not match referenced row';END IF;END IF;
     IF (doc-'_metadata') IS DISTINCT FROM (cur-'_metadata') THEN
-      IF NOT (cfg#>>'{root,update}')::boolean AND (EXISTS(SELECT 1 FROM jsonb_each(cfg#>'{root,fields}')f WHERE doc->f.key IS DISTINCT FROM cur->f.key) OR (cfg?'object' AND doc->(cfg#>>'{object,name}') IS DISTINCT FROM cur->(cfg#>>'{object,name}'))) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root update is disabled';END IF;
+      IF NOT (cfg#>>'{root,update}')::boolean AND (EXISTS(SELECT 1 FROM jsonb_each(cfg#>'{root,fields}')f WHERE doc->f.key IS DISTINCT FROM cur->f.key) OR (cfg?'object' AND doc#>ARRAY[cfg#>>'{object,name}',%L] IS DISTINCT FROM cur#>ARRAY[cfg#>>'{object,name}',%L])) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root update is disabled';END IF;
       cols:=ARRAY[]::text[];map:='{}';FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP cols:=array_append(cols,keyj#>>'{}');map:=map||jsonb_build_object(keyj#>>'{}',doc->bad);END LOOP;
       IF cfg?'object' AND doc->(cfg#>>'{object,name}') IS DISTINCT FROM cur->(cfg#>>'{object,name}') THEN cols:=array_append(cols,cfg#>>'{object,root_fk}');map:=map||jsonb_build_object(cfg#>>'{object,root_fk}',doc#>ARRAY[cfg#>>'{object,name}',%L]);END IF;
       IF cardinality(cols)>0 THEN EXECUTE format('UPDATE %%I.%%I t SET (%%s)=(SELECT %%s FROM jsonb_populate_record(NULL::%%I.%%I,$1)x) WHERE t.%%I=$2',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),%L,%L,%L) USING map,root_id;
@@ -371,6 +391,8 @@ $body$,
  object_lookup,
  object_key_field,
  object_key_field,
+	 object_key_field,
+	 object_key_field,
  root_schema,
  root_table,
  root_schema,
@@ -378,8 +400,8 @@ $body$,
  cfg#>>'{root,key}',
  root_schema,
  root_table,
- cfg#>>'{root,key}',
- cfg#>>'{root,key}',
+	 root_touch_column,
+	 root_touch_column,
  cfg#>>'{root,key}',
  qview,
  root_schema,

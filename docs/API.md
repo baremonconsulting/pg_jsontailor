@@ -67,7 +67,7 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
 - a view comment containing the normalised specification.
 
-Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. If a source relation is renamed or replaced, generated writes fail with `PT422` until the view is regenerated. This binding check follows PostgreSQL dependencies and therefore remains valid after dump and restore.
+Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. If a configured source relation changes role, is renamed or replaced, or a mapped column is renamed and its old name reused, generated writes fail with `PT422` until the view is regenerated. The binding check follows the view's PostgreSQL relation and attribute dependencies and therefore remains valid after dump and restore.
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
 

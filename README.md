@@ -80,6 +80,8 @@ make installcheck
 Given ordinary relational tables such as those in [`examples/shop_schema.sql`](examples/shop_schema.sql), generate a writable JSON view from a specification:
 
 ```sql
+CREATE SCHEMA api;
+
 SELECT jsontailor.create_duality_view(
     'api.orders_dv',
     '{
@@ -120,7 +122,7 @@ Read a document:
 ```sql
 SELECT data
 FROM api.orders_dv
-WHERE _id = 1001;
+WHERE _id = 42;
 ```
 
 Updates are complete-document replacements, but the client does not have to retain or transmit the complete JSON value. It can pass the identity, the ETag from an earlier read and the new field value; PostgreSQL can construct complete `NEW.data` inside the statement:
@@ -138,14 +140,14 @@ Here `$1` is the root identity, `$2` is the ETag retained from the client's earl
 Delete through the generated function and pass the identifier and ETag explicitly:
 
 ```sql
-SELECT api.orders_dv__delete_document(1001, 'ETAG_FROM_THE_PRECEDING_READ');
+SELECT api.orders_dv__delete_document(42, 'ETAG_FROM_THE_PRECEDING_READ');
 ```
 
 SQL clients can also include both values in a direct delete:
 
 ```sql
 DELETE FROM api.orders_dv
-WHERE _id = 1001
+WHERE _id = 42
   AND data #>> '{_metadata,etag}' = 'ETAG_FROM_THE_PRECEDING_READ'
 RETURNING _id;
 ```
@@ -174,7 +176,7 @@ The repository contains several layers of verification:
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push and pull request runs the regression, isolation, functional, security, set-based reconciliation and native MERGE suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. CodeQL and dependency review run separately with read-only default permissions. PostgREST, cross-database fixture comparison, stress, pilot and benchmark tools are explicit integration or measurement scenarios rather than per-commit CI gates.
+Every push to `main` and every pull request targeting `main` runs the regression, isolation, functional, security, set-based reconciliation and native MERGE suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. CodeQL and dependency review run separately with read-only default permissions. PostgREST, cross-database fixture comparison, stress, pilot and benchmark tools are explicit integration or measurement scenarios rather than per-commit CI gates.
 
 ## Performance
 

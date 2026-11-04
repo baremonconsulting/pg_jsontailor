@@ -2,10 +2,13 @@
 """Verify public version metadata and reference benchmark claims."""
 from __future__ import annotations
 
+import csv
+import collections
 import json
+import math
 from pathlib import Path
 import re
-import csv
+import statistics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,63 @@ def measurements(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(source))
 
 
+def verify_benchmark(folder: Path, expected_groups: int,
+                     expected_executions: int) -> dict[tuple[int, str], dict]:
+    raw = measurements(folder / "measurements.csv")
+    stored = rows(folder / "summary.json")
+    plans = json.loads((folder / "plans.json").read_text())
+    require(len(raw) == expected_executions,
+            f"{folder.name} must contain {expected_executions:,} executions")
+    require(all(row["status"] == "PASS" for row in raw),
+            f"{folder.name} contains a failed execution")
+    require(len(stored) == expected_groups,
+            f"{folder.name} must contain {expected_groups} summary groups")
+
+    grouped: dict[tuple[int, str, str], list[dict[str, str]]] = collections.defaultdict(list)
+    for row in raw:
+        grouped[int(row["size"]), row["operation"], row["implementation"]].append(row)
+    require(len(grouped) == expected_groups * 2,
+            f"{folder.name} has an unexpected implementation-group count")
+
+    for key, samples in grouped.items():
+        require(len(samples) == 33, f"{folder.name} {key} must contain 33 runs")
+        require([int(row["run"]) for row in samples] == list(range(33)),
+                f"{folder.name} {key} has an invalid run sequence")
+        require(all((row["warmup"] == "True") == (int(row["run"]) < 3)
+                    for row in samples),
+                f"{folder.name} {key} has an invalid warm-up structure")
+
+    for (size, operation), summary in stored.items():
+        calculated: dict[str, dict[str, float]] = {}
+        for implementation in ("direct", "duality"):
+            key = (size, operation, implementation)
+            samples = grouped[key]
+            values = sorted(float(row["execution_ms"]) for row in samples
+                            if row["warmup"] == "False")
+            calculated[implementation] = {
+                "median_ms": statistics.median(values),
+                "p95_ms": values[int(.95 * (len(values) - 1))],
+                "min_ms": min(values),
+                "max_ms": max(values),
+            }
+            for field, actual in calculated[implementation].items():
+                require(math.isclose(actual, summary[implementation][field],
+                                     rel_tol=1e-12, abs_tol=1e-12),
+                        f"{folder.name} {key} {field} differs from raw timings")
+            plan_key = f"{size}:{operation}:{implementation}"
+            require(plan_key in plans, f"{folder.name} is missing plan {plan_key}")
+            first_measured = next(row for row in samples if row["run"] == "3")
+            plan_time = sum(plan["Execution Time"] for plan in plans[plan_key])
+            require(math.isclose(plan_time, float(first_measured["execution_ms"]),
+                                 rel_tol=1e-12, abs_tol=1e-12),
+                    f"{folder.name} {plan_key} plan differs from the CSV")
+        ratio = calculated["duality"]["median_ms"] / calculated["direct"]["median_ms"]
+        require(math.isclose(ratio, summary["median_ratio"],
+                             rel_tol=1e-12, abs_tol=1e-12),
+                f"{folder.name} {(size, operation)} median ratio differs")
+    return stored
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -46,20 +106,8 @@ def main() -> int:
     require(f"DATA = sql/pg_jsontailor--{value}.sql" in text("Makefile"),
             "Makefile version differs from the control file")
 
-    current = rows(CURRENT)
-    baseline = rows(BASELINE)
-    require(len(current) == 40, "reference benchmark must contain 40 groups")
-    require(len(baseline) == 25, "baseline benchmark must contain 25 groups")
-    current_measurements = measurements(CURRENT.with_name("measurements.csv"))
-    baseline_measurements = measurements(BASELINE.with_name("measurements.csv"))
-    require(len(current_measurements) == 2640,
-            "reference benchmark must contain 2,640 executions")
-    require(len(baseline_measurements) == 1650,
-            "baseline benchmark must contain 1,650 executions")
-    require(all(row["status"] == "PASS" for row in current_measurements),
-            "reference benchmark contains a failed execution")
-    require(all(row["status"] == "PASS" for row in baseline_measurements),
-            "baseline benchmark contains a failed execution")
+    current = verify_benchmark(CURRENT.parent, 40, 2640)
+    baseline = verify_benchmark(BASELINE.parent, 25, 1650)
 
     claims = {
         (1000, "read"): (4.205, 4.224, 2.874),
