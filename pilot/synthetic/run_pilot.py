@@ -2,10 +2,12 @@
 """Run the isolated synthetic client-pilot rehearsal and emit auditable evidence."""
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import os
 from pathlib import Path
+import shutil
 import statistics
 import subprocess
 import time
@@ -16,14 +18,44 @@ ROOT = Path(__file__).resolve().parents[2]
 PILOT = ROOT / "pilot" / "synthetic"
 DOCS = PILOT / "documents"
 RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-OUT = ROOT / "results" / f"pilot-{RUN_ID}"
+parser = argparse.ArgumentParser()
+parser.add_argument("--pg-bin", type=Path,
+                    default=Path(os.environ["PG_JSONTAILOR_PG_BIN"])
+                    if os.environ.get("PG_JSONTAILOR_PG_BIN")
+                    else Path(shutil.which("pg_config") or "/usr/bin/pg_config").parent)
+parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run/socket")))
+parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
+parser.add_argument("--pg-user", default=os.environ.get(
+    "PGUSER", os.environ.get("USER", "postgres")))
+parser.add_argument("--postgrest", type=Path,
+                    default=Path(os.environ["PG_JSONTAILOR_POSTGREST"])
+                    if os.environ.get("PG_JSONTAILOR_POSTGREST")
+                    else Path(shutil.which("postgrest") or
+                              ROOT / ".tools/postgrest-v16.5/postgrest"))
+parser.add_argument("--postgrest-db-host", default="127.0.0.1")
+parser.add_argument("--rest-host", default="127.0.0.1")
+parser.add_argument("--rest-port", type=int, default=3060)
+parser.add_argument("--admin-port", type=int, default=3061)
+parser.add_argument("--database", default="jsontailor_synthetic_pilot")
+parser.add_argument("--restore-database", default="jsontailor_synthetic_pilot_restore")
+parser.add_argument("--output", type=Path)
+args = parser.parse_args()
+
+OUT = args.output or ROOT / "results" / f"pilot-{RUN_ID}"
 RAW = OUT / "raw"
-DB = "jsontailor_synthetic_pilot"
-RESTORE_DB = "jsontailor_synthetic_pilot_restore"
-BASE = "http://127.0.0.1:3060/orders_dv"
-PG = Path("/home/adam/workspaces/pg-jsontailor-2026-11-03/.tools/pgsql-18.6/bin")
-PGRST = ROOT / ".tools" / "postgrest-v16.5" / "postgrest"
-ENV = {**os.environ, "PGHOST": str(ROOT / ".run" / "socket"), "PGPORT": "55433", "PGUSER": "adam"}
+DB = args.database
+RESTORE_DB = args.restore_database
+REST_ORIGIN = f"http://{args.rest_host}:{args.rest_port}"
+BASE = REST_ORIGIN + "/orders_dv"
+ADMIN_URL = f"http://{args.rest_host}:{args.admin_port}/ready"
+PG = args.pg_bin
+PGRST = args.postgrest
+ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port),
+       "PGUSER": args.pg_user}
+
+if DB in {"postgres", "template0", "template1"} or RESTORE_DB in {
+        "postgres", "template0", "template1"} or DB == RESTORE_DB:
+    parser.error("pilot databases must be distinct dedicated disposable databases")
 
 OUT.mkdir(parents=True)
 RAW.mkdir()
@@ -128,12 +160,23 @@ dump = RAW / "pre_pilot.dump"
 run([PG / "pg_dump", "-Fc", "-d", DB, "-f", dump])
 
 log_handle = (RAW / "postgrest.log").open("w")
-server = subprocess.Popen([str(PGRST), str(PILOT / "postgrest.conf")], stdout=log_handle,
+postgrest_config = RAW / "postgrest.conf"
+postgrest_uri = (f"postgresql://jt_pilot_authenticator:pilot-local-only@"
+                 f"{args.postgrest_db_host}:{args.pg_port}/{DB}")
+postgrest_config.write_text(
+    f"db-uri = {json.dumps(postgrest_uri)}\n"
+    'db-schemas = "pilot_api"\n'
+    'db-anon-role = "jt_pilot_anon"\n'
+    f"server-host = {json.dumps(args.rest_host)}\n"
+    f"server-port = {args.rest_port}\n"
+    f"admin-server-port = {args.admin_port}\n"
+    'log-level = "warn"\n')
+server = subprocess.Popen([str(PGRST), str(postgrest_config)], stdout=log_handle,
                           stderr=subprocess.STDOUT, env=ENV)
 try:
     for _ in range(80):
         try:
-            urllib.request.urlopen("http://127.0.0.1:3061/ready", timeout=.2)
+            urllib.request.urlopen(ADMIN_URL, timeout=.2)
             break
         except Exception:
             time.sleep(.1)
@@ -185,7 +228,7 @@ try:
     add_check("error-contract", [se,sm,su]==[428,422,422], [se,sm,su], [428,422,422])
 
     # Base tables are not REST resources.
-    old_base=BASE; BASE = "http://127.0.0.1:3060/orders"
+    old_base=BASE; BASE = REST_ORIGIN + "/orders"
     hidden_status,_,_=http("base table hidden")
     BASE=old_base
     add_check("rest-surface", hidden_status==404, hidden_status, 404)
@@ -194,7 +237,7 @@ try:
     _, rows, _ = http("read document 205 for deletion", query="?_id=eq.205")
     delete_etag = rows[0]["data"]["_metadata"]["etag"]
     old_base = BASE
-    BASE = "http://127.0.0.1:3060/rpc/orders_dv__delete_document"
+    BASE = REST_ORIGIN + "/rpc/orders_dv__delete_document"
     sd,_,_=http("delete document 205", "POST", document={
         "expected_id": 205, "expected_etag": delete_etag}, raw_body=True)
     BASE = old_base
@@ -202,12 +245,22 @@ try:
     add_check("delete", sd==200 and left == "0", {"status":sd,"rows":left}, "200 and zero rows")
 
     # Small operational sample, not a benchmark claim.
-    timings=[]
+    operational_samples=[]
     for n in range(20):
-        _,_,elapsed=http(f"operational read {n+1}", query="?_id=eq.201")
-        timings.append(elapsed)
-    add_check("operational-read-sample", all(t < 1000 for t in timings),
-              {"median_ms":round(statistics.median(timings),3),"max_ms":round(max(timings),3)}, "20 successful local reads under 1000 ms")
+        status,rows,elapsed=http(f"operational read {n+1}", query="?_id=eq.201")
+        valid = (status == 200 and isinstance(rows,list) and len(rows) == 1
+                 and rows[0].get("_id") == 201 and isinstance(rows[0].get("data"),dict))
+        operational_samples.append({"status":status,"valid":valid,"elapsed_ms":elapsed})
+    add_check("operational-read-sample",
+              all(sample["valid"] and sample["elapsed_ms"] < 1000
+                  for sample in operational_samples),
+              {"statuses":[sample["status"] for sample in operational_samples],
+               "valid_documents":sum(sample["valid"] for sample in operational_samples),
+               "median_ms":round(statistics.median(
+                   sample["elapsed_ms"] for sample in operational_samples),3),
+               "max_ms":round(max(
+                   sample["elapsed_ms"] for sample in operational_samples),3)},
+              "20 successful valid local reads under 1000 ms")
 finally:
     server.terminate()
     try: server.wait(timeout=5)

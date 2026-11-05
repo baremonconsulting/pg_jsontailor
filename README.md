@@ -177,7 +177,7 @@ The repository contains several layers of verification:
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push to `main` and every pull request targeting `main` runs the regression, isolation, functional, security, set-based reconciliation and native MERGE suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. CodeQL and dependency review run separately with read-only default permissions. PostgREST, cross-database fixture comparison, stress, pilot and benchmark tools are explicit integration or measurement scenarios rather than per-commit CI gates.
+Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation and native MERGE suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. CodeQL and dependency review run separately with read-only default permissions. PostgREST, pilot and benchmark tools are explicit integration or measurement scenarios rather than per-commit CI gates. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
 
 ## Performance
 

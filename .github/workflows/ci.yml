@@ -34,6 +34,7 @@ jobs:
           python3 tools/verify_repository_consistency.py
           python3 bench/verify_results.py bench/reference/azure-04d053e
           python3 bench/verify_results.py bench/reference/azure-acecaae
+          python3 tests/tooling_regressions.py
 
       - name: Check repository hygiene
         shell: bash
@@ -134,6 +135,8 @@ jobs:
           "$PGBIN/createdb" jsontailor_ci
           "$PGBIN/psql" -X -v ON_ERROR_STOP=1 -d jsontailor_ci \
             -c 'CREATE EXTENSION pg_jsontailor'
+          "$PGBIN/psql" -X -v ON_ERROR_STOP=1 -d jsontailor_ci \
+            -f tests/verify_installation.sql
           python3 tests/core_operations.py \
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
@@ -162,7 +165,7 @@ jobs:
             --output "$RUNNER_TEMP/merge-results.jsonl"
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 6
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/validation-results.jsonl")" -eq 13
-          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 13
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 14
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/merge-results.jsonl")" -eq 10
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/core-results.jsonl"
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/validation-results.jsonl"

@@ -37,7 +37,8 @@ def verify_results(folder: Path) -> dict[str, int | str]:
     expected_groups = len(sizes) * len(operations)
     expected_measurements = expected_groups * len(IMPLEMENTATIONS) * total_runs
     require(warmups >= 0 and repetitions > 0, "invalid sampling configuration")
-    require(len(set(sizes)) == len(sizes) and all(size >= 0 for size in sizes),
+    require(bool(sizes) and len(set(sizes)) == len(sizes)
+            and all(size >= 0 for size in sizes),
             "invalid size configuration")
     require(len(set(operations)) == len(operations) and operations,
             "invalid operation configuration")
@@ -61,8 +62,12 @@ def verify_results(folder: Path) -> dict[str, int | str]:
         require(len(samples) == total_runs, f"{key} has an invalid sample count")
         require([int(row["run"]) for row in samples] == list(range(total_runs)),
                 f"{key} has an invalid run sequence")
+        require(all(row["warmup"] in {"True", "False"} for row in samples),
+                f"{key} contains a noncanonical warm-up flag")
         require(all((row["warmup"] == "True") == (int(row["run"]) < warmups)
                     for row in samples), f"{key} has an invalid warm-up structure")
+        require(sum(row["warmup"] == "False" for row in samples) == repetitions,
+                f"{key} has an invalid measured-sample count")
         for row in samples:
             for field in ("execution_ms", "planning_ms", "shared_hit_blocks",
                           "shared_dirtied_blocks", "wal_records"):

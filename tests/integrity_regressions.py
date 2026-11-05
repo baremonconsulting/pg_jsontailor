@@ -234,6 +234,41 @@ INSERT INTO jt_binding.parents VALUES(1,1,'parent');""")
                              binding_function, role_update)])
            + f",values={binding_values}")
 
+    same_layout_states = []
+    same_layout_values = []
+    for suffix, object_etag, root_reference in (
+            ("nocheck", False, "1"), ("default", None, "NULL")):
+        schema = f"jt_role_{suffix}"
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.refs(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE {schema}.roots(id integer PRIMARY KEY,
+ ref_id integer REFERENCES {schema}.refs(id),value text);
+INSERT INTO {schema}.refs VALUES(1,NULL,'reference');
+INSERT INTO {schema}.roots VALUES(1,{root_reference},'root');""")
+        same_layout_spec = {
+            "root": {"table": f"{schema}.roots", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.refs", "key": "id",
+                       "root_fk": "ref_id",
+                       "fields": {"id": "id", "ref": "ref_id", "value": "value"}}}
+        if object_etag is not None:
+            same_layout_spec["object"]["etag"] = object_etag
+        create_view(db, f"{schema}.documents", same_layout_spec)
+        db.run(f"ALTER TABLE {schema}.roots RENAME TO swap;"
+               f"ALTER TABLE {schema}.refs RENAME TO roots;"
+               f"ALTER TABLE {schema}.swap RENAME TO refs;")
+        role_swap = db.run(
+            f"UPDATE {schema}.documents SET data=jsonb_set(data,'{{value}}','\"wrong\"') "
+            "WHERE _id=1;", False)
+        same_layout_states.append(db.state(role_swap))
+        same_layout_values.append(db.value(
+            f"SELECT (SELECT value FROM {schema}.refs WHERE id=1)||':'||"
+            f"(SELECT value FROM {schema}.roots WHERE id=1);"))
+    record("same-layout source role swaps are rejected before DML",
+           same_layout_states == ["PT422", "PT422"]
+           and same_layout_values == ["root:reference", "root:reference"],
+           f"states={same_layout_states},values={same_layout_values}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_column_permutation CASCADE;
 CREATE SCHEMA jt_column_permutation;
 CREATE TABLE jt_column_permutation.fields(id integer PRIMARY KEY,a text,b text);

@@ -16,3 +16,20 @@ This rehearsal exercises the currently supported thin slice: one order root, one
 10. Restore the pre-pilot snapshot into a fresh database and recover five roots, ten children, and five documents.
 
 The decision is `GO` only if every check passes. A GO authorises progression to a controlled pilot with anonymised client data; it does not authorise production deployment.
+
+## Running the rehearsal
+
+The runner accepts explicit PostgreSQL, PostgREST, network, database and output settings and otherwise respects `PGHOST`, `PGPORT`, `PGUSER`, `PG_JSONTAILOR_PG_BIN` and `PG_JSONTAILOR_POSTGREST`:
+
+```sh
+python3 pilot/synthetic/run_pilot.py \
+  --pg-bin /usr/lib/postgresql/18/bin \
+  --pg-host /var/run/postgresql \
+  --pg-port 5432 \
+  --pg-user "$(id -un)" \
+  --postgrest /usr/local/bin/postgrest \
+  --database jsontailor_synthetic_pilot \
+  --restore-database jsontailor_synthetic_pilot_restore
+```
+
+Both database names must identify dedicated disposable databases. Use `--postgrest-db-host`, `--rest-host`, `--rest-port` and `--admin-port` when the services do not use their local defaults.
