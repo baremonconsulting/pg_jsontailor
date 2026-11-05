@@ -836,7 +836,7 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
            "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
            "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
            "WHERE n.nspname='jt_integrity' AND p.proname=ANY(ARRAY['documents__insert',"
-           "'documents__update','documents__delete','documents__delete_document']) LOOP "
+           "'documents__update','documents__delete','documents__delete_document','documents__check']) LOOP "
            "EXECUTE format('DROP FUNCTION %s',item); END LOOP; END$$;")
     create_view(db, "jt_integrity.documents", spec)
     regenerated_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;"))
@@ -1084,6 +1084,66 @@ WHERE _id='2026-06-01T10:00:00Z'::timestamptz;""", False)
            f"update={tz_update.returncode},"
            f"value={normalized_value},key={key_insert.returncode}/{key_update.returncode}/"
            f"{normalized_key}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
+CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_provenance.root VALUES(1,'one');""")
+    provenance_spec = {
+        "root": {"table": "jt_provenance.root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True,
+                 "update": True, "delete": True}}
+    create_view(db, "jt_provenance.documents", provenance_spec)
+    metadata_ok = db.value("""SELECT
+      (substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
+              length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,version}')='0.2.0'
+      AND length(substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
+                        length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,hash}')=64;""")
+    inventory_before = db.value("""SELECT generator_version||':'||health_status||':'||
+      (generator_hash=current_generator_hash)::text
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__delete_document(integer,text) FROM PUBLIC;
+COMMENT ON FUNCTION jt_provenance.documents__check() IS 'preserved health comment';
+CREATE FUNCTION jt_provenance.documents__check(integer) RETURNS integer
+LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
+    regenerated = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    preserved = db.value("""SELECT
+      has_table_privilege('public','jt_provenance.documents','SELECT')::text||':'||
+      has_function_privilege('public','jt_provenance.documents__delete_document(integer,text)','EXECUTE')::text||':'||
+      coalesce(obj_description('jt_provenance.documents__check()'::regprocedure,'pg_proc'),'')||':'||
+      jt_provenance.documents__check(7)::text;""")
+    db.run("CREATE VIEW jt_provenance.dependent AS SELECT * FROM jt_provenance.documents;")
+    dependency_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    still_readable = db.value("SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    db.run("DROP VIEW jt_provenance.dependent; ALTER TABLE jt_provenance.root RENAME TO root_old;")
+    drift_check = db.run("SELECT jt_provenance.documents__check();", False)
+    inventory_drift = db.value("""SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    db.run("ALTER TABLE jt_provenance.root_old RENAME TO root;")
+    legacy_comment = "pg_jsontailor duality view spec v1: " + json.dumps(
+        provenance_spec, separators=(",", ":"), sort_keys=True)
+    db.run("COMMENT ON VIEW jt_provenance.documents IS " + quote(legacy_comment) + ";")
+    legacy_regenerated = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    inventory_after = db.value("""SELECT generator_version||':'||health_status||':'||
+      (generator_hash=current_generator_hash)::text
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    record("generator provenance, inventory, health and regeneration are operational",
+           metadata_ok == "t" and inventory_before == "0.2.0:OK:true"
+           and regenerated.returncode == 0
+           and preserved == "true:false:preserved health comment:7"
+           and db.state(dependency_block) == "2BP01" and still_readable == "one"
+           and db.state(drift_check) == "PT422" and inventory_drift == "PT422"
+           and legacy_regenerated.returncode == 0
+           and inventory_after == "0.2.0:OK:true",
+           f"metadata={metadata_ok},before={inventory_before},regen={regenerated.returncode},"
+           f"acl={preserved},dependency={db.state(dependency_block)}/{still_readable},"
+           f"drift={db.state(drift_check)}/{inventory_drift},"
+           f"legacy={legacy_regenerated.returncode},after={inventory_after}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))

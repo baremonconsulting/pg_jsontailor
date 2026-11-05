@@ -300,8 +300,8 @@ INSERT INTO jt_v5.root VALUES(1);INSERT INTO jt_v5.child VALUES('a',1,'same','a'
         values=self.scalar("""SELECT count(*)::text||':'||string_agg(proname||'/'||provolatile::text||'/'||prosecdef::text||'/'||array_to_string(proconfig,','),';' ORDER BY proname)
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jsontailor';""")
         usage=self.scalar("SELECT has_schema_privilege('public','jsontailor','USAGE');")
-        passed=values.startswith("2:") and "/s/false/search_path=pg_catalog, pg_temp" in values and "/v/false/search_path=pg_catalog, pg_temp" in values and usage=='t'
-        self.add(18,"installation","PASS" if passed else "FAIL","two functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
+        passed=values.startswith("4:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==3 and usage=='t'
+        self.add(18,"installation","PASS" if passed else "FAIL","four functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
 
     def test19(self):
         self.reset()

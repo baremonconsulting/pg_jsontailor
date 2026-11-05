@@ -2,7 +2,28 @@
 
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
-Keep every JSON mapping in source control. Before regeneration, record view and function grants, inventory objects that depend on the generated view and confirm that no application writer is active. The default procedure deliberately uses `DROP VIEW` without `CASCADE`: if a consumer depends on the view, PostgreSQL stops the operation instead of silently destroying that consumer. Recreate one mapping in a transaction so that failure restores the previous objects:
+Keep every JSON mapping in source control. Before regeneration, inventory objects that depend on the generated view and confirm that no application writer is active. Inspect all managed views and their catalogue health first:
+
+```sql
+SELECT * FROM jsontailor.duality_view_inventory();
+SELECT api.orders_dv__check();
+```
+
+For a view generated with provenance metadata, use the transactional
+regenerator. It preserves view grants, generated-function grants and
+generated-function comments, rejects dependent relations and never uses
+`CASCADE`:
+
+```sql
+BEGIN;
+SELECT jsontailor.regenerate_duality_view('api.orders_dv');
+-- Run deployment-specific read, privilege and RLS acceptance checks here.
+COMMIT;
+```
+
+If a consumer depends on the view, PostgreSQL stops the operation instead of silently destroying that consumer. Failure rolls back all drops and creations. The function also accepts the legacy `pg_jsontailor duality view spec v1` comment written by earlier 0.2.0 development builds and replaces it with current provenance metadata.
+
+For a view whose metadata comment was removed or replaced, recover the mapping from source control and use the explicit procedure below. Record grants before starting. Recreate one mapping in a transaction so that failure restores the previous objects:
 
 ```sql
 BEGIN;
@@ -25,7 +46,8 @@ BEGIN
               'orders_dv__insert',
               'orders_dv__update',
               'orders_dv__delete',
-              'orders_dv__delete_document'
+              'orders_dv__delete_document',
+              'orders_dv__check'
           ])
     LOOP
         EXECUTE format('DROP FUNCTION %s', item);

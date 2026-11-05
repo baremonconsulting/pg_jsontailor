@@ -19,7 +19,17 @@ BEGIN
                 AND p.proargtypes[0]='pg_catalog.text'::regtype::oid
                 AND p.proargtypes[1]='pg_catalog.jsonb'::regtype::oid
                 AND p.prorettype='pg_catalog.text'::regtype::oid
-                AND p.provolatile='s'))
+                AND p.provolatile='s')
+            OR (p.proname='duality_view_inventory'
+                AND p.pronargs=0
+                AND p.prorettype='pg_catalog.record'::regtype::oid
+                AND p.proretset
+                AND p.provolatile='v')
+            OR (p.proname='regenerate_duality_view'
+                AND p.pronargs=1
+                AND p.proargtypes[0]='pg_catalog.text'::regtype::oid
+                AND p.prorettype='pg_catalog.void'::regtype::oid
+                AND p.provolatile='v'))
       INTO total,valid
       FROM pg_catalog.pg_proc p
       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
@@ -28,7 +38,7 @@ BEGIN
       JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
      WHERE n.nspname='jsontailor' AND e.extname='pg_jsontailor';
 
-    IF total<>2 OR valid<>2 THEN
+    IF total<>4 OR valid<>4 THEN
         RAISE EXCEPTION 'extension function type contract mismatch';
     END IF;
     IF EXISTS(

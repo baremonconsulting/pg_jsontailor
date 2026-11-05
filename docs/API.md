@@ -2,14 +2,16 @@
 
 `pg_jsontailor` maps writable JSON documents to ordinary PostgreSQL tables. Its document model can support Oracle-to-PostgreSQL migration work, but it is not a drop-in implementation of every Oracle duality-view or ORDS feature.
 
-`pg_jsontailor` exposes two functions in the `jsontailor` schema.
+`pg_jsontailor` exposes four functions in the `jsontailor` schema.
 
 ```sql
 jsontailor.duality_view_ddl(view_name text, spec jsonb) RETURNS text
 jsontailor.create_duality_view(view_name text, spec jsonb) RETURNS void
+jsontailor.duality_view_inventory() RETURNS TABLE (...)
+jsontailor.regenerate_duality_view(view_name text) RETURNS void
 ```
 
-`duality_view_ddl` validates the specification against PostgreSQL catalogues and returns a complete DDL script. `create_duality_view` executes the same script in the caller's transaction. Neither function is a security definer.
+`duality_view_ddl` validates the specification against PostgreSQL catalogues and returns a complete DDL script. `create_duality_view` executes the same script in the caller's transaction. `duality_view_inventory` reports generator provenance and executes each generated non-mutating health check. `regenerate_duality_view` transactionally replaces a managed view from its stored specification. None of these functions is a security definer.
 
 Both the view name and source table names must contain exactly two identifier parts, for example `api.orders_dv` and `shop.orders`.
 
@@ -85,12 +87,30 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__update()` and its `INSTEAD OF UPDATE` trigger;
 - `api.orders_dv__delete()` and its `INSTEAD OF DELETE` trigger;
 - `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
+- `api.orders_dv__check()`, a non-mutating catalogue health check;
 - zero-row `api.orders_dv__root_binding` and optional `__object_binding` and `__array_binding` internal views;
-- a view comment containing the normalised specification.
+- a view comment containing the normalised specification, generator version and generator hash.
 
 Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. For every configured source role the generator creates a zero-row `<view>__<role>_binding` view in the API schema. These internal views carry an unambiguous PostgreSQL dependency on that role's relation and mapped columns; they expose no rows, are intrinsically non-updatable, and receive no explicit application grants. The non-updatable property remains effective if deployment-wide default privileges or a later broad grant includes the helper views. If a configured source relation changes role, is renamed or replaced, mapped column names are renamed, reused or permuted, classic inheritance is added, or a required foreign key becomes invalid or not enforced, generated writes fail with `PT422` until the view is regenerated. The guard also checks the relative physical order of mapped attributes, the role's primary-key constraint identity and configured foreign-key direction. Adding or dropping an unmapped source column does not invalidate the binding. The guard remains valid after dump and restore and does not depend on rendered view definitions or `quote_all_identifiers`. Renaming a bound primary-key constraint therefore also requires regeneration.
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
+
+## Inventory, health and regeneration
+
+`duality_view_inventory()` returns every managed view, its recorded generator
+version and hash, the installed generator hash, and the result of its generated
+`__check()` function. `OK` means the stored catalogue bindings still satisfy
+the generated guards. A different recorded and current hash means regeneration
+is available even when the schema health check is otherwise `OK`.
+
+`regenerate_duality_view` must be run by the view owner. It reads the stored
+normalised specification, rejects dependent relations, generates and validates
+replacement DDL before dropping anything, and replaces the generated objects
+inside the caller's transaction. View grants, generated-function grants and
+generated-function comments are restored. The metadata comment is deliberately
+replaced with current provenance. A failure rolls back the complete operation.
+The function never uses `CASCADE`; dependencies on other generated objects also
+cause PostgreSQL to stop and roll back the operation.
 
 Write paths deserialize only the physical columns named by the specification.
 Unmapped columns, including columns using NOT NULL domains, are omitted from
