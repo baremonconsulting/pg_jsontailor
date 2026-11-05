@@ -1,4 +1,4 @@
-Parsed test spec with 2 sessions
+Parsed test spec with 5 sessions
 
 starting permutation: begin_writer write_root begin_waiter write_stale_document commit_writer rollback_waiter
 step begin_writer: BEGIN;
@@ -9,3 +9,27 @@ step commit_writer: COMMIT;
 step write_stale_document: <... completed>
 ERROR:  etag does not match
 step rollback_waiter: ROLLBACK;
+
+starting permutation: begin_helper_delete helper_delete begin_fk_writer insert_same_reference rollback_fk_writer begin_object_writer update_shared_object rollback_delete rollback_object_writer
+step begin_helper_delete: BEGIN;
+step helper_delete: DO $delete$ BEGIN PERFORM jt_iso.object_documents__delete_document(1,(SELECT etag FROM jt_iso.object_etags WHERE _id=1)); END $delete$;
+step begin_fk_writer: BEGIN;
+step insert_same_reference: INSERT INTO jt_iso.object_root VALUES(3,7,'new');
+step rollback_fk_writer: ROLLBACK;
+step begin_object_writer: BEGIN;
+step update_shared_object: UPDATE jt_iso.reference SET label='changed' WHERE id=7; <waiting ...>
+step rollback_delete: ROLLBACK;
+step update_shared_object: <... completed>
+step rollback_object_writer: ROLLBACK;
+
+starting permutation: begin_direct_delete direct_delete begin_fk_writer insert_same_reference rollback_fk_writer begin_object_writer update_shared_object rollback_delete rollback_object_writer
+step begin_direct_delete: BEGIN;
+step direct_delete: DELETE FROM jt_iso.object_documents WHERE _id=2 AND data#>>ARRAY['_metadata','etag']=(SELECT etag FROM jt_iso.object_etags WHERE _id=2);
+step begin_fk_writer: BEGIN;
+step insert_same_reference: INSERT INTO jt_iso.object_root VALUES(3,7,'new');
+step rollback_fk_writer: ROLLBACK;
+step begin_object_writer: BEGIN;
+step update_shared_object: UPDATE jt_iso.reference SET label='changed' WHERE id=7; <waiting ...>
+step rollback_delete: ROLLBACK;
+step update_shared_object: <... completed>
+step rollback_object_writer: ROLLBACK;

@@ -76,7 +76,7 @@ The generated SQL is copied into each generated object. Regenerate a view after 
 
 ## Permissions
 
-The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Locking rows with `SELECT FOR UPDATE` also requires `UPDATE`.
+The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`; a referenced object included in the ETag is stabilized with `SELECT FOR SHARE` and requires `SELECT`.
 
 ## Errors
 
@@ -85,6 +85,10 @@ The caller needs `CREATE` on the target schema and the relevant privileges on so
 - `PT428`: required ETag missing;
 - `PT422`: invalid document or operation disabled by the specification;
 - `42501`: insufficient privilege or RLS coverage failure.
+
+PostgreSQL can also return `40001` (serialization failure) or `40P01` (deadlock) for concurrent transactions. Retry
+the complete transaction after either error, re-read the document and use its current ETag; do not replay only the
+failed statement with an old token.
 
 Run DDL returned by `duality_view_ddl` in one transaction with stop-on-error behaviour.
 
