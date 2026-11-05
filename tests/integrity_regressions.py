@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import re
 import subprocess
@@ -33,6 +34,13 @@ class TestDatabase:
     def state(result: subprocess.CompletedProcess[str]) -> str | None:
         match = re.search(r"ERROR:\s+([0-9A-Z]{5}):", result.stderr)
         return match.group(1) if match else None
+
+
+def role_cleanup(db: TestDatabase, role: str):
+    def cleanup() -> None:
+        db.run(f"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};", False)
+    atexit.register(cleanup)
+    return cleanup
 
 
 def create_view(db: TestDatabase, name: str, specification: dict) -> None:
@@ -591,6 +599,7 @@ SELECT jt_nullable_owner.documents__delete_document(
         "FROM jt_nullable_owner.child;")
 
     nullable_role = f"jt_nullable_writer_{time.time_ns()}"
+    cleanup_nullable_role = role_cleanup(db, nullable_role)
     db.run(f"""CREATE ROLE {nullable_role} NOLOGIN;
 GRANT USAGE ON SCHEMA jt_nullable_owner TO {nullable_role};
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_nullable_owner TO {nullable_role};
@@ -604,6 +613,7 @@ CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
         f"SET ROLE {nullable_role}; UPDATE jt_nullable_owner.documents SET data="
         + quote(json.dumps(rls_doc)) + "::jsonb WHERE _id=2;", False)
     db.run(f"DROP OWNED BY {nullable_role}; DROP ROLE {nullable_role};")
+    atexit.unregister(cleanup_nullable_role)
     rls_state = db.value(
         "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
         "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
@@ -611,7 +621,7 @@ CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
     record("mixed orphan replacements and RLS-hidden orphans fail closed",
            db.state(destructive_replace) == "PT422"
            and destructive_state == "target:orphan=NULL=unlinked,owned=2=existing"
-           and db.state(rls_append) in ("PT422", "23505")
+           and db.state(rls_append) == "PT422"
            and rls_state == "target:orphan=NULL=unlinked,owned=2=existing",
            f"replace={db.state(destructive_replace)},state={destructive_state},"
            f"rls={db.state(rls_append)},rls_state={rls_state}")
@@ -732,6 +742,7 @@ END $probe$;""", False)
            f"stderr={diagnostic_probes.stderr.strip()}")
 
     binding_role = f"jt_binding_writer_{time.time_ns()}"
+    cleanup_binding_role = role_cleanup(db, binding_role)
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
 DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
 GRANT USAGE ON SCHEMA jt_binding_acl TO {binding_role};
@@ -776,6 +787,7 @@ INSERT INTO jt_binding_acl.child VALUES('a',1,'A');""")
            f"normal={role_update.returncode},state={acl_state}")
     db.run(f"ALTER DEFAULT PRIVILEGES IN SCHEMA jt_binding_acl REVOKE ALL ON TABLES FROM {binding_role};"
            f"DROP OWNED BY {binding_role}; DROP ROLE {binding_role};")
+    atexit.unregister(cleanup_binding_role)
 
     db.run("""DROP SCHEMA IF EXISTS jt_typed_duplicate CASCADE; CREATE SCHEMA jt_typed_duplicate;
 CREATE TABLE jt_typed_duplicate.root(id integer PRIMARY KEY,value text);
