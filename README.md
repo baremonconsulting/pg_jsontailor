@@ -185,11 +185,12 @@ Every push to `main` and every pull request targeting `main` runs the installati
 
 ## Performance
 
-The write path uses set-based array reconciliation. The repository contains a
-historical Azure single-session reference tied to an exact earlier commit; it
-predates the current write-path guards and is not a performance claim for this
-branch. Results are host-specific and do not represent a production SLO. See
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+The write path uses set-based array reconciliation and set-wise validation.
+The current verified Azure reference at commit `11e6d74` records a 50.471 ms
+median and 50.876 ms p95 for complete replacement of a document with 1,000
+children. Results are host-specific and do not represent a production SLO. See
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full semantic and provenance
+context.
 
 ## Limitations
 

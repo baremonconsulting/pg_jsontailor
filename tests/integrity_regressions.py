@@ -1085,6 +1085,24 @@ WHERE _id='2026-06-01T10:00:00Z'::timestamptz;""", False)
            f"value={normalized_value},key={key_insert.returncode}/{key_update.returncode}/"
            f"{normalized_key}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_statement_guard CASCADE;
+CREATE SCHEMA jt_statement_guard;
+CREATE TABLE jt_statement_guard.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_statement_guard.root
+SELECT n,'row-'||n::text FROM generate_series(1,25)n;""")
+    guard_spec = {"root": {"table": "jt_statement_guard.root", "key": "id",
+                           "fields": {"label": "label"}, "update": True}}
+    create_view(db, "jt_statement_guard.documents", guard_spec)
+    guard_plan = json.loads(db.run(
+        "EXPLAIN (ANALYZE,FORMAT JSON) UPDATE jt_statement_guard.documents SET data=data;"
+    ).stdout)[0]
+    guard_triggers = {item["Trigger Name"]: int(item["Calls"])
+                      for item in guard_plan.get("Triggers", [])}
+    record("catalog guards run once per statement rather than once per document",
+           guard_triggers.get("documents__guard_update") == 1
+           and guard_triggers.get("documents__update") == 25,
+           f"trigger_calls={guard_triggers}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
 CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);
 INSERT INTO jt_provenance.root VALUES(1,'one');""")
