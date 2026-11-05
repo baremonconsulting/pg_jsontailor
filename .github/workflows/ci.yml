@@ -30,7 +30,10 @@ jobs:
         run: python3 tools/verify_extension_sql.py
 
       - name: Verify repository consistency
-        run: python3 tools/verify_repository_consistency.py
+        run: |
+          python3 tools/verify_repository_consistency.py
+          python3 bench/verify_results.py bench/reference/azure-04d053e
+          python3 bench/verify_results.py bench/reference/azure-acecaae
 
       - name: Check repository hygiene
         shell: bash

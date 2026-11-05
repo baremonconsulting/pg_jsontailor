@@ -60,12 +60,25 @@ python3 bench/duality_overhead.py \
   --pg-bin /usr/lib/postgresql/18/bin \
   --pg-host /var/run/postgresql \
   --pg-port 5432 \
-  --pg-user benchmark_user \
+  --pg-user "$(id -un)" \
   --database jsontailor_duality_benchmark \
   --sizes 0,1,10,100,1000 \
   --warmups 3 \
   --repetitions 30 \
-  --output results/duality-benchmark-reference
+  --output results/duality-benchmark-reference \
+  --drop-database-after
 ```
 
-The target database is dropped and recreated, so use a dedicated disposable name. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together with the exact source commit when publishing results. Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline. Run `python3 tools/verify_repository_consistency.py` before publishing changed reference data or release metadata.
+When the source was copied without its `.git` directory, add `--source-commit <40-character-commit>`; otherwise the script refuses to run without reliable provenance. In a Git checkout the commit is detected automatically, and a conflicting explicit value is rejected.
+
+The PostgreSQL role must be able to create and drop the dedicated benchmark database. With peer authentication, pass the operating-system account returned by `id -un`; otherwise pass the configured benchmark role. The script rejects maintenance database names, drops and recreates the target database before measurement, and leaves it available for inspection unless `--drop-database-after` is supplied.
+
+The output path may be absent or may be an existing directory that does not already contain benchmark artifacts. This permits a wrapper to place its log in the directory before starting the measurement while still preventing accidental replacement of earlier evidence. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together. The environment file records the exact source commit, dirty-tree state, connection settings and workload configuration.
+
+Validate any completed run independently:
+
+```sh
+python3 bench/verify_results.py results/duality-benchmark-reference
+```
+
+Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline. Run `python3 tools/verify_repository_consistency.py` before publishing changed reference data or release metadata.

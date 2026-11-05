@@ -173,6 +173,7 @@ The repository contains several layers of verification:
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
 - `bench/duality_overhead.py` for reproducible server-side measurements.
+- `bench/verify_results.py` for independent validation and recomputation of benchmark artifacts.
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
