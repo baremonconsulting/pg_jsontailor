@@ -234,6 +234,63 @@ INSERT INTO jt_binding.parents VALUES(1,1,'parent');""")
                              binding_function, role_update)])
            + f",values={binding_values}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_column_permutation CASCADE;
+CREATE SCHEMA jt_column_permutation;
+CREATE TABLE jt_column_permutation.fields(id integer PRIMARY KEY,a text,b text);
+INSERT INTO jt_column_permutation.fields VALUES(1,'A','B');""")
+    permutation_spec = {
+        "root": {"table": "jt_column_permutation.fields", "key": "id",
+                 "fields": {"first": "a", "second": "b"}, "update": True}}
+    create_view(db, "jt_column_permutation.documents", permutation_spec)
+    db.run("ALTER TABLE jt_column_permutation.fields RENAME COLUMN a TO temporary;"
+           "ALTER TABLE jt_column_permutation.fields RENAME COLUMN b TO a;"
+           "ALTER TABLE jt_column_permutation.fields RENAME COLUMN temporary TO b;")
+    field_swap = db.run(
+        "UPDATE jt_column_permutation.documents "
+        "SET data=jsonb_set(data,'{first}','\"wrong\"') WHERE _id=1;", False)
+    field_values = db.value(
+        "SELECT a||':'||b FROM jt_column_permutation.fields WHERE id=1;")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_key_permutation CASCADE;
+CREATE SCHEMA jt_key_permutation;
+CREATE TABLE jt_key_permutation.fields(id integer PRIMARY KEY,value integer NOT NULL);
+INSERT INTO jt_key_permutation.fields VALUES(1,2),(2,1);""")
+    key_permutation_spec = {
+        "root": {"table": "jt_key_permutation.fields", "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_key_permutation.documents", key_permutation_spec)
+    db.run("ALTER TABLE jt_key_permutation.fields RENAME COLUMN id TO temporary;"
+           "ALTER TABLE jt_key_permutation.fields RENAME COLUMN value TO id;"
+           "ALTER TABLE jt_key_permutation.fields RENAME COLUMN temporary TO value;")
+    key_swap = db.run(
+        "UPDATE jt_key_permutation.documents "
+        "SET data=jsonb_set(data,'{value}','3') WHERE _id=1;", False)
+    key_values = db.value(
+        "SELECT string_agg(id::text||':'||value::text,',' ORDER BY value) "
+        "FROM jt_key_permutation.fields;")
+    record("physical column-name permutations are rejected before DML",
+           db.state(field_swap) == "PT422" and field_values == "B:A"
+           and db.state(key_swap) == "PT422" and key_values == "2:1,1:2",
+           f"field={db.state(field_swap)}/{field_values},"
+           f"key={db.state(key_swap)}/{key_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_quoting CASCADE; CREATE SCHEMA jt_quoting;
+CREATE TABLE jt_quoting.roots(id integer PRIMARY KEY,value text);
+INSERT INTO jt_quoting.roots VALUES(1,'original');""")
+    quoting_spec = {
+        "root": {"table": "jt_quoting.roots", "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_quoting.documents", quoting_spec)
+    quoted_update = db.run(
+        "SET quote_all_identifiers=on;"
+        "UPDATE jt_quoting.documents "
+        "SET data=jsonb_set(data,'{value}','\"updated\"') WHERE _id=1;"
+        "RESET quote_all_identifiers;", False)
+    quoted_value = db.value("SELECT value FROM jt_quoting.roots WHERE id=1;")
+    record("binding guards are independent of identifier rendering settings",
+           quoted_update.returncode == 0 and quoted_value == "updated",
+           f"update={quoted_update.returncode},value={quoted_value}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_nocheck CASCADE; CREATE SCHEMA jt_nocheck;
 CREATE TABLE jt_nocheck.ref(id integer PRIMARY KEY,label text);
 CREATE TABLE jt_nocheck.root(id integer PRIMARY KEY,ref_id integer REFERENCES jt_nocheck.ref(id),value text);

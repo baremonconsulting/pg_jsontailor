@@ -8,7 +8,7 @@ LANGUAGE plpgsql STABLE SECURITY INVOKER
 SET search_path = pg_catalog, pg_temp
 AS $generator$
 DECLARE
-    vp text[]; tp text[]; s text; j jsonb; k text; role_alias text; r record;
+    vp text[]; tp text[]; s text; j jsonb; k text; r record;
     cfg jsonb; rel oid; kind "char"; att smallint; typ text; ident "char"; generated "char";
     root_rel oid; object_rel oid; array_rel oid;
     fk_oid oid; fk_enforced boolean;
@@ -18,7 +18,7 @@ DECLARE
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text;
     object_key_field text; array_key_field text;
-    body text; delete_body text; ddl text; names text[]; binding_columns text[]; relation_checks text := ''; role_checks text := ''; root_key_type text; root_touch_column text;
+    body text; delete_body text; ddl text; names text[]; binding_columns text[]; binding_ordinals integer[]; relation_checks text := ''; root_key_type text; root_touch_column text;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -159,15 +159,23 @@ BEGIN
         IF NOT cfg?s THEN CONTINUE; END IF;
         tp:=parse_ident(cfg#>>ARRAY[s,'table']);
         qrel:=format('%I.%I',tp[1],tp[2]);
-        role_alias:=CASE s WHEN 'root' THEN 'r' WHEN 'object' THEN 'o' ELSE 'a' END;
-        role_checks:=role_checks||CASE WHEN role_checks='' THEN '' ELSE ' OR ' END||format('position(%L in v.definition)=0',qrel||' '||role_alias);
         binding_columns:=ARRAY[cfg#>>ARRAY[s,'key']]||ARRAY(SELECT value FROM jsonb_each_text(cfg#>ARRAY[s,'fields']));
         IF s='root' AND cfg?'object' THEN binding_columns:=array_append(binding_columns,cfg#>>'{object,root_fk}'); END IF;
         IF s='array' THEN binding_columns:=binding_columns||ARRAY[cfg#>>'{array,parent_fk}',cfg#>>'{array,order_by}']; END IF;
         binding_columns:=ARRAY(SELECT DISTINCT x FROM unnest(binding_columns)x);
-        relation_checks:=relation_checks||format('IF (SELECT count(DISTINCT a.attname) FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND a.attname=ANY(%L::text[]))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',qview,qrel,binding_columns::text,cardinality(binding_columns));
+        SELECT array_agg(x.ordinal ORDER BY x.name) INTO binding_ordinals
+        FROM (
+            SELECT c.name,
+                   (SELECT count(*) FROM pg_attribute b
+                    WHERE b.attrelid=to_regclass(qrel) AND b.attnum>0
+                      AND NOT b.attisdropped AND b.attnum<=a.attnum)::integer AS ordinal
+            FROM unnest(binding_columns)c(name)
+            JOIN pg_attribute a ON a.attrelid=to_regclass(qrel)
+                               AND a.attname=c.name AND a.attnum>0 AND NOT a.attisdropped
+        )x;
+        binding_columns:=ARRAY(SELECT x FROM unnest(binding_columns)x ORDER BY x);
+        relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal,a.attnum FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped) current USING(attname,ordinal) WHERE EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=current.attnum))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qview,qrel,cardinality(binding_columns));
     END LOOP;
-    relation_checks:=format('IF (SELECT %s FROM (SELECT pg_get_viewdef(to_regclass(%L),false) AS definition)v) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',role_checks,qview)||relation_checks;
     ddl:=format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
