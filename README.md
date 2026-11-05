@@ -18,6 +18,7 @@ The current implementation supports:
 - document reads, inserts, full replacements and guarded deletes;
 - optimistic concurrency using SHA-256 ETags;
 - PostgreSQL row-level security and invoker rights;
+- generator provenance, catalogue health checks and transactional regeneration;
 - generated DDL that has no runtime dependency on the extension.
 
 ## Runtime requirements

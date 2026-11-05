@@ -14,11 +14,11 @@ DECLARE
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text;
+    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text; qcheck text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; runtime_enforced_clause text; root_key_type text; root_touch_column text;
+    body text; delete_body text; check_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -27,7 +27,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must be a qualified schema.name';
     END;
     IF cardinality(vp)<>2 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must have exactly two parts'; END IF;
-    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 THEN
+    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 OR octet_length(vp[2]||'__check')>63 THEN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='generated object name exceeds 63 bytes';
     END IF;
     IF jsonb_typeof(spec) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='spec must be an object'; END IF;
@@ -158,7 +158,7 @@ BEGIN
     IF cfg?'object' AND NOT (cfg#>>'{object,etag}')::boolean THEN
         etag_payload:=format('jsonb_set(d.payload,ARRAY[%L],CASE WHEN jsonb_typeof(d.payload->%L)=''object'' THEN jsonb_build_object(%L,d.payload#>ARRAY[%L,%L]) ELSE ''null''::jsonb END)',cfg#>>'{object,name}',cfg#>>'{object,name}',object_key_field,cfg#>>'{object,name}',object_key_field);
     END IF;
-    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');
+    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');qcheck:=format('%I.%I',vp[1],vp[2]||'__check');
     FOR s IN SELECT unnest(ARRAY['root','object','array']) LOOP
         IF NOT cfg?s THEN CONTINUE; END IF;
         tp:=parse_ident(cfg#>>ARRAY[s,'table']);
@@ -193,6 +193,9 @@ BEGIN
     IF cfg?'array' THEN
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute fk ON fk.attrelid=c.conrelid AND fk.attnum=c.conkey[1] JOIN pg_attribute pk ON pk.attrelid=c.confrelid AND pk.attnum=c.confkey[1] WHERE c.conrelid=to_regclass(%L) AND c.confrelid=to_regclass(%L) AND c.contype=''f'' AND c.conkey=ARRAY[fk.attnum]::smallint[] AND c.confkey=ARRAY[pk.attnum]::smallint[] AND fk.attname=%L AND pk.attname=%L AND NOT c.condeferrable AND c.convalidated AND c.confdeltype IN (''a'',''r'') AND %s) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',format('%I.%I',array_schema,array_table),format('%I.%I',root_schema,root_table),cfg#>>'{array,parent_fk}',cfg#>>'{root,key}',runtime_enforced_clause);
     END IF;
+    SELECT encode(sha256(convert_to(pg_get_functiondef('jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex') INTO generator_hash;
+    metadata:=jsonb_build_object('format',1,'spec',cfg,'generator',jsonb_build_object('version','0.2.0','hash',generator_hash));
+    check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,relation_checks,generator_hash);
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
@@ -577,7 +580,7 @@ BEGIN
   RETURN cur;
 END
 $delete_body$,cfg,relation_checks,qview);
-    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor duality view spec v1: '||cfg::text);
+    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
     RETURN ddl;
 END
 $generator$;
@@ -592,5 +595,194 @@ BEGIN
   ddl:=jsontailor.duality_view_ddl(view_name,spec);EXECUTE ddl;
 END
 $creator$;
+
+CREATE FUNCTION jsontailor.duality_view_inventory()
+RETURNS TABLE(
+  view_name text,
+  generator_version text,
+  generator_hash text,
+  current_generator_hash text,
+  health_status text,
+  health_detail text)
+LANGUAGE plpgsql VOLATILE SECURITY INVOKER
+SET search_path=pg_catalog,pg_temp
+AS $inventory$
+DECLARE r record; metadata jsonb; health jsonb;
+BEGIN
+  SELECT encode(sha256(convert_to(pg_get_functiondef(
+    'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex')
+    INTO current_generator_hash;
+  FOR r IN
+    SELECT n.nspname,c.relname,obj_description(c.oid,'pg_class') description
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE c.relkind='v'
+      AND obj_description(c.oid,'pg_class') LIKE 'pg_jsontailor metadata v1: %%'
+    ORDER BY n.nspname,c.relname
+  LOOP
+    view_name:=format('%I.%I',r.nspname,r.relname);
+    generator_version:=NULL;generator_hash:=NULL;health_status:=NULL;health_detail:=NULL;
+    metadata:=NULL;health:=NULL;
+    BEGIN
+      metadata:=substr(r.description,length('pg_jsontailor metadata v1: ')+1)::jsonb;
+      generator_version:=metadata#>>'{generator,version}';
+      generator_hash:=metadata#>>'{generator,hash}';
+      EXECUTE format('SELECT %I.%I()',r.nspname,r.relname||'__check') INTO health;
+      health_status:=coalesce(health->>'status','ERROR');
+      health_detail:=CASE WHEN generator_hash=current_generator_hash
+        THEN NULL ELSE 'generated objects use a different generator build' END;
+    EXCEPTION WHEN OTHERS THEN
+      health_status:=SQLSTATE;
+      health_detail:=SQLERRM;
+    END;
+    RETURN NEXT;
+  END LOOP;
+END
+$inventory$;
+
+CREATE FUNCTION jsontailor.regenerate_duality_view(view_name text)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY INVOKER
+SET search_path=pg_catalog,pg_temp
+AS $regenerator$
+DECLARE
+  vp text[]; target oid; target_owner oid; description text; metadata jsonb; specification jsonb;
+  r record; command text; restore_commands text[]:=ARRAY[]::text[]; revoke_principals text[]:=ARRAY['PUBLIC'];
+  generated_names text[]; generated_name text; dependent text; ddl text; root_key_oid oid;
+BEGIN
+  IF view_name IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must not be SQL NULL';
+  END IF;
+  BEGIN vp:=parse_ident(view_name,true); EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must be a qualified schema.name';
+  END;
+  IF cardinality(vp)<>2 THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must have exactly two parts';
+  END IF;
+  SELECT c.oid,c.relowner,obj_description(c.oid,'pg_class')
+    INTO target,target_owner,description
+  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname=vp[1] AND c.relname=vp[2] AND c.relkind='v';
+  IF target IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='duality view does not exist';
+  END IF;
+  IF target_owner<>(SELECT oid FROM pg_roles WHERE rolname=current_user) THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='regeneration must be run by the view owner';
+  END IF;
+  IF description LIKE 'pg_jsontailor metadata v1: %%' THEN
+    BEGIN metadata:=substr(description,length('pg_jsontailor metadata v1: ')+1)::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='duality view metadata is invalid';
+    END;
+    specification:=metadata->'spec';
+  ELSIF description LIKE 'pg_jsontailor duality view spec v1: %%' THEN
+    BEGIN specification:=substr(description,length('pg_jsontailor duality view spec v1: ')+1)::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='legacy duality view metadata is invalid';
+    END;
+  ELSE
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view is not a managed pg_jsontailor duality view';
+  END IF;
+  IF specification IS NULL OR jsonb_typeof(specification)<>'object' THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='duality view specification is missing';
+  END IF;
+  SELECT a.atttypid INTO root_key_oid
+  FROM pg_attribute a
+  WHERE a.attrelid=to_regclass(specification#>>'{root,table}')
+    AND a.attname=specification#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
+
+  SELECT string_agg(DISTINCT format('%I.%I',dn.nspname,dc.relname),', ' ORDER BY format('%I.%I',dn.nspname,dc.relname))
+    INTO dependent
+  FROM pg_depend d JOIN pg_rewrite rw ON rw.oid=d.objid AND d.classid='pg_rewrite'::regclass
+  JOIN pg_class dc ON dc.oid=rw.ev_class JOIN pg_namespace dn ON dn.oid=dc.relnamespace
+  WHERE d.refclassid='pg_class'::regclass AND d.refobjid=target AND dc.oid<>target;
+  IF dependent IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='dependent relations prevent safe regeneration',DETAIL=dependent;
+  END IF;
+
+  FOR r IN
+    SELECT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END principal,
+           x.privilege_type,x.is_grantable
+    FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) x
+    WHERE c.oid=target AND x.grantee<>target_owner
+  LOOP
+    restore_commands:=array_append(restore_commands,format('GRANT %s ON TABLE %I.%I TO %s%s',
+      r.privilege_type,vp[1],vp[2],r.principal,CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END));
+    revoke_principals:=array_append(revoke_principals,r.principal);
+  END LOOP;
+
+  generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
+                         vp[2]||'__delete_document',vp[2]||'__check'];
+  FOR r IN
+    SELECT p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,
+           p.proowner,obj_description(p.oid,'pg_proc') description
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+            AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
+        OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
+        OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
+            AND p.proargtypes[0]=root_key_oid AND p.proargtypes[1]='text'::regtype
+            AND p.prorettype='jsonb'::regtype))
+  LOOP
+    FOR command IN
+      SELECT format('GRANT %s ON FUNCTION %I.%I(%s) TO %s%s',x.privilege_type,
+                    r.nspname,r.proname,r.args,
+                    CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END,
+                    CASE WHEN x.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)
+      FROM aclexplode(coalesce((SELECT proacl FROM pg_proc WHERE oid=r.oid),
+                               acldefault('f',r.proowner))) x
+      WHERE x.grantee<>r.proowner
+    LOOP restore_commands:=array_append(restore_commands,command);END LOOP;
+    IF r.description IS NOT NULL THEN
+      restore_commands:=array_append(restore_commands,
+        format('COMMENT ON FUNCTION %I.%I(%s) IS %L',r.nspname,r.proname,r.args,r.description));
+    END IF;
+  END LOOP;
+
+  ddl:=jsontailor.duality_view_ddl(format('%I.%I',vp[1],vp[2]),specification);
+  EXECUTE format('DROP VIEW %I.%I',vp[1],vp[2]);
+  FOREACH generated_name IN ARRAY ARRAY[vp[2]||'__root_binding',vp[2]||'__object_binding',vp[2]||'__array_binding'] LOOP
+    EXECUTE format('DROP VIEW IF EXISTS %I.%I',vp[1],generated_name);
+  END LOOP;
+  FOR r IN
+    SELECT p.oid::regprocedure identity
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+            AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
+        OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
+        OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
+            AND p.proargtypes[0]=root_key_oid AND p.proargtypes[1]='text'::regtype
+            AND p.prorettype='jsonb'::regtype))
+  LOOP EXECUTE format('DROP FUNCTION %s',r.identity);END LOOP;
+  EXECUTE ddl;
+
+  FOR command IN
+    SELECT DISTINCT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END
+    FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) x
+    WHERE c.oid=format('%I.%I',vp[1],vp[2])::regclass AND x.grantee<>c.relowner
+    UNION SELECT DISTINCT x FROM unnest(revoke_principals)x
+  LOOP
+    EXECUTE format('REVOKE ALL ON TABLE %I.%I FROM %s',vp[1],vp[2],command);
+  END LOOP;
+  FOR r IN
+    SELECT p.oid::regprocedure identity
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+            AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
+        OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
+        OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
+            AND p.proargtypes[0]=root_key_oid AND p.proargtypes[1]='text'::regtype
+            AND p.prorettype='jsonb'::regtype))
+  LOOP
+    FOR command IN
+      SELECT DISTINCT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END
+      FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) x
+      WHERE p.oid=r.identity::oid AND x.grantee<>p.proowner
+    LOOP EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %s',r.identity,command);END LOOP;
+  END LOOP;
+  FOREACH command IN ARRAY restore_commands LOOP EXECUTE command;END LOOP;
+END
+$regenerator$;
 
 GRANT USAGE ON SCHEMA jsontailor TO PUBLIC;
