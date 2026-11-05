@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current 0.2.x development line receives security fixes. Earlier validation versions are not supported.
+The unreleased 0.2.0 development line receives security fixes. No earlier validation build is supported as a released product.
 
 ## Reporting a vulnerability
 
@@ -13,3 +13,11 @@ Include the affected version, PostgreSQL version, reproduction steps and expecte
 ## Deployment note
 
 Generated views and triggers use invoker rights. Deployers remain responsible for table privileges, row-level security policies, PostgREST exposure, authentication, TLS, backups and operational monitoring.
+
+The normalized mapping specification and generated SQL are visible to roles
+that can inspect PostgreSQL catalogue comments and function definitions. They
+must not contain secrets. Under RLS, attempting to use an explicit child key
+that belongs to a hidden row can return `PT422`; as with a primary-key conflict,
+this may reveal that the key is already allocated. Use `GENERATED ALWAYS`
+identities when key existence is sensitive, and do not expose catalogue access
+or arbitrary write errors more broadly than the application requires.
