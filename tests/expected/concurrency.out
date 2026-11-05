@@ -1,4 +1,4 @@
-Parsed test spec with 2 sessions
+Parsed test spec with 3 sessions
 
 starting permutation: begin_writer write_root begin_waiter write_stale_document commit_writer rollback_waiter
 step begin_writer: BEGIN;
@@ -9,3 +9,14 @@ step commit_writer: COMMIT;
 step write_stale_document: <... completed>
 ERROR:  etag does not match
 step rollback_waiter: ROLLBACK;
+
+starting permutation: begin_owner lock_owner begin_array_waiter write_raced_array claim_child commit_owner rollback_array_waiter
+step begin_owner: BEGIN;
+step lock_owner: DO $lock$ BEGIN PERFORM pg_advisory_xact_lock(8675309); END $lock$;
+step begin_array_waiter: BEGIN;
+step write_raced_array: UPDATE jt_iso.array_documents SET data=jsonb_set(data,ARRAY['items'],jsonb_build_array(jsonb_build_object('id',1,'value','changed'),jsonb_build_object('id',99,'value','requested'))) WHERE _id=1; <waiting ...>
+step claim_child: INSERT INTO jt_iso.array_child VALUES(99,2,'foreign');
+step commit_owner: COMMIT;
+step write_raced_array: <... completed>
+ERROR:  array key does not belong to document
+step rollback_array_waiter: ROLLBACK;

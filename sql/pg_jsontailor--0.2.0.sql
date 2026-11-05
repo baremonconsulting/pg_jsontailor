@@ -348,7 +348,12 @@ BEGIN
           SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}');
           BEGIN
             EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') USING mapped;
-            GET DIAGNOSTICS n=ROW_COUNT;IF n<>new_explicit THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array insert denied';END IF;
+            GET DIAGNOSTICS n=ROW_COUNT;
+            IF n<>new_explicit THEN
+              EXECUTE format('SELECT coalesce(bool_or(t.%%I IS DISTINCT FROM $2),false) FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x JOIN %%I.%%I t ON t.%%I=x.%%I WHERE x.%%I IS NOT NULL',cfg#>>'{array,parent_fk}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,key}') INTO changed USING mapped,root_id;
+              IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
+              RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array insert denied';
+            END IF;
           EXCEPTION WHEN unique_violation THEN
             GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
             IF EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class rel ON rel.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=rel.relnamespace JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE (c.conrelid=to_regclass(cfg#>>'{array,table}') OR c.conrelid IN (SELECT tree.relid FROM pg_partition_tree(to_regclass(cfg#>>'{array,table}')) tree)) AND c.contype='p' AND cardinality(c.conkey)=1 AND c.conname=violation_constraint AND ns.nspname=violation_schema AND rel.relname=violation_table AND a.attname=cfg#>>'{array,key}') THEN
