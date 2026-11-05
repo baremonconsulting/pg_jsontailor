@@ -8,6 +8,9 @@ Keep every JSON mapping in source control. Before regeneration, record view and 
 BEGIN;
 
 DROP VIEW api.orders_dv;
+DROP VIEW IF EXISTS api.orders_dv__root_binding;
+DROP VIEW IF EXISTS api.orders_dv__object_binding;
+DROP VIEW IF EXISTS api.orders_dv__array_binding;
 
 DO $cleanup$
 DECLARE
@@ -46,6 +49,6 @@ COMMIT;
 
 Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and `EXECUTE` on the generated delete function. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation.
 
-Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement, primary-key constraint rename or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the binding check because it is resolved from restored dependencies, constraint names and catalogue structure rather than stored numeric OIDs.
+Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement, primary-key constraint rename or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the binding check because it is resolved from restored per-role binding-view dependencies, constraint names and catalogue structure rather than stored numeric OIDs. The binding views are generated implementation objects and must be dropped and recreated with the main view as shown above.
 
 If validation fails before `COMMIT`, issue `ROLLBACK`. Regeneration replaces database objects and therefore requires a planned write window; it is not an online schema migration mechanism.

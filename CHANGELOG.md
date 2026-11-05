@@ -24,7 +24,10 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Hardened benchmark output handling, provenance capture, argument validation, optional database cleanup and independent artifact verification.
 - Bound source roles to their primary-key identity and foreign-key topology, closing same-layout role swaps before DML.
 - Replaced the obsolete merge-patch installation check, archived retired merge-patch tooling and hardened the portable synthetic pilot.
-- Rejected empty benchmark workloads and noncanonical warm-up flags during artifact verification.
+- Rejected empty or malformed benchmark metadata, fractional sampling values and noncanonical warm-up flags during artifact verification.
+- Added dump/restore-safe per-role binding views to reject fully symmetric source-role swaps.
+- Made installation verification independent of identifier rendering and required semantic view, trigger and update read-back.
+- Required operational pilot reads to return the expected document identity and ETag, and verified that binding views remain inaccessible through PostgREST.
 - Corrected NOCHECK reference drift, GENERATED ALWAYS root touch and typed child-key duplicate handling.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

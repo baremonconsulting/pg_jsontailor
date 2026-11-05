@@ -137,6 +137,8 @@ jobs:
             -c 'CREATE EXTENSION pg_jsontailor'
           "$PGBIN/psql" -X -v ON_ERROR_STOP=1 -d jsontailor_ci \
             -f tests/verify_installation.sql
+          python3 tests/installation_checker_regressions.py \
+            --psql "$PGBIN/psql" --database jsontailor_ci
           python3 tests/core_operations.py \
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
@@ -165,7 +167,7 @@ jobs:
             --output "$RUNNER_TEMP/merge-results.jsonl"
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/core-results.jsonl")" -eq 6
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/validation-results.jsonl")" -eq 13
-          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 14
+          test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/integrity-results.jsonl")" -eq 15
           test "$(grep -c '"status": "PASS"' "$RUNNER_TEMP/merge-results.jsonl")" -eq 10
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/core-results.jsonl"
           ! grep -q '"status": "FAIL"' "$RUNNER_TEMP/validation-results.jsonl"

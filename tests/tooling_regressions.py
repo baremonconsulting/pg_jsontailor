@@ -63,6 +63,20 @@ def benchmark_checks() -> None:
             csv.DictWriter(stream, fieldnames=fields).writeheader()
         expect_rejection(verify, empty, "invalid size configuration")
 
+        for name,change,expected in (
+                ("empty-operations", lambda value: value.update(operations=[]),
+                 "invalid operation configuration"),
+                ("fractional-size", lambda value: value.update(sizes=[0.5,1,10,100,1000]),
+                 "invalid size configuration"),
+                ("fractional-warmups", lambda value: value.update(warmups=3.5),
+                 "invalid sampling configuration")):
+            case = scratch / name
+            shutil.copytree(source, case)
+            environment = json.loads((case / "environment.json").read_text())
+            change(environment)
+            (case / "environment.json").write_text(json.dumps(environment))
+            expect_rejection(verify, case, expected)
+
 
 def pilot_check() -> None:
     path = ROOT / "pilot/synthetic/run_pilot.py"
@@ -82,19 +96,21 @@ def pilot_check() -> None:
     if selected is None:
         raise AssertionError("operational-read acceptance block is missing")
 
-    checks = []
-
-    def http(*_args, **_kwargs):
-        return 500, {"error": "injected"}, 2.0
-
-    def add_check(name, passed, observed, expected):
-        checks.append((name, passed, observed, expected))
-
     module = ast.Module(body=selected, type_ignores=[])
-    exec(compile(module, str(path), "exec"), {
-        "http": http, "add_check": add_check, "statistics": statistics})
-    if len(checks) != 1 or checks[0][0] != "operational-read-sample" or checks[0][1]:
-        raise AssertionError(f"HTTP errors passed the pilot acceptance check: {checks}")
+    for response in ((500,{"error":"injected"},2.0),(200,[{"_id":201,"data":{}}],2.0)):
+        checks = []
+
+        def http(*_args, **_kwargs):
+            return response
+
+        def add_check(name, passed, observed, expected):
+            checks.append((name, passed, observed, expected))
+
+        exec(compile(module, str(path), "exec"), {
+            "http": http, "add_check": add_check, "statistics": statistics})
+        if (len(checks) != 1 or checks[0][0] != "operational-read-sample"
+                or checks[0][1]):
+            raise AssertionError(f"invalid response passed pilot acceptance: {response}/{checks}")
 
 
 def main() -> int:

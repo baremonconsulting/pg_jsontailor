@@ -65,9 +65,10 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__update()` and its `INSTEAD OF UPDATE` trigger;
 - `api.orders_dv__delete()` and its `INSTEAD OF DELETE` trigger;
 - `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
+- zero-row `api.orders_dv__root_binding` and optional `__object_binding` and `__array_binding` internal views;
 - a view comment containing the normalised specification.
 
-Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. If a configured source relation changes role, is renamed or replaced, or mapped column names are renamed, reused or permuted, generated writes fail with `PT422` until the view is regenerated. The binding check follows the view's PostgreSQL relation dependencies, each mapped physical attribute position, the role's primary-key constraint identity and configured foreign-key direction. It remains valid after dump and restore and does not depend on rendered view definitions or `quote_all_identifiers`. Renaming a bound primary-key constraint therefore also requires regeneration.
+Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. For every configured source role the generator creates a zero-row `<view>__<role>_binding` view in the API schema. These internal views carry an unambiguous PostgreSQL dependency on that role's relation and mapped columns; they expose no rows and receive no application grants. If a configured source relation changes role, is renamed or replaced, or mapped column names are renamed, reused or permuted, generated writes fail with `PT422` until the view is regenerated. The guard also checks each physical attribute position, the role's primary-key constraint identity and configured foreign-key direction. It remains valid after dump and restore and does not depend on rendered view definitions or `quote_all_identifiers`. Renaming a bound primary-key constraint therefore also requires regeneration.
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
 

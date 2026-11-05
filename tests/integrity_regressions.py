@@ -269,6 +269,54 @@ INSERT INTO {schema}.roots VALUES(1,{root_reference},'root');""")
            and same_layout_values == ["root:reference", "root:reference"],
            f"states={same_layout_states},values={same_layout_values}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_symmetric_api CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_a CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_b CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_swap CASCADE;
+CREATE SCHEMA jt_symmetric_api; CREATE SCHEMA jt_symmetric_a;
+CREATE SCHEMA jt_symmetric_b; CREATE SCHEMA jt_symmetric_swap;
+CREATE TABLE jt_symmetric_a.records(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE jt_symmetric_b.records(id integer PRIMARY KEY,ref_id integer,value text);
+ALTER TABLE jt_symmetric_a.records ADD FOREIGN KEY(ref_id) REFERENCES jt_symmetric_b.records(id);
+ALTER TABLE jt_symmetric_b.records ADD FOREIGN KEY(ref_id) REFERENCES jt_symmetric_a.records(id);
+INSERT INTO jt_symmetric_a.records VALUES(1,NULL,'root');
+INSERT INTO jt_symmetric_b.records VALUES(1,NULL,'reference');""")
+    symmetric_spec = {
+        "root": {"table": "jt_symmetric_a.records", "key": "id",
+                 "fields": {"value": "value"},
+                 "insert": True, "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_symmetric_b.records", "key": "id",
+                   "root_fk": "ref_id",
+                   "fields": {"id": "id", "ref": "ref_id", "value": "value"}}}
+    create_view(db, "jt_symmetric_api.documents", symmetric_spec)
+    symmetric_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_symmetric_api.documents WHERE _id=1;")
+    db.run("ALTER TABLE jt_symmetric_a.records SET SCHEMA jt_symmetric_swap;"
+           "ALTER TABLE jt_symmetric_b.records SET SCHEMA jt_symmetric_a;"
+           "ALTER TABLE jt_symmetric_swap.records SET SCHEMA jt_symmetric_b;")
+    symmetric_swap = db.run(
+        "UPDATE jt_symmetric_api.documents "
+        "SET data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+    symmetric_insert = db.run(
+        "INSERT INTO jt_symmetric_api.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"wrong\",\"reference\":null}'::jsonb);", False)
+    symmetric_delete = db.run(
+        "DELETE FROM jt_symmetric_api.documents WHERE _id=1;", False)
+    symmetric_function = db.run(
+        "SELECT jt_symmetric_api.documents__delete_document(1,"
+        + quote(symmetric_etag) + ");", False)
+    symmetric_values = db.value(
+        "SELECT (SELECT value FROM jt_symmetric_b.records WHERE id=1)||':'||"
+        "(SELECT value FROM jt_symmetric_a.records WHERE id=1);")
+    record("per-role dependencies reject symmetric schema swaps before DML",
+           all(db.state(result) == "PT422" for result in
+               (symmetric_swap,symmetric_insert,symmetric_delete,symmetric_function))
+           and symmetric_values == "root:reference",
+           "states=" + str([db.state(result) for result in
+                             (symmetric_swap,symmetric_insert,
+                              symmetric_delete,symmetric_function)])
+           + f",values={symmetric_values}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_column_permutation CASCADE;
 CREATE SCHEMA jt_column_permutation;
 CREATE TABLE jt_column_permutation.fields(id integer PRIMARY KEY,a text,b text);
@@ -423,6 +471,9 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
     original = db.value("SELECT value FROM jt_integrity.root_original WHERE id=1;")
     replacement = db.value("SELECT count(*) FROM jt_integrity.root;")
     db.run("DROP TABLE jt_integrity.root; ALTER TABLE jt_integrity.root_original RENAME TO root;"
+           "DROP VIEW jt_integrity.documents__root_binding;"
+           "DROP VIEW jt_integrity.documents__object_binding;"
+           "DROP VIEW jt_integrity.documents__array_binding;"
            "DROP VIEW jt_integrity.documents CASCADE;"
            "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
            "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "

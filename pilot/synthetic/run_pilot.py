@@ -233,6 +233,13 @@ try:
     BASE=old_base
     add_check("rest-surface", hidden_status==404, hidden_status, 404)
 
+    # Internal binding views have no application grants and are not REST resources.
+    old_base=BASE; BASE = REST_ORIGIN + "/orders_dv__root_binding"
+    binding_status,_,_=http("binding view hidden")
+    BASE=old_base
+    add_check("binding-view-surface", binding_status in (401,404), binding_status,
+              "401 or 404")
+
     # Delete one of the five documents through the ETag-aware RPC.
     _, rows, _ = http("read document 205 for deletion", query="?_id=eq.205")
     delete_etag = rows[0]["data"]["_metadata"]["etag"]
@@ -248,8 +255,12 @@ try:
     operational_samples=[]
     for n in range(20):
         status,rows,elapsed=http(f"operational read {n+1}", query="?_id=eq.201")
+        data = rows[0].get("data") if isinstance(rows,list) and len(rows) == 1 else None
         valid = (status == 200 and isinstance(rows,list) and len(rows) == 1
-                 and rows[0].get("_id") == 201 and isinstance(rows[0].get("data"),dict))
+                 and rows[0].get("_id") == 201 and isinstance(data,dict)
+                 and data.get("_id") == 201 and isinstance(data.get("_metadata"),dict)
+                 and isinstance(data["_metadata"].get("etag"),str)
+                 and bool(data["_metadata"]["etag"]))
         operational_samples.append({"status":status,"valid":valid,"elapsed_ms":elapsed})
     add_check("operational-read-sample",
               all(sample["valid"] and sample["elapsed_ms"] < 1000

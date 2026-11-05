@@ -28,17 +28,29 @@ def verify_results(folder: Path) -> dict[str, int | str]:
     with (folder / "measurements.csv").open(newline="") as source:
         measurements = list(csv.DictReader(source))
 
-    sizes = tuple(int(value) for value in environment["sizes"])
-    operations = tuple(environment.get("operations") or
-                       dict.fromkeys(row["operation"] for row in measurements))
-    warmups = int(environment["warmups"])
-    repetitions = int(environment["repetitions"])
+    raw_sizes = environment["sizes"]
+    require(isinstance(raw_sizes, list) and raw_sizes
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    for value in raw_sizes), "invalid size configuration")
+    sizes = tuple(raw_sizes)
+    if "operations" in environment:
+        raw_operations = environment["operations"]
+        require(isinstance(raw_operations, list) and raw_operations
+                and all(isinstance(value, str) and value for value in raw_operations),
+                "invalid operation configuration")
+        operations = tuple(raw_operations)
+    else:
+        operations = tuple(dict.fromkeys(row["operation"] for row in measurements))
+    warmups = environment["warmups"]
+    repetitions = environment["repetitions"]
+    require(isinstance(warmups, int) and not isinstance(warmups, bool)
+            and isinstance(repetitions, int) and not isinstance(repetitions, bool),
+            "invalid sampling configuration")
     total_runs = warmups + repetitions
     expected_groups = len(sizes) * len(operations)
     expected_measurements = expected_groups * len(IMPLEMENTATIONS) * total_runs
     require(warmups >= 0 and repetitions > 0, "invalid sampling configuration")
-    require(bool(sizes) and len(set(sizes)) == len(sizes)
-            and all(size >= 0 for size in sizes),
+    require(len(set(sizes)) == len(sizes) and all(size >= 0 for size in sizes),
             "invalid size configuration")
     require(len(set(operations)) == len(operations) and operations,
             "invalid operation configuration")

@@ -14,11 +14,11 @@ DECLARE
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qrel text; qinsert text; qupdate text; qdelete text; qdelete_document text;
+    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text;
     object_key_field text; array_key_field text;
-    body text; delete_body text; ddl text; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; root_key_type text; root_touch_column text;
+    body text; delete_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; root_key_type text; root_touch_column text;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -159,6 +159,7 @@ BEGIN
         IF NOT cfg?s THEN CONTINUE; END IF;
         tp:=parse_ident(cfg#>>ARRAY[s,'table']);
         qrel:=format('%I.%I',tp[1],tp[2]);
+        qbinding:=format('%I.%I',vp[1],vp[2]||'__'||s||'_binding');
         binding_columns:=ARRAY[cfg#>>ARRAY[s,'key']]||ARRAY(SELECT value FROM jsonb_each_text(cfg#>ARRAY[s,'fields']));
         IF s='root' AND cfg?'object' THEN binding_columns:=array_append(binding_columns,cfg#>>'{object,root_fk}'); END IF;
         IF s='array' THEN binding_columns:=binding_columns||ARRAY[cfg#>>'{array,parent_fk}',cfg#>>'{array,order_by}']; END IF;
@@ -179,8 +180,9 @@ BEGIN
                                AND a.attname=c.name AND a.attnum>0 AND NOT a.attisdropped
         )x;
         binding_columns:=ARRAY(SELECT x FROM unnest(binding_columns)x ORDER BY x);
+        binding_ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT %s FROM %s binding_source WHERE false;',qbinding,(SELECT string_agg(format('binding_source.%I',x),',') FROM unnest(binding_columns)x),qrel)||E'\n';
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE c.conrelid=to_regclass(%L) AND c.contype=''p'' AND cardinality(c.conkey)=1 AND c.conname=%L AND a.attname=%L) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',qrel,binding_pk_name,cfg#>>ARRAY[s,'key']);
-        relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal,a.attnum FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped) current USING(attname,ordinal) WHERE EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=current.attnum))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qview,qrel,cardinality(binding_columns));
+        relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal,a.attnum FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped) current USING(attname,ordinal) WHERE EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=current.attnum))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qbinding,qrel,cardinality(binding_columns));
     END LOOP;
     IF cfg?'object' THEN
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute fk ON fk.attrelid=c.conrelid AND fk.attnum=c.conkey[1] JOIN pg_attribute pk ON pk.attrelid=c.confrelid AND pk.attnum=c.confkey[1] WHERE c.conrelid=to_regclass(%L) AND c.confrelid=to_regclass(%L) AND c.contype=''f'' AND c.conkey=ARRAY[fk.attnum]::smallint[] AND c.confkey=ARRAY[pk.attnum]::smallint[] AND fk.attname=%L AND pk.attname=%L AND NOT c.condeferrable) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',format('%I.%I',root_schema,root_table),format('%I.%I',object_schema,object_table),cfg#>>'{object,root_fk}',cfg#>>'{object,key}');
@@ -188,7 +190,7 @@ BEGIN
     IF cfg?'array' THEN
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute fk ON fk.attrelid=c.conrelid AND fk.attnum=c.conkey[1] JOIN pg_attribute pk ON pk.attrelid=c.confrelid AND pk.attnum=c.confkey[1] WHERE c.conrelid=to_regclass(%L) AND c.confrelid=to_regclass(%L) AND c.contype=''f'' AND c.conkey=ARRAY[fk.attnum]::smallint[] AND c.confkey=ARRAY[pk.attnum]::smallint[] AND fk.attname=%L AND pk.attname=%L AND NOT c.condeferrable AND c.confdeltype IN (''a'',''r'')) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',format('%I.%I',array_schema,array_table),format('%I.%I',root_schema,root_table),cfg#>>'{array,parent_fk}',cfg#>>'{root,key}');
     END IF;
-    ddl:=format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
+    ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
 DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %I.%I.%I%%TYPE;
