@@ -32,9 +32,12 @@ jobs:
       - name: Verify repository consistency
         run: |
           python3 tools/verify_repository_consistency.py
+          python3 bench/verify_results.py bench/reference/azure-11e6d74
+          python3 bench/verify_results.py bench/reference/azure-afa643c
           python3 bench/verify_results.py bench/reference/azure-04d053e
           python3 bench/verify_results.py bench/reference/azure-acecaae
           python3 tests/tooling_regressions.py
+          python3 tools/verify_release_candidate.py
 
       - name: Check repository hygiene
         shell: bash
@@ -171,6 +174,15 @@ jobs:
             "$RUNNER_TEMP/integrity-results.jsonl" \
             "$RUNNER_TEMP/merge-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
+
+      - name: Verify custom and plain dump restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/dump_restore.py \
+            --pg-bin "$PGBIN" \
+            --maintenance-database postgres \
+            --database-prefix jsontailor_dump_restore
 
       - name: Show PostgreSQL log on failure
         if: failure()
