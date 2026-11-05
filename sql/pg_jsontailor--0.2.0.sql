@@ -16,7 +16,7 @@ DECLARE
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
     qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
-    object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text;
+    object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
     body text; delete_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; runtime_enforced_clause text; root_key_type text; root_touch_column text;
 BEGIN
@@ -81,11 +81,11 @@ BEGIN
             RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.table has unsupported classic inheritance descendants',s);
         END IF;
         SELECT a.attnum,a.attidentity,a.attgenerated,t.typname INTO att,ident,generated,typ FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=rel AND a.attname=j->>'key' AND a.attnum>0 AND NOT a.attisdropped AND n.nspname='pg_catalog';
-        IF att IS NULL OR generated<>'' OR typ<>ALL(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','uuid']) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid or unsupported %s.key',s); END IF;
+        IF att IS NULL OR generated<>'' OR typ<>ALL(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','timestamptz','uuid']) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid or unsupported %s.key',s); END IF;
         IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=rel AND contype='p' AND conkey=ARRAY[att]::smallint[]) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.key is not a single-column primary key',s); END IF;
         FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(j->'fields') LOOP
             SELECT a.attnum,a.attidentity,a.attgenerated,t.typname INTO att,ident,generated,typ FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=rel AND a.attname=r.value AND a.attnum>0 AND NOT a.attisdropped AND n.nspname='pg_catalog';
-            IF att IS NULL OR generated<>'' OR typ<>ALL(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','uuid']) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid or unsupported %s.fields.%s',s,r.key); END IF;
+            IF att IS NULL OR generated<>'' OR typ<>ALL(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','timestamptz','uuid']) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid or unsupported %s.fields.%s',s,r.key); END IF;
             IF ident='a' AND (s='root' OR (s='array' AND r.value<>j->>'key')) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('GENERATED ALWAYS identity is not writable at %s.fields.%s',s,r.key); END IF;
         END LOOP;
         IF EXISTS(SELECT 1 FROM jsonb_each_text(j->'fields') GROUP BY value HAVING count(*)>1) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s maps a column twice',s); END IF;
@@ -124,7 +124,7 @@ BEGIN
             EXECUTE 'SELECT conenforced FROM pg_catalog.pg_constraint WHERE oid=$1' INTO fk_enforced USING fk_oid;
             IF NOT fk_enforced THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk requires an enforced non-deferrable NO ACTION/RESTRICT foreign key'; END IF;
         END IF;
-        IF NOT EXISTS(SELECT 1 FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=array_rel AND a.attname=cfg#>>'{array,order_by}' AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' AND n.nspname='pg_catalog' AND t.typname=ANY(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','uuid'])) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.order_by is invalid or unsupported'; END IF;
+        IF NOT EXISTS(SELECT 1 FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=array_rel AND a.attname=cfg#>>'{array,order_by}' AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' AND n.nspname='pg_catalog' AND t.typname=ANY(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','timestamptz','uuid'])) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.order_by is invalid or unsupported'; END IF;
     END IF;
 
     names:=ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'));
@@ -136,15 +136,16 @@ BEGIN
     SELECT value INTO root_touch_column FROM jsonb_each_text(cfg#>'{root,fields}') ORDER BY key LIMIT 1;
     root_touch_column:=coalesce(root_touch_column,cfg#>>'{object,root_fk}',cfg#>>'{root,key}');
 
-    FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{root,fields}') LOOP root_pairs:=root_pairs||format(',%L,r.%I',r.key,r.value); END LOOP;
+    SELECT CASE WHEN t.typname='timestamptz' THEN format('CASE WHEN isfinite(r.%1$I) THEN to_char(r.%1$I AT TIME ZONE ''UTC'',''YYYY-MM-DD"T"HH24:MI:SS.US"Z"'') ELSE r.%1$I::text END',cfg#>>'{root,key}') ELSE format('r.%I',cfg#>>'{root,key}') END INTO root_key_json_expr FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=root_rel AND a.attname=cfg#>>'{root,key}';
+    FOR r IN SELECT f.key,f.value#>>'{}' value,t.typname FROM jsonb_each(cfg#>'{root,fields}') f JOIN pg_attribute a ON a.attrelid=root_rel AND a.attname=f.value#>>'{}' JOIN pg_type t ON t.oid=a.atttypid LOOP json_expr:=CASE WHEN r.typname='timestamptz' THEN format('CASE WHEN isfinite(r.%1$I) THEN to_char(r.%1$I AT TIME ZONE ''UTC'',''YYYY-MM-DD"T"HH24:MI:SS.US"Z"'') ELSE r.%1$I::text END',r.value) ELSE format('r.%I',r.value) END;root_pairs:=root_pairs||format(',%L,%s',r.key,json_expr); END LOOP;
     IF cfg?'object' THEN
-        FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{object,fields}') LOOP object_pairs:=object_pairs||CASE WHEN object_pairs='' THEN '' ELSE ',' END||format('%L,o.%I',r.key,r.value); END LOOP;
+        FOR r IN SELECT f.key,f.value#>>'{}' value,t.typname FROM jsonb_each(cfg#>'{object,fields}') f JOIN pg_attribute a ON a.attrelid=object_rel AND a.attname=f.value#>>'{}' JOIN pg_type t ON t.oid=a.atttypid LOOP json_expr:=CASE WHEN r.typname='timestamptz' THEN format('CASE WHEN isfinite(o.%1$I) THEN to_char(o.%1$I AT TIME ZONE ''UTC'',''YYYY-MM-DD"T"HH24:MI:SS.US"Z"'') ELSE o.%1$I::text END',r.value) ELSE format('o.%I',r.value) END;object_pairs:=object_pairs||CASE WHEN object_pairs='' THEN '' ELSE ',' END||format('%L,%s',r.key,json_expr); END LOOP;
         object_expr:=format('(SELECT jsonb_build_object(%s) FROM %I.%I o WHERE o.%I=r.%I)',object_pairs,object_schema,object_table,cfg#>>'{object,key}',cfg#>>'{object,root_fk}');
         object_lookup:=format('SELECT jsonb_build_object(%s) FROM %I.%I o WHERE o.%I=(SELECT x.%I FROM jsonb_to_record(jsonb_build_object(%L,$1)) AS x(%I %s))',object_pairs,object_schema,object_table,cfg#>>'{object,key}',cfg#>>'{object,key}',cfg#>>'{object,key}',cfg#>>'{object,key}',object_key_type);
         root_pairs:=root_pairs||format(',%L,%s',cfg#>>'{object,name}',object_expr);
     END IF;
     IF cfg?'array' THEN
-        FOR r IN SELECT key,value#>>'{}' value FROM jsonb_each(cfg#>'{array,fields}') LOOP array_pairs:=array_pairs||CASE WHEN array_pairs='' THEN '' ELSE ',' END||format('%L,a.%I',r.key,r.value); END LOOP;
+        FOR r IN SELECT f.key,f.value#>>'{}' value,t.typname FROM jsonb_each(cfg#>'{array,fields}') f JOIN pg_attribute a ON a.attrelid=array_rel AND a.attname=f.value#>>'{}' JOIN pg_type t ON t.oid=a.atttypid LOOP json_expr:=CASE WHEN r.typname='timestamptz' THEN format('CASE WHEN isfinite(a.%1$I) THEN to_char(a.%1$I AT TIME ZONE ''UTC'',''YYYY-MM-DD"T"HH24:MI:SS.US"Z"'') ELSE a.%1$I::text END',r.value) ELSE format('a.%I',r.value) END;array_pairs:=array_pairs||CASE WHEN array_pairs='' THEN '' ELSE ',' END||format('%L,%s',r.key,json_expr); END LOOP;
         SELECT t.typname INTO typ FROM pg_attribute x JOIN pg_type t ON t.oid=x.atttypid WHERE x.attrelid=array_rel AND x.attname=cfg#>>'{array,order_by}';
         order_expr:=format('a.%I%s',cfg#>>'{array,order_by}',CASE WHEN typ IN ('text','varchar','bpchar') THEN ' COLLATE "C"' ELSE '' END);
         SELECT t.typname INTO typ FROM pg_attribute x JOIN pg_type t ON t.oid=x.atttypid WHERE x.attrelid=array_rel AND x.attname=cfg#>>'{array,key}';
@@ -152,7 +153,7 @@ BEGIN
         array_expr:=format('coalesce((SELECT jsonb_agg(jsonb_build_object(%s) ORDER BY %s) FROM %I.%I a WHERE a.%I=r.%I),''[]''::jsonb)',array_pairs,order_expr,array_schema,array_table,cfg#>>'{array,parent_fk}',cfg#>>'{root,key}');
         root_pairs:=root_pairs||format(',%L,%s',cfg#>>'{array,name}',array_expr);
     END IF;
-    payload:=format('jsonb_build_object(''_id'',r.%I%s)',cfg#>>'{root,key}',root_pairs);
+    payload:=format('jsonb_build_object(''_id'',%s%s)',root_key_json_expr,root_pairs);
     etag_payload:='d.payload';
     IF cfg?'object' AND NOT (cfg#>>'{object,etag}')::boolean THEN
         etag_payload:=format('jsonb_set(d.payload,ARRAY[%L],CASE WHEN jsonb_typeof(d.payload->%L)=''object'' THEN jsonb_build_object(%L,d.payload#>ARRAY[%L,%L]) ELSE ''null''::jsonb END)',cfg#>>'{object,name}',cfg#>>'{object,name}',object_key_field,cfg#>>'{object,name}',object_key_field);
@@ -203,11 +204,11 @@ BEGIN
     doc:=NEW.data;
     IF jsonb_typeof(doc) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document must be an object'; END IF;
     IF doc?'_id' AND doc->'_id'='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id must not be null'; END IF;
-    IF NEW._id IS NOT NULL AND doc->'_id' IS DISTINCT FROM to_jsonb(NEW._id) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id differs'; END IF;
     IF doc?'_id' AND doc->'_id'<>'null'::jsonb THEN
-      SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=cfg#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
+      SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=cfg#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
       IF jsonb_typeof(doc->'_id') IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id has wrong JSON type';END IF;
       IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->'_id';IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id loses precision in the mapped SQL type';END IF;END IF;
+      IF NEW._id IS NOT NULL THEN EXECUTE format('SELECT x.v IS DISTINCT FROM $2 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->'_id',NEW._id;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id differs';END IF;END IF;
     END IF;
     SELECT x INTO bad FROM jsonb_object_keys(doc)x WHERE x<>ALL(ARRAY['_id','_metadata']||ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'))||CASE WHEN cfg?'object' THEN ARRAY[cfg#>>'{object,name}'] ELSE ARRAY[]::text[] END||CASE WHEN cfg?'array' THEN ARRAY[cfg#>>'{array,name}'] ELSE ARRAY[]::text[] END) LIMIT 1;
     IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown field %%s',bad); END IF;
@@ -219,14 +220,14 @@ BEGIN
         IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown object field %%s',bad);END IF;
         SELECT key INTO bad FROM jsonb_each_text(cfg#>'{object,fields}') WHERE value=cfg#>>'{object,key}';
         IF NOT (doc->(cfg#>>'{object,name}'))?bad OR doc#>ARRAY[cfg#>>'{object,name}',bad]='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key is required';END IF;
-        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{object,table}') AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{object,table}') AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',bad]) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key has wrong JSON type';END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc#>ARRAY[cfg#>>'{object,name}',bad];IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key loses precision in the mapped SQL type';END IF;END IF;
       END IF;
     END IF;
     FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP
       IF doc?bad AND doc->bad<>'null'::jsonb THEN
-        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc->bad) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s has wrong JSON type',bad);END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->bad;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s loses precision in the mapped SQL type',bad);END IF;END IF;
       END IF;
@@ -242,7 +243,7 @@ BEGIN
         IF el?bad AND el->bad='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key must not be null';END IF;
         FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
           IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
             IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
             IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
           END IF;
@@ -296,14 +297,18 @@ BEGIN
     END IF;
     EXECUTE format('SELECT _id,data FROM %%s WHERE _id=$1',%L) USING root_id INTO NEW._id,NEW.data;RETURN NEW;
   ELSIF TG_OP='UPDATE' THEN
-    root_id:=OLD._id;doc:=NEW.data;IF NEW._id IS DISTINCT FROM OLD._id OR jsonb_typeof(doc)<>'object' OR doc->'_id' IS DISTINCT FROM to_jsonb(OLD._id) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
+    root_id:=OLD._id;doc:=NEW.data;IF NEW._id IS DISTINCT FROM OLD._id OR jsonb_typeof(doc)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
+    SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=cfg#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
+    IF jsonb_typeof(doc->'_id') IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
+    EXECUTE format('SELECT x.v IS DISTINCT FROM $2 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->'_id',OLD._id;
+    IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
     SELECT x INTO bad FROM jsonb_object_keys(doc)x WHERE x<>ALL(ARRAY['_id','_metadata']||ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'))||CASE WHEN cfg?'object' THEN ARRAY[cfg#>>'{object,name}'] ELSE ARRAY[]::text[] END||CASE WHEN cfg?'array' THEN ARRAY[cfg#>>'{array,name}'] ELSE ARRAY[]::text[] END) LIMIT 1;
     IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown field %%s',bad);END IF;
     SELECT x INTO bad FROM jsonb_object_keys(cfg#>'{root,fields}')x WHERE NOT doc?x LIMIT 1;
     IF bad IS NOT NULL OR (cfg?'object' AND NOT doc?(cfg#>>'{object,name}')) OR (cfg?'array' AND NOT doc?(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document is incomplete';END IF;
     FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP
       IF doc->bad<>'null'::jsonb THEN
-        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc->bad) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s has wrong JSON type',bad);END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->bad;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s loses precision in the mapped SQL type',bad);END IF;END IF;
       END IF;
@@ -314,7 +319,7 @@ BEGIN
         SELECT x INTO bad FROM jsonb_object_keys(doc->(cfg#>>'{object,name}'))x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{object,fields}'))) LIMIT 1;
         IF bad IS NOT NULL OR NOT (doc->(cfg#>>'{object,name}'))?%L OR doc#>ARRAY[cfg#>>'{object,name}',%L]='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid object field';END IF;
         SELECT key INTO bad FROM jsonb_each_text(cfg#>'{object,fields}') WHERE value=cfg#>>'{object,key}';
-        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{object,table}') AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{object,table}') AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',bad]) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key has wrong JSON type';END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc#>ARRAY[cfg#>>'{object,name}',bad];IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key loses precision in the mapped SQL type';END IF;END IF;
       END IF;
@@ -328,7 +333,7 @@ BEGIN
         IF bad IS NOT NULL OR (el?%L AND el->%L='null'::jsonb) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid array element';END IF;
         FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
           IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
             IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
             IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
           END IF;

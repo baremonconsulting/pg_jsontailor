@@ -1031,6 +1031,60 @@ CREATE TABLE jt_json_contract.partition_child_low
            f"{db.state(generated_root)}/{db.state(generated_child)},"
            f"partition={db.state(missing_partition)}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_timestamptz CASCADE; CREATE SCHEMA jt_timestamptz;
+CREATE TABLE jt_timestamptz.reference(id integer PRIMARY KEY, observed_at timestamptz);
+CREATE TABLE jt_timestamptz.root(
+ id integer PRIMARY KEY, observed_at timestamptz, reference_id integer REFERENCES jt_timestamptz.reference(id));
+CREATE TABLE jt_timestamptz.child(
+ id integer PRIMARY KEY, parent integer REFERENCES jt_timestamptz.root(id), observed_at timestamptz);
+INSERT INTO jt_timestamptz.reference VALUES(7,'2026-06-01 12:34:56.123456+02');
+INSERT INTO jt_timestamptz.root VALUES(1,'2026-06-01 12:34:56.123456+02',7);
+INSERT INTO jt_timestamptz.root VALUES(2,'infinity',NULL);
+INSERT INTO jt_timestamptz.child VALUES(10,1,'2026-06-01 12:34:56.123456+02');
+CREATE TABLE jt_timestamptz.key_root(id timestamptz PRIMARY KEY,label text);""")
+    tz_spec = {
+        "root": {"table": "jt_timestamptz.root", "key": "id",
+                 "fields": {"observedAt": "observed_at"}, "update": True},
+        "object": {"name": "reference", "table": "jt_timestamptz.reference",
+                   "key": "id", "root_fk": "reference_id",
+                   "fields": {"id": "id", "observedAt": "observed_at"}},
+        "array": {"name": "items", "table": "jt_timestamptz.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "observedAt": "observed_at"}}}
+    create_view(db, "jt_timestamptz.documents", tz_spec)
+    utc_document = db.value(
+        "SET TimeZone='UTC'; SELECT data::text FROM jt_timestamptz.documents WHERE _id=1;")
+    prague_document = db.value(
+        "SET TimeZone='Europe/Prague'; SELECT data::text FROM jt_timestamptz.documents WHERE _id=1;")
+    infinite_values = db.value(
+        "SET TimeZone='Pacific/Auckland'; SELECT data->>'observedAt' FROM jt_timestamptz.documents WHERE _id=2;")
+    tz_update = db.run("""SET TimeZone='Europe/Prague';
+UPDATE jt_timestamptz.documents
+SET data=jsonb_set(data,'{observedAt}','\"2026-06-01T13:34:56.123456+03:00\"')
+WHERE _id=1;""", False)
+    normalized_value = db.value(
+        "SET TimeZone='UTC'; SELECT data->>'observedAt' FROM jt_timestamptz.documents WHERE _id=1;")
+    key_spec = {"root": {"table": "jt_timestamptz.key_root", "key": "id",
+                         "fields": {"label": "label"}, "insert": True, "update": True}}
+    create_view(db, "jt_timestamptz.key_documents", key_spec)
+    key_insert = db.run("""SET TimeZone='Europe/Prague';
+INSERT INTO jt_timestamptz.key_documents(data)
+VALUES('{"_id":"2026-06-01T12:00:00+02:00","label":"first"}'::jsonb);""", False)
+    key_update = db.run("""SET TimeZone='America/New_York';
+UPDATE jt_timestamptz.key_documents SET data=jsonb_set(data,'{label}','"second"')
+WHERE _id='2026-06-01T10:00:00Z'::timestamptz;""", False)
+    normalized_key = db.value(
+        "SET TimeZone='Asia/Tokyo'; SELECT data->>'_id' FROM jt_timestamptz.key_documents;")
+    record("timestamptz documents and ETags are independent of session TimeZone",
+           utc_document == prague_document and infinite_values == "infinity"
+           and tz_update.returncode == 0
+           and normalized_value == "2026-06-01T10:34:56.123456Z"
+           and key_insert.returncode == 0 and key_update.returncode == 0
+           and normalized_key == "2026-06-01T10:00:00.000000Z",
+           f"same_document={utc_document == prague_document},infinity={infinite_values},"
+           f"update={tz_update.returncode},"
+           f"value={normalized_value},key={key_insert.returncode}/{key_update.returncode}/"
+           f"{normalized_key}")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:
