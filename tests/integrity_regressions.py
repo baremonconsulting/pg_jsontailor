@@ -556,7 +556,8 @@ CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
            f"replace={db.state(destructive_replace)},state={destructive_state},"
            f"rls={db.state(rls_append)},rls_state={rls_state}")
 
-    db.run("""DROP SCHEMA IF EXISTS jt_secondary_unique CASCADE; CREATE SCHEMA jt_secondary_unique;
+    db.run("""DROP SCHEMA IF EXISTS jt_secondary_audit CASCADE;
+DROP SCHEMA IF EXISTS jt_secondary_unique CASCADE; CREATE SCHEMA jt_secondary_unique;
 CREATE TABLE jt_secondary_unique.root(id integer PRIMARY KEY,value text);
 CREATE TABLE jt_secondary_unique.child(
  id text PRIMARY KEY,parent integer REFERENCES jt_secondary_unique.root(id),value text,
