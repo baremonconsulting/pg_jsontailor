@@ -109,13 +109,16 @@ current hash means regeneration is available even when the schema health check
 is otherwise `OK`.
 
 `regenerate_duality_view` must be run by the view owner. It reads the stored
-normalised specification, rejects dependent relations, generates and validates
-replacement DDL before dropping anything, and replaces the generated objects
-inside the caller's transaction. View grants, generated-function grants and
-generated-function comments are restored. The metadata comment is deliberately
-replaced with current provenance. A failure rolls back the complete operation.
-The function never uses `CASCADE`; dependencies on other generated objects also
-cause PostgreSQL to stop and roll back the operation.
+normalised specification, rejects dependent relations and unmanaged view
+triggers or rules, generates and validates replacement DDL before dropping
+anything, and replaces the generated objects inside the caller's transaction.
+Relation and column grants, including grant options, generated-function grants
+and generated-function comments are restored. The metadata comment is
+deliberately replaced with current provenance. A failure rolls back the complete
+operation. The function never uses `CASCADE`; dependencies on other generated
+objects also cause PostgreSQL to stop and roll back the operation. Remove and
+explicitly recreate reviewed application triggers or rules around regeneration;
+they are never silently dropped or reconstructed.
 
 Write paths deserialize only the physical columns named by the specification.
 Unmapped columns, including columns using NOT NULL domains, are omitted from

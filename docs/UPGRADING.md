@@ -39,8 +39,10 @@ operational procedure.
 
 For a view generated with provenance metadata, use the transactional
 regenerator. It preserves view grants, generated-function grants and
-generated-function comments, rejects dependent relations and never uses
-`CASCADE`:
+generated-function comments, rejects dependent relations and unmanaged triggers
+or rules, and never uses `CASCADE`. Relation and column grants, including grant
+options, are preserved. Application triggers and rules must be removed and
+explicitly recreated as reviewed deployment objects:
 
 ```sql
 BEGIN;

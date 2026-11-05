@@ -1111,6 +1111,36 @@ INSERT INTO jt_provenance.root VALUES(1,'one');""")
                  "fields": {"label": "label"}, "insert": True,
                  "update": True, "delete": True}}
     create_view(db, "jt_provenance.documents", provenance_spec)
+    lifecycle_role = "jt_lifecycle_role"
+    cleanup_lifecycle_role = role_cleanup(db, lifecycle_role)
+    db.run(f"""CREATE ROLE {lifecycle_role} NOLOGIN;
+GRANT USAGE ON SCHEMA jt_provenance TO {lifecycle_role};
+GRANT SELECT, UPDATE(label) ON jt_provenance.root TO {lifecycle_role};
+GRANT SELECT (_id) ON jt_provenance.documents TO {lifecycle_role};
+GRANT SELECT (data) ON jt_provenance.documents TO {lifecycle_role} WITH GRANT OPTION;
+GRANT UPDATE (data) ON jt_provenance.documents TO {lifecycle_role};""")
+    role_read_before = db.value(
+        f"SET ROLE {lifecycle_role}; SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    role_write_before = db.run(
+        f"SET ROLE {lifecycle_role}; UPDATE jt_provenance.documents "
+        "SET data=jsonb_set(data,'{label}','\"role-before\"') WHERE _id=1; RESET ROLE;", False)
+    db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
+    db.run("""CREATE FUNCTION jt_provenance.custom_audit() RETURNS trigger
+LANGUAGE plpgsql AS $audit$ BEGIN RETURN NEW; END $audit$;
+CREATE TRIGGER zz_custom_audit INSTEAD OF UPDATE ON jt_provenance.documents
+FOR EACH ROW EXECUTE FUNCTION jt_provenance.custom_audit();""")
+    custom_trigger_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    trigger_survived = db.value("""SELECT count(*) FROM pg_trigger
+      WHERE tgrelid='jt_provenance.documents'::regclass AND tgname='zz_custom_audit';""")
+    db.run("DROP TRIGGER zz_custom_audit ON jt_provenance.documents; "
+           "DROP FUNCTION jt_provenance.custom_audit();")
+    db.run("CREATE RULE zz_custom_rule AS ON UPDATE TO jt_provenance.documents DO ALSO NOTHING;")
+    custom_rule_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    rule_survived = db.value("""SELECT count(*) FROM pg_rewrite
+      WHERE ev_class='jt_provenance.documents'::regclass AND rulename='zz_custom_rule';""")
+    db.run("DROP RULE zz_custom_rule ON jt_provenance.documents;")
     metadata_ok = db.value("""SELECT
       (substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
               length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,version}')='0.2.0'
@@ -1127,6 +1157,20 @@ CREATE FUNCTION jt_provenance.documents__check(integer) RETURNS integer
 LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
     regenerated = db.run(
         "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    column_acl = db.value(f"""SELECT
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','_id','SELECT')::text||':'||
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','data','SELECT')::text||':'||
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','data','UPDATE')::text||':'||
+      coalesce((SELECT is_grantable FROM information_schema.column_privileges
+        WHERE table_schema='jt_provenance' AND table_name='documents'
+          AND column_name='data' AND privilege_type='SELECT'
+          AND grantee='{lifecycle_role}'),'NO');""")
+    role_read_after = db.value(
+        f"SET ROLE {lifecycle_role}; SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    role_write_after = db.run(
+        f"SET ROLE {lifecycle_role}; UPDATE jt_provenance.documents "
+        "SET data=jsonb_set(data,'{label}','\"role-after\"') WHERE _id=1; RESET ROLE;", False)
+    db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
     preserved = db.value("""SELECT
       has_table_privilege('public','jt_provenance.documents','SELECT')::text||':'||
       has_function_privilege('public','jt_provenance.documents__delete_document(integer,text)','EXECUTE')::text||':'||
@@ -1152,16 +1196,25 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
       WHERE view_name='jt_provenance.documents';""")
     record("generator provenance, inventory, health and regeneration are operational",
            metadata_ok == "t" and inventory_before == "0.2.0:OK:true"
+           and role_read_before == "one" and role_write_before.returncode == 0
+           and db.state(custom_trigger_block) == "2BP01" and trigger_survived == "1"
+           and db.state(custom_rule_block) == "2BP01" and rule_survived == "1"
            and regenerated.returncode == 0
+           and column_acl == "true:true:true:YES"
+           and role_read_after == "one" and role_write_after.returncode == 0
            and preserved == "true:false:preserved health comment:7"
            and db.state(dependency_block) == "2BP01" and still_readable == "one"
            and db.state(drift_check) == "PT422" and inventory_drift == "PT422"
            and legacy_regenerated.returncode == 0
            and inventory_after == "0.2.0:OK:true",
-           f"metadata={metadata_ok},before={inventory_before},regen={regenerated.returncode},"
+           f"metadata={metadata_ok},before={inventory_before},role_before={role_read_before}/"
+           f"{role_write_before.returncode},hooks={db.state(custom_trigger_block)}/{trigger_survived}/"
+           f"{db.state(custom_rule_block)}/{rule_survived},regen={regenerated.returncode},"
+           f"column_acl={column_acl},role_after={role_read_after}/{role_write_after.returncode},"
            f"acl={preserved},dependency={db.state(dependency_block)}/{still_readable},"
            f"drift={db.state(drift_check)}/{inventory_drift},"
            f"legacy={legacy_regenerated.returncode},after={inventory_after}")
+    cleanup_lifecycle_role()
 
     inventory_attacker = "jt_inventory_attacker"
     cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)

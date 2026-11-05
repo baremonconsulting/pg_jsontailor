@@ -662,7 +662,7 @@ AS $regenerator$
 DECLARE
   vp text[]; target oid; target_owner oid; description text; metadata jsonb; specification jsonb;
   r record; command text; restore_commands text[]:=ARRAY[]::text[]; revoke_principals text[]:=ARRAY['PUBLIC'];
-  generated_names text[]; generated_name text; dependent text; ddl text; root_key_oid oid;
+  generated_names text[]; generated_name text; dependent text; unmanaged text; ddl text; root_key_oid oid;
 BEGIN
   IF view_name IS NULL THEN
     RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must not be SQL NULL';
@@ -714,6 +714,26 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='dependent relations prevent safe regeneration',DETAIL=dependent;
   END IF;
 
+  SELECT string_agg(quote_ident(t.tgname),', ' ORDER BY t.tgname) INTO unmanaged
+  FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+  JOIN pg_namespace n ON n.oid=p.pronamespace
+  WHERE t.tgrelid=target AND NOT t.tgisinternal
+    AND NOT (n.nspname=vp[1] AND (
+      (t.tgname=vp[2]||'__guard_insert' AND p.proname=vp[2]||'__guard') OR
+      (t.tgname=vp[2]||'__guard_update' AND p.proname=vp[2]||'__guard') OR
+      (t.tgname=vp[2]||'__guard_delete' AND p.proname=vp[2]||'__guard') OR
+      (t.tgname=vp[2]||'__insert' AND p.proname=vp[2]||'__insert') OR
+      (t.tgname=vp[2]||'__update' AND p.proname=vp[2]||'__update') OR
+      (t.tgname=vp[2]||'__delete' AND p.proname=vp[2]||'__delete')));
+  IF unmanaged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='unmanaged triggers prevent safe regeneration',DETAIL=unmanaged;
+  END IF;
+  SELECT string_agg(quote_ident(rw.rulename),', ' ORDER BY rw.rulename) INTO unmanaged
+  FROM pg_rewrite rw WHERE rw.ev_class=target AND rw.rulename<>'_RETURN';
+  IF unmanaged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='unmanaged rules prevent safe regeneration',DETAIL=unmanaged;
+  END IF;
+
   FOR r IN
     SELECT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END principal,
            x.privilege_type,x.is_grantable
@@ -722,6 +742,20 @@ BEGIN
   LOOP
     restore_commands:=array_append(restore_commands,format('GRANT %s ON TABLE %I.%I TO %s%s',
       r.privilege_type,vp[1],vp[2],r.principal,CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END));
+    revoke_principals:=array_append(revoke_principals,r.principal);
+  END LOOP;
+
+  FOR r IN
+    SELECT quote_ident(a.attname) column_name,
+           CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END principal,
+           x.privilege_type,x.is_grantable
+    FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x
+    WHERE a.attrelid=target AND a.attnum>0 AND NOT a.attisdropped
+      AND a.attacl IS NOT NULL AND x.grantee<>target_owner
+  LOOP
+    restore_commands:=array_append(restore_commands,
+      format('GRANT %s (%s) ON TABLE %I.%I TO %s%s',r.privilege_type,r.column_name,
+        vp[1],vp[2],r.principal,CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END));
     revoke_principals:=array_append(revoke_principals,r.principal);
   END LOOP;
 
