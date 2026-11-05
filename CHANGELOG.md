@@ -40,5 +40,7 @@ regardless of commit-message wording.
 - Added strict JSON type and lossless numeric conversion semantics.
 - Added deterministic UTC-normalized `timestamptz` mappings.
 - Added generator provenance, inventory, non-mutating health checks and transactional regeneration.
+- Moved catalogue guards to statement scope and made mapped-array validation set-wise.
+- Added verified current benchmark evidence, custom and plain dump/restore CI, and a release-candidate consistency gate.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
