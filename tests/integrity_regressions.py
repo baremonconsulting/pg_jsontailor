@@ -512,6 +512,45 @@ SELECT jt_nullable_owner.documents__delete_document(
            and nullable_state == "target:orphan=NULL,owned=2",
            f"append={db.state(orphan_append)},state={nullable_state}")
 
+    nullable_delete_spec = json.loads(json.dumps(nullable_spec))
+    nullable_delete_spec["array"]["delete"] = True
+    create_view(db, "jt_nullable_owner.documents_delete", nullable_delete_spec)
+    destructive_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents_delete WHERE _id=2;"))
+    destructive_doc["value"] = "must still roll back"
+    destructive_doc["items"] = [
+        {"id": "orphan", "value": "unlinked"},
+        {"id": "globally-new", "value": "new"},
+    ]
+    destructive_replace = db.run(
+        "UPDATE jt_nullable_owner.documents_delete SET data="
+        + quote(json.dumps(destructive_doc)) + "::jsonb WHERE _id=2;", False)
+    destructive_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
+
+    nullable_role = f"jt_nullable_writer_{time.time_ns()}"
+    db.run(f"""CREATE ROLE {nullable_role} NOLOGIN;
+GRANT USAGE ON SCHEMA jt_nullable_owner TO {nullable_role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_nullable_owner TO {nullable_role};
+ALTER TABLE jt_nullable_owner.child ENABLE ROW LEVEL SECURITY;
+CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
+ USING (parent=2) WITH CHECK (parent=2);""")
+    rls_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents WHERE _id=2;"))
+    rls_doc["items"].append({"id": "orphan", "value": "unlinked"})
+    rls_append = db.run(
+        f"SET ROLE {nullable_role}; UPDATE jt_nullable_owner.documents SET data="
+        + quote(json.dumps(rls_doc)) + "::jsonb WHERE _id=2;", False)
+    db.run(f"DROP OWNED BY {nullable_role}; DROP ROLE {nullable_role};")
+    record("mixed orphan replacements and RLS-hidden orphans fail closed",
+           db.state(destructive_replace) == "PT422"
+           and destructive_state == "target:orphan=NULL=unlinked,owned=2=existing"
+           and db.state(rls_append) == "PT422",
+           f"replace={db.state(destructive_replace)},state={destructive_state},"
+           f"rls={db.state(rls_append)}")
+
     binding_role = f"jt_binding_writer_{time.time_ns()}"
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
 DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
