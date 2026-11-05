@@ -837,6 +837,66 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
            f"update={db.state(swapped_update)},delete={db.state(swapped_delete)},"
            f"original={original},replacement={replacement},regenerated={regenerated.returncode}")
 
+    drift_states = []
+    for role in ("root", "object", "array"):
+        schema = "jt_late_inheritance_" + role
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.root(id integer PRIMARY KEY,object_id integer,value text);
+CREATE TABLE {schema}.object(id integer PRIMARY KEY,label text);
+ALTER TABLE {schema}.root ADD CONSTRAINT root_object_fk
+  FOREIGN KEY(object_id) REFERENCES {schema}.object(id);
+CREATE TABLE {schema}.child(id integer PRIMARY KEY,parent integer NOT NULL
+  REFERENCES {schema}.root(id),value text);
+INSERT INTO {schema}.object VALUES(7,'shared');
+INSERT INTO {schema}.root VALUES(1,7,'one');
+INSERT INTO {schema}.child VALUES(10,1,'item');""")
+        drift_spec = {
+            "root": {"table": f"{schema}.root", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.object", "key": "id",
+                       "root_fk": "object_id", "fields": {"id": "id", "label": "label"}},
+            "array": {"name": "items", "table": f"{schema}.child", "key": "id",
+                      "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                      "insert": True, "update": True, "delete": True}}
+        create_view(db, f"{schema}.documents", drift_spec)
+        source_table = "child" if role == "array" else role
+        db.run(f"CREATE TABLE {schema}.{role}_descendant() INHERITS({schema}.{source_table});")
+        changed = db.run(f"UPDATE {schema}.documents SET "
+                         "data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+        drift_states.append(db.state(changed))
+
+    enforcement_states = []
+    if int(db.value("SHOW server_version_num;")) >= 180000:
+        schema = "jt_enforcement_drift"
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.object(id integer PRIMARY KEY,label text);
+CREATE TABLE {schema}.root(id integer PRIMARY KEY,object_id integer,value text,
+  CONSTRAINT root_object_fk FOREIGN KEY(object_id) REFERENCES {schema}.object(id));
+CREATE TABLE {schema}.child(id integer PRIMARY KEY,parent integer NOT NULL,value text,
+  CONSTRAINT child_root_fk FOREIGN KEY(parent) REFERENCES {schema}.root(id));
+INSERT INTO {schema}.object VALUES(7,'shared');
+INSERT INTO {schema}.root VALUES(1,7,'one');
+INSERT INTO {schema}.child VALUES(10,1,'item');""")
+        enforcement_spec = {
+            "root": {"table": f"{schema}.root", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.object", "key": "id",
+                       "root_fk": "object_id", "fields": {"id": "id", "label": "label"}},
+            "array": {"name": "items", "table": f"{schema}.child", "key": "id",
+                      "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                      "insert": True, "update": True, "delete": True}}
+        create_view(db, f"{schema}.documents", enforcement_spec)
+        for table, constraint in (("root", "root_object_fk"), ("child", "child_root_fk")):
+            db.run(f"ALTER TABLE {schema}.{table} ALTER CONSTRAINT {constraint} NOT ENFORCED;")
+            changed = db.run(f"UPDATE {schema}.documents SET "
+                             "data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+            enforcement_states.append(db.state(changed))
+            db.run(f"ALTER TABLE {schema}.{table} ALTER CONSTRAINT {constraint} ENFORCED;")
+    record("runtime guards reject later inheritance and FK enforcement drift",
+           drift_states == ["PT422", "PT422", "PT422"]
+           and enforcement_states in ([], ["PT422", "PT422"]),
+           f"inheritance={drift_states},enforcement={enforcement_states}")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:
