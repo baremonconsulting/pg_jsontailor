@@ -174,10 +174,7 @@ BEGIN
           AND cardinality(c.conkey)=1 AND a.attname=cfg#>>ARRAY[s,'key'];
         SELECT array_agg(x.ordinal ORDER BY x.name) INTO binding_ordinals
         FROM (
-            SELECT c.name,
-                   (SELECT count(*) FROM pg_attribute b
-                    WHERE b.attrelid=to_regclass(qrel) AND b.attnum>0
-                      AND NOT b.attisdropped AND b.attnum<=a.attnum)::integer AS ordinal
+            SELECT c.name,row_number() OVER (ORDER BY a.attnum)::integer AS ordinal
             FROM unnest(binding_columns)c(name)
             JOIN pg_attribute a ON a.attrelid=to_regclass(qrel)
                                AND a.attname=c.name AND a.attnum>0 AND NOT a.attisdropped
@@ -185,7 +182,7 @@ BEGIN
         binding_columns:=ARRAY(SELECT x FROM unnest(binding_columns)x ORDER BY x);
         binding_ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT %s FROM %s binding_source WHERE false OFFSET 0;',qbinding,(SELECT string_agg(format('binding_source.%I',x),',') FROM unnest(binding_columns)x),qrel)||E'\n';
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE c.conrelid=to_regclass(%L) AND c.contype=''p'' AND cardinality(c.conkey)=1 AND c.conname=%L AND a.attname=%L) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',qrel,binding_pk_name,cfg#>>ARRAY[s,'key']);
-        relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal,a.attnum FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped) current USING(attname,ordinal) WHERE EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=current.attnum))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qbinding,qrel,cardinality(binding_columns));
+        relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=a.attnum)) current USING(attname,ordinal))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qbinding,qrel,cardinality(binding_columns));
     END LOOP;
     IF cfg?'object' THEN
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute fk ON fk.attrelid=c.conrelid AND fk.attnum=c.conkey[1] JOIN pg_attribute pk ON pk.attrelid=c.confrelid AND pk.attnum=c.confkey[1] WHERE c.conrelid=to_regclass(%L) AND c.confrelid=to_regclass(%L) AND c.contype=''f'' AND c.conkey=ARRAY[fk.attnum]::smallint[] AND c.confkey=ARRAY[pk.attnum]::smallint[] AND fk.attname=%L AND pk.attname=%L AND NOT c.condeferrable) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',format('%I.%I',root_schema,root_table),format('%I.%I',object_schema,object_table),cfg#>>'{object,root_fk}',cfg#>>'{object,key}');

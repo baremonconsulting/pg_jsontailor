@@ -234,6 +234,39 @@ INSERT INTO jt_binding.parents VALUES(1,1,'parent');""")
                              binding_function, role_update)])
            + f",values={binding_values}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_binding_unmapped CASCADE;
+CREATE SCHEMA jt_binding_unmapped;
+CREATE TABLE jt_binding_unmapped.source(
+ id integer PRIMARY KEY,
+ legacy_before text,
+ first_value text,
+ legacy_between text,
+ second_value text,
+ legacy_after text);
+INSERT INTO jt_binding_unmapped.source VALUES(1,'a','first','b','second','c');""")
+    unmapped_spec = {
+        "root": {"table": "jt_binding_unmapped.source", "key": "id",
+                 "fields": {"first": "first_value", "second": "second_value"},
+                 "update": True}}
+    create_view(db, "jt_binding_unmapped.documents", unmapped_spec)
+    unmapped_states = []
+    for column, field, value in (
+            ("legacy_before", "first", "one"),
+            ("legacy_between", "second", "two"),
+            ("legacy_after", "first", "three")):
+        db.run(f"ALTER TABLE jt_binding_unmapped.source DROP COLUMN {column};")
+        changed_unmapped = db.run(
+            "UPDATE jt_binding_unmapped.documents SET data=jsonb_set(data," +
+            quote("{" + field + "}") + "," + quote(json.dumps(value)) +
+            "::jsonb) WHERE _id=1;", False)
+        unmapped_states.append((changed_unmapped.returncode, db.state(changed_unmapped)))
+    unmapped_values = db.value(
+        "SELECT first_value||':'||second_value FROM jt_binding_unmapped.source WHERE id=1;")
+    record("binding ordinals ignore dropped unmapped columns",
+           unmapped_states == [(0, None), (0, None), (0, None)]
+           and unmapped_values == "three:two",
+           f"states={unmapped_states},values={unmapped_values}")
+
     same_layout_states = []
     same_layout_values = []
     for suffix, object_etag, root_reference in (
