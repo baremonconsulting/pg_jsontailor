@@ -1163,6 +1163,34 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
            f"drift={db.state(drift_check)}/{inventory_drift},"
            f"legacy={legacy_regenerated.returncode},after={inventory_after}")
 
+    inventory_attacker = "jt_inventory_attacker"
+    cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)
+    db.run(f"""DROP SCHEMA IF EXISTS jt_inventory_untrusted CASCADE;
+CREATE TABLE jt_provenance.inventory_protected(value text);
+CREATE ROLE {inventory_attacker} NOLOGIN;
+CREATE SCHEMA jt_inventory_untrusted AUTHORIZATION {inventory_attacker};
+SET ROLE {inventory_attacker};
+CREATE VIEW jt_inventory_untrusted.forged AS SELECT 1 AS value;
+COMMENT ON VIEW jt_inventory_untrusted.forged IS
+  'pg_jsontailor metadata v1: {{"generator":{{"version":"0.2.0","hash":"forged"}}}}';
+CREATE FUNCTION jt_inventory_untrusted.forged__check() RETURNS jsonb
+LANGUAGE plpgsql SECURITY INVOKER AS $attack$
+BEGIN
+  INSERT INTO jt_provenance.inventory_protected VALUES('executed');
+  RETURN '{{"status":"OK"}}'::jsonb;
+END
+$attack$;
+RESET ROLE;""")
+    forged_inventory = db.value("""SELECT health_status||':'||health_detail
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_effects = db.value("SELECT count(*) FROM jt_provenance.inventory_protected;")
+    record("inventory never executes an untrusted owner-supplied health callback",
+           forged_inventory.startswith("SKIPPED:") and forged_effects == "0",
+           f"inventory={forged_inventory},side_effects={forged_effects}")
+    db.run("DROP SCHEMA jt_inventory_untrusted CASCADE;")
+    cleanup_inventory_attacker()
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:

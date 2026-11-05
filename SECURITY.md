@@ -21,3 +21,10 @@ that belongs to a hidden row can return `PT422`; as with a primary-key conflict,
 this may reveal that the key is already allocated. Use `GENERATED ALWAYS`
 identities when key existence is sensitive, and do not expose catalogue access
 or arbitrary write errors more broadly than the application requires.
+
+Lifecycle inventory treats catalogue comments as untrusted discovery metadata.
+It executes a generated health function only when the inventory caller owns the
+managed view and the health function has the same owner and expected signature.
+Views owned by another role are reported as `SKIPPED`; administrators must not
+execute similarly named callbacks merely because a comment marks an object as
+managed.

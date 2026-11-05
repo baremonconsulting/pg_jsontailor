@@ -98,11 +98,15 @@ The generated SQL is copied into each generated object. Regenerate a view after 
 
 ## Inventory, health and regeneration
 
-`duality_view_inventory()` returns every managed view, its recorded generator
-version and hash, the installed generator hash, and the result of its generated
-`__check()` function. `OK` means the stored catalogue bindings still satisfy
-the generated guards. A different recorded and current hash means regeneration
-is available even when the schema health check is otherwise `OK`.
+`duality_view_inventory()` returns every managed view and its recorded and
+installed generator provenance. It executes a generated `__check()` function
+only when the inventory caller owns both the managed view and the correctly
+typed health function. Rows owned by another role, or rows whose health function
+has an unexpected owner or signature, are reported as `SKIPPED`; inventory never
+executes their callback with the caller's privileges. `OK` means the stored
+catalogue bindings still satisfy the generated guards. A different recorded and
+current hash means regeneration is available even when the schema health check
+is otherwise `OK`.
 
 `regenerate_duality_view` must be run by the view owner. It reads the stored
 normalised specification, rejects dependent relations, generates and validates
