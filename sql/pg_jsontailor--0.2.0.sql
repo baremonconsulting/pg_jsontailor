@@ -247,13 +247,11 @@ BEGIN
         SELECT x INTO unknown_field FROM jsonb_object_keys(el)x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{array,fields}'))) LIMIT 1;
         IF unknown_field IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown array field %%s',unknown_field);END IF;
         IF el?bad AND el->bad='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key must not be null';END IF;
-        FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
-          IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
-            IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
-            IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
-          END IF;
-        END LOOP;
+      END LOOP;
+      FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        IF EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]')) e WHERE e.value?unknown_field AND e.value->unknown_field<>'null'::jsonb AND jsonb_typeof(e.value->unknown_field) IS DISTINCT FROM sql_kind) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
+        IF sql_kind='number' THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($1)e CROSS JOIN LATERAL jsonb_to_record(jsonb_build_object(''v'',e.value->$2)) AS x(v %%s) WHERE e.value?$2 AND e.value->$2<>''null''::jsonb AND to_jsonb(x.v) IS DISTINCT FROM e.value->$2)',sql_type) INTO changed USING coalesce(doc->(cfg#>>'{array,name}'),'[]'),unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad)<>(SELECT count(DISTINCT e->bad) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
       SELECT coalesce(jsonb_agg(jsonb_build_object(cfg#>>'{array,key}',e.value->bad)),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e.value?bad;
@@ -337,14 +335,12 @@ BEGIN
         IF jsonb_typeof(el)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element must be an object';END IF;
         SELECT x INTO bad FROM jsonb_object_keys(el)x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{array,fields}'))) LIMIT 1;
         IF bad IS NOT NULL OR (el?%L AND el->%L='null'::jsonb) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid array element';END IF;
-        FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
-          IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
-            IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
-            IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
-          END IF;
-        END LOOP;
         IF el?%L AND EXISTS(SELECT 1 FROM jsonb_object_keys(cfg#>'{array,fields}')x WHERE x<>%L AND NOT el?x) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='existing array element is incomplete';END IF;
+      END LOOP;
+      FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        IF EXISTS(SELECT 1 FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) e WHERE e.value?unknown_field AND e.value->unknown_field<>'null'::jsonb AND jsonb_typeof(e.value->unknown_field) IS DISTINCT FROM sql_kind) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
+        IF sql_kind='number' THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($1)e CROSS JOIN LATERAL jsonb_to_record(jsonb_build_object(''v'',e.value->$2)) AS x(v %%s) WHERE e.value?$2 AND e.value->$2<>''null''::jsonb AND to_jsonb(x.v) IS DISTINCT FROM e.value->$2)',sql_type) INTO changed USING doc->(cfg#>>'{array,name}'),unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L)<>(SELECT count(DISTINCT e->%L) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
       SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
