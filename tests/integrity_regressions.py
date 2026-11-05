@@ -431,6 +431,101 @@ INSERT INTO jt_identity_touch.child(parent,value) VALUES(1,'old');""")
            identity_update.returncode == 0 and identity_value == "new",
            f"update={identity_update.returncode},value={identity_value}")
 
+    generated_doc = json.loads(db.value("SELECT data::text FROM jt_identity_touch.documents WHERE _id=1;"))
+    generated_doc["items"].append({"id": 99, "value": "explicit"})
+    generated_insert = db.run("UPDATE jt_identity_touch.documents SET data="
+                              + quote(json.dumps(generated_doc)) + "::jsonb WHERE _id=1;", False)
+    record("GENERATED ALWAYS child keys reject explicit new identities",
+           db.state(generated_insert) == "PT422"
+           and db.value("SELECT count(*) FROM jt_identity_touch.child WHERE id=99;") == "0",
+           f"state={db.state(generated_insert)}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_manual_keys CASCADE; CREATE SCHEMA jt_manual_keys;
+CREATE TABLE jt_manual_keys.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_manual_keys.child(id text PRIMARY KEY,parent integer NOT NULL REFERENCES jt_manual_keys.root(id),value text);
+INSERT INTO jt_manual_keys.root VALUES(1,'one'),(2,'two');
+INSERT INTO jt_manual_keys.child VALUES('other',2,'owned elsewhere');""")
+    manual_spec = {
+        "root": {"table": "jt_manual_keys.root", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "array": {"name": "items", "table": "jt_manual_keys.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_manual_keys.documents", manual_spec)
+    initial_manual = json.loads(db.value("SELECT data::text FROM jt_manual_keys.documents WHERE _id=1;"))
+    initial_manual["items"].append({"id": "sku-a", "value": "A"})
+    append_manual = db.run("UPDATE jt_manual_keys.documents SET data="
+                           + quote(json.dumps(initial_manual)) + "::jsonb WHERE _id=1;", False)
+    current_manual = json.loads(db.value("SELECT data::text FROM jt_manual_keys.documents WHERE _id=1;"))
+    current_manual["value"] = "must roll back"
+    current_manual["items"].append({"id": "other", "value": "foreign"})
+    foreign_manual = db.run("UPDATE jt_manual_keys.documents SET data="
+                            + quote(json.dumps(current_manual)) + "::jsonb WHERE _id=1;", False)
+    disabled_spec = json.loads(json.dumps(manual_spec))
+    disabled_spec["array"]["insert"] = False
+    create_view(db, "jt_manual_keys.documents_no_insert", disabled_spec)
+    disabled_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_manual_keys.documents_no_insert WHERE _id=1;"))
+    disabled_doc["items"].append({"id": "sku-disabled", "value": "blocked"})
+    disabled_manual = db.run(
+        "UPDATE jt_manual_keys.documents_no_insert SET data="
+        + quote(json.dumps(disabled_doc)) + "::jsonb WHERE _id=1;", False)
+    manual_state = db.value("SELECT r.value||':'||string_agg(c.id,',' ORDER BY c.id) "
+                            "FROM jt_manual_keys.root r JOIN jt_manual_keys.child c ON c.parent=r.id "
+                            "WHERE r.id=1 GROUP BY r.value;")
+    record("globally unused explicit child keys append as one atomic replacement",
+           append_manual.returncode == 0 and db.state(foreign_manual) == "PT422"
+           and db.state(disabled_manual) == "PT422"
+           and manual_state == "one:sku-a",
+           f"append={append_manual.returncode},foreign={db.state(foreign_manual)},"
+           f"disabled={db.state(disabled_manual)},state={manual_state}")
+
+    binding_role = f"jt_binding_writer_{time.time_ns()}"
+    db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
+DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
+GRANT USAGE ON SCHEMA jt_binding_acl TO {binding_role};
+ALTER DEFAULT PRIVILEGES IN SCHEMA jt_binding_acl GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {binding_role};
+CREATE TABLE jt_binding_acl.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_acl.root(id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding_acl.ref(id),value text);
+CREATE TABLE jt_binding_acl.child(id text PRIMARY KEY,parent integer NOT NULL REFERENCES jt_binding_acl.root(id),value text);
+INSERT INTO jt_binding_acl.ref VALUES(7,'seven');
+INSERT INTO jt_binding_acl.root VALUES(1,7,'one');
+INSERT INTO jt_binding_acl.child VALUES('a',1,'A');""")
+    binding_spec = {
+        "root": {"table": "jt_binding_acl.root", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "object": {"name": "reference", "table": "jt_binding_acl.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"}},
+        "array": {"name": "items", "table": "jt_binding_acl.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_binding_acl.documents", binding_spec)
+    db.run(f"GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_binding_acl TO {binding_role};")
+    helper_writes = [
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__root_binding"
+               "(id,ref_id,value) VALUES(2,7,'bypass');", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__root_binding"
+               "(id,ref_id,value) VALUES(1,7,'bypass') ON CONFLICT(id) DO UPDATE SET value=excluded.value;", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__object_binding"
+               "(id,label) VALUES(8,'bypass');", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__array_binding"
+               "(id,parent,value) VALUES('b',1,'bypass');", False),
+    ]
+    role_update = db.run(f"SET ROLE {binding_role}; UPDATE jt_binding_acl.documents SET "
+                         "data=jsonb_set(data,'{value}','\"normal\"') WHERE _id=1;", False)
+    acl_state = db.value("SELECT value||':'||(SELECT count(*) FROM jt_binding_acl.child) "
+                         "FROM jt_binding_acl.root WHERE id=1;")
+    inherited = db.value(f"SELECT bool_and(has_table_privilege('{binding_role}',c.oid,'INSERT')) "
+                         "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                         "WHERE n.nspname='jt_binding_acl' AND c.relname LIKE 'documents__%_binding';")
+    record("binding views remain non-writable under default and later broad grants",
+           inherited == "t" and all(db.state(result) == "55000" for result in helper_writes)
+           and role_update.returncode == 0 and acl_state == "normal:1",
+           f"grants={inherited},helpers={[db.state(r) for r in helper_writes]},"
+           f"normal={role_update.returncode},state={acl_state}")
+    db.run(f"ALTER DEFAULT PRIVILEGES IN SCHEMA jt_binding_acl REVOKE ALL ON TABLES FROM {binding_role};"
+           f"DROP OWNED BY {binding_role}; DROP ROLE {binding_role};")
+
     db.run("""DROP SCHEMA IF EXISTS jt_typed_duplicate CASCADE; CREATE SCHEMA jt_typed_duplicate;
 CREATE TABLE jt_typed_duplicate.root(id integer PRIMARY KEY,value text);
 CREATE TABLE jt_typed_duplicate.child(id integer PRIMARY KEY,parent integer REFERENCES jt_typed_duplicate.root(id));

@@ -180,7 +180,7 @@ BEGIN
                                AND a.attname=c.name AND a.attnum>0 AND NOT a.attisdropped
         )x;
         binding_columns:=ARRAY(SELECT x FROM unnest(binding_columns)x ORDER BY x);
-        binding_ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT %s FROM %s binding_source WHERE false;',qbinding,(SELECT string_agg(format('binding_source.%I',x),',') FROM unnest(binding_columns)x),qrel)||E'\n';
+        binding_ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT %s FROM %s binding_source WHERE false OFFSET 0;',qbinding,(SELECT string_agg(format('binding_source.%I',x),',') FROM unnest(binding_columns)x),qrel)||E'\n';
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE c.conrelid=to_regclass(%L) AND c.contype=''p'' AND cardinality(c.conkey)=1 AND c.conname=%L AND a.attname=%L) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',qrel,binding_pk_name,cfg#>>ARRAY[s,'key']);
         relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal,a.attnum FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped) current USING(attname,ordinal) WHERE EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=current.attnum))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qbinding,qrel,cardinality(binding_columns));
     END LOOP;
@@ -193,7 +193,7 @@ BEGIN
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
-DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %I.%I.%I%%TYPE;
+DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; new_explicit int:=0; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %I.%I.%I%%TYPE;
 BEGIN
   %s
   IF TG_OP='INSERT' THEN
@@ -316,8 +316,12 @@ BEGIN
         -- membership and DML use database equality, including numeric keys.
         SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
         SELECT coalesce(jsonb_agg((SELECT coalesce(jsonb_object_agg(f.value#>>'{}',e.value->f.key),'{}'::jsonb) FROM jsonb_each(cfg#>'{array,fields}')f WHERE e.value?f.key)||jsonb_build_object(cfg#>>'{array,parent_fk}',to_jsonb(root_id))),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e;
-        EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n WHERE n.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=$2 AND t.%%I=n.%%I))',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}',cfg#>>'{array,key}') INTO changed USING mapped,root_id;
+        EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n JOIN %%I.%%I t ON t.%%I=n.%%I WHERE n.%%I IS NOT NULL AND t.%%I<>$2)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,parent_fk}') INTO changed USING mapped,root_id;
         IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
+
+        EXECUTE format('SELECT count(*) FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n WHERE n.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=n.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') INTO new_explicit USING mapped;
+        IF new_explicit>0 AND NOT (cfg#>>'{array,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array insert is disabled';END IF;
+        IF new_explicit>0 AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=cfg#>>'{array,key}' AND a.attidentity='a' AND a.attnum>0 AND NOT a.attisdropped) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='explicit value is not allowed for a GENERATED ALWAYS array key';END IF;
 
         EXECUTE format('SELECT count(*) FROM %%I.%%I t WHERE t.%%I=$2 AND NOT EXISTS(SELECT 1 FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)n WHERE n.%%I=t.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') INTO expected USING mapped,root_id;
         IF expected>0 THEN
@@ -334,6 +338,18 @@ BEGIN
             EXECUTE format('UPDATE %%I.%%I t SET %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE t.%%I=$2 AND t.%%I=x.%%I AND (%%s)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],sets,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,parent_fk}',cfg#>>'{array,key}',cfg#>>'{array,key}',diff) USING mapped,root_id;
             GET DIAGNOSTICS n=ROW_COUNT;IF n<>expected THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array update denied';END IF;
           END IF;
+        END IF;
+
+        -- A supplied key may identify either an existing element or a new
+        -- business-key element.  Insert only globally unused keys; a conflict
+        -- after the ownership check is a concurrent ownership change.
+        IF new_explicit>0 THEN
+          SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}');
+          BEGIN
+            EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_populate_recordset(NULL::%%I.%%I,$1)x WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}') USING mapped;
+            GET DIAGNOSTICS n=ROW_COUNT;IF n<>new_explicit THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='array insert denied';END IF;
+          EXCEPTION WHEN unique_violation THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';
+          END;
         END IF;
 
         -- New elements have no key.  Bulk-insert complete groups, while one

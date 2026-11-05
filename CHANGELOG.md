@@ -29,5 +29,7 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Made installation verification independent of identifier rendering and required semantic view, trigger and update read-back.
 - Required operational pilot reads to return the expected document identity and ETag, and verified that binding views remain inaccessible through PostgREST.
 - Corrected NOCHECK reference drift, GENERATED ALWAYS root touch and typed child-key duplicate handling.
+- Made generated relation-binding views intrinsically non-updatable even under broad or default write grants.
+- Added replacement-time insertion of globally unused explicit child business keys while preserving ownership, feature-flag, identity and atomicity checks.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
