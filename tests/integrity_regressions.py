@@ -544,12 +544,17 @@ CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
         f"SET ROLE {nullable_role}; UPDATE jt_nullable_owner.documents SET data="
         + quote(json.dumps(rls_doc)) + "::jsonb WHERE _id=2;", False)
     db.run(f"DROP OWNED BY {nullable_role}; DROP ROLE {nullable_role};")
+    rls_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
     record("mixed orphan replacements and RLS-hidden orphans fail closed",
            db.state(destructive_replace) == "PT422"
            and destructive_state == "target:orphan=NULL=unlinked,owned=2=existing"
-           and db.state(rls_append) == "PT422",
+           and db.state(rls_append) in ("PT422", "23505")
+           and rls_state == "target:orphan=NULL=unlinked,owned=2=existing",
            f"replace={db.state(destructive_replace)},state={destructive_state},"
-           f"rls={db.state(rls_append)}")
+           f"rls={db.state(rls_append)},rls_state={rls_state}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_secondary_unique CASCADE; CREATE SCHEMA jt_secondary_unique;
 CREATE TABLE jt_secondary_unique.root(id integer PRIMARY KEY,value text);
@@ -584,6 +589,86 @@ CREATE TABLE jt_secondary_unique.child(
            and secondary_state == "root:1",
            f"state={db.state(secondary_conflict)},constraint="
            f"{'child_value_unique' in secondary_conflict.stderr},source={secondary_state}")
+
+    diagnostic_probes = db.run(r"""DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-secondary","value":"unique-value"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st<>'23505' OR con<>'child_value_unique' OR tab<>'child'
+     OR sch<>'jt_secondary_unique' THEN
+    RAISE EXCEPTION 'secondary diagnostics mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;
+
+CREATE SCHEMA jt_secondary_audit;
+CREATE TABLE jt_secondary_audit.audit(
+ id integer,CONSTRAINT child_pkey PRIMARY KEY(id));
+INSERT INTO jt_secondary_audit.audit VALUES(1);
+CREATE FUNCTION jt_secondary_unique.child_insert_probe() RETURNS trigger
+LANGUAGE plpgsql AS $trigger$
+BEGIN
+  IF NEW.value='trigger-conflict' THEN
+    INSERT INTO jt_secondary_audit.audit VALUES(1);
+  ELSIF NEW.value='claim-key' THEN
+    INSERT INTO jt_secondary_unique.child(id,parent,value)
+    VALUES(NEW.id,NEW.parent,'claimed-by-trigger');
+  END IF;
+  RETURN NEW;
+END $trigger$;
+CREATE TRIGGER child_insert_probe BEFORE INSERT ON jt_secondary_unique.child
+FOR EACH ROW EXECUTE FUNCTION jt_secondary_unique.child_insert_probe();
+
+DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-trigger","value":"trigger-conflict"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st<>'23505' OR con<>'child_pkey' OR tab<>'audit'
+     OR sch<>'jt_secondary_audit' THEN
+    RAISE EXCEPTION 'trigger diagnostics mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;
+
+DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-claimed","value":"claim-key"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st<>'PT422' OR coalesce(con,'')<>'' THEN
+    RAISE EXCEPTION 'child identity remap mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;""", False)
+    diagnostic_state = (db.value(
+        "SELECT r.value||':'||(SELECT count(*) FROM jt_secondary_unique.child)||':'||"
+        "(SELECT count(*) FROM jt_secondary_audit.audit) "
+        "FROM jt_secondary_unique.root r WHERE id=1;")
+        if diagnostic_probes.returncode == 0 else "probe-failed")
+    record("unique-conflict remapping uses exact relation identity",
+           diagnostic_probes.returncode == 0 and diagnostic_state == "root:1:1",
+           f"probes={diagnostic_probes.returncode},state={diagnostic_state},"
+           f"stderr={diagnostic_probes.stderr.strip()}")
 
     binding_role = f"jt_binding_writer_{time.time_ns()}"
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
