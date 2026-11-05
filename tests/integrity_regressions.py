@@ -544,12 +544,17 @@ CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
         f"SET ROLE {nullable_role}; UPDATE jt_nullable_owner.documents SET data="
         + quote(json.dumps(rls_doc)) + "::jsonb WHERE _id=2;", False)
     db.run(f"DROP OWNED BY {nullable_role}; DROP ROLE {nullable_role};")
+    rls_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
     record("mixed orphan replacements and RLS-hidden orphans fail closed",
            db.state(destructive_replace) == "PT422"
            and destructive_state == "target:orphan=NULL=unlinked,owned=2=existing"
-           and db.state(rls_append) == "PT422",
+           and db.state(rls_append) == "PT422"
+           and rls_state == "target:orphan=NULL=unlinked,owned=2=existing",
            f"replace={db.state(destructive_replace)},state={destructive_state},"
-           f"rls={db.state(rls_append)}")
+           f"rls={db.state(rls_append)},rls_state={rls_state}")
 
     binding_role = f"jt_binding_writer_{time.time_ns()}"
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
