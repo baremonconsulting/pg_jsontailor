@@ -42,5 +42,6 @@ regardless of commit-message wording.
 - Added generator provenance, inventory, non-mutating health checks and transactional regeneration.
 - Moved catalogue guards to statement scope and made mapped-array validation set-wise.
 - Added verified current benchmark evidence, custom and plain dump/restore CI, and a release-candidate consistency gate.
+- Prevented lifecycle inventory from executing health callbacks owned by another role with the inventory caller's privileges.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

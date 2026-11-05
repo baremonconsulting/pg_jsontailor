@@ -31,6 +31,12 @@ SELECT * FROM jsontailor.duality_view_inventory();
 SELECT api.orders_dv__check();
 ```
 
+Run inventory as the owner of the managed views when health execution is
+required. Inventory reports views owned by other roles as `SKIPPED` and does not
+execute their health functions. Connect as each view owner, or invoke that
+owner's explicitly qualified `__check()` function under a separately reviewed
+operational procedure.
+
 For a view generated with provenance metadata, use the transactional
 regenerator. It preserves view grants, generated-function grants and
 generated-function comments, rejects dependent relations and never uses

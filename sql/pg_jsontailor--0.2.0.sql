@@ -606,13 +606,14 @@ RETURNS TABLE(
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER
 SET search_path=pg_catalog,pg_temp
 AS $inventory$
-DECLARE r record; metadata jsonb; health jsonb;
+DECLARE r record; metadata jsonb; health jsonb; check_owner oid; check_function oid;
 BEGIN
   SELECT encode(sha256(convert_to(pg_get_functiondef(
     'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex')
     INTO current_generator_hash;
   FOR r IN
-    SELECT n.nspname,c.relname,obj_description(c.oid,'pg_class') description
+    SELECT n.nspname,c.relname,c.relowner,
+      obj_description(c.oid,'pg_class') description
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE c.relkind='v'
       AND obj_description(c.oid,'pg_class') LIKE 'pg_jsontailor metadata v1: %%'
@@ -625,6 +626,22 @@ BEGIN
       metadata:=substr(r.description,length('pg_jsontailor metadata v1: ')+1)::jsonb;
       generator_version:=metadata#>>'{generator,version}';
       generator_hash:=metadata#>>'{generator,hash}';
+      IF r.relowner<>(SELECT oid FROM pg_roles WHERE rolname=current_user) THEN
+        health_status:='SKIPPED';
+        health_detail:='health check requires the inventory caller to own the managed view';
+        RETURN NEXT;
+        CONTINUE;
+      END IF;
+      SELECT p.oid,p.proowner INTO check_function,check_owner
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname=r.nspname AND p.proname=r.relname||'__check'
+        AND p.pronargs=0 AND p.prorettype='jsonb'::regtype;
+      IF check_function IS NULL OR check_owner<>r.relowner THEN
+        health_status:='SKIPPED';
+        health_detail:='health check is missing, has an invalid signature or has a different owner';
+        RETURN NEXT;
+        CONTINUE;
+      END IF;
       EXECUTE format('SELECT %I.%I()',r.nspname,r.relname||'__check') INTO health;
       health_status:=coalesce(health->>'status','ERROR');
       health_detail:=CASE WHEN generator_hash=current_generator_hash
