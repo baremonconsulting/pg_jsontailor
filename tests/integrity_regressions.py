@@ -266,6 +266,33 @@ INSERT INTO jt_binding_unmapped.source VALUES(1,'a','first','b','second','c');""
            unmapped_states == [(0, None), (0, None), (0, None)]
            and unmapped_values == "three:two",
            f"states={unmapped_states},values={unmapped_values}")
+    rename_states = []
+    for suffix, alteration in (
+            ("table", "ALTER TABLE jt_binding_rename_table.source RENAME TO renamed"),
+            ("key", "ALTER TABLE jt_binding_rename_key.source RENAME COLUMN id TO renamed_id")):
+        schema = "jt_binding_rename_" + suffix
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.source(id integer PRIMARY KEY,value text);
+INSERT INTO {schema}.source VALUES(1,'original');""")
+        rename_spec = {
+            "root": {"table": schema + ".source", "key": "id", "fields": {"value": "value"},
+                     "insert": True, "update": True, "delete": True}}
+        create_view(db, schema + ".documents", rename_spec)
+        rename_etag = db.value(
+            f"SELECT data#>>'{{_metadata,etag}}' FROM {schema}.documents WHERE _id=1;")
+        db.run(alteration)
+        rename_results = [
+            db.run(f"INSERT INTO {schema}.documents(data) VALUES"
+                   "('{\"_id\":2,\"value\":\"wrong\"}'::jsonb);", False),
+            db.run(f"UPDATE {schema}.documents SET data=jsonb_set(data,'{{value}}','\"wrong\"') "
+                   "WHERE _id=1;", False),
+            db.run(f"DELETE FROM {schema}.documents WHERE _id=1;", False),
+            db.run(f"SELECT {schema}.documents__delete_document(1,{quote(rename_etag)});", False),
+        ]
+        rename_states.append([db.state(result) for result in rename_results])
+    record("root table and key renames reach binding drift checks",
+           rename_states == [["PT422"] * 4, ["PT422"] * 4],
+           f"states={rename_states}")
 
     same_layout_states = []
     same_layout_values = []

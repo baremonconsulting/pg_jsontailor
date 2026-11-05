@@ -193,7 +193,7 @@ BEGIN
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
-DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; violation_schema text; violation_table text; violation_constraint text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; new_explicit int:=0; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %I.%I.%I%%TYPE;
+DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; violation_schema text; violation_table text; violation_constraint text; idj jsonb; keyj jsonb; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; n int; expected int; new_explicit int:=0; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %s;
 BEGIN
   %s
   IF TG_OP='INSERT' THEN
@@ -391,9 +391,7 @@ BEGIN
 END
 $body$,
  cfg,
-	 root_schema,
-	 root_table,
-	 cfg#>>'{root,key}',
+	 root_key_type,
 	 relation_checks,
  object_key_field,
  root_schema,
