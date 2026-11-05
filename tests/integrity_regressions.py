@@ -512,6 +512,40 @@ SELECT jt_nullable_owner.documents__delete_document(
            and nullable_state == "target:orphan=NULL,owned=2",
            f"append={db.state(orphan_append)},state={nullable_state}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_secondary_unique CASCADE; CREATE SCHEMA jt_secondary_unique;
+CREATE TABLE jt_secondary_unique.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_secondary_unique.child(
+ id text PRIMARY KEY,parent integer REFERENCES jt_secondary_unique.root(id),value text,
+ CONSTRAINT child_value_unique UNIQUE(value));""")
+    secondary_spec = {
+        "root": {"table": "jt_secondary_unique.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_secondary_unique.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_secondary_unique.documents", secondary_spec)
+    db.run("INSERT INTO jt_secondary_unique.documents(data) VALUES"
+           "('{\"_id\":1,\"value\":\"root\",\"items\":[{\"id\":\"sku-a\","
+           "\"value\":\"unique-value\"}]}'::jsonb);")
+    secondary_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_secondary_unique.documents WHERE _id=1;"))
+    secondary_doc["value"] = "must roll back"
+    secondary_doc["items"].append({"id": "sku-b", "value": "unique-value"})
+    secondary_conflict = db.run(
+        "UPDATE jt_secondary_unique.documents SET data=" + quote(json.dumps(secondary_doc))
+        + "::jsonb WHERE _id=1;", False)
+    secondary_state = db.value(
+        "SELECT r.value||':'||count(c.*) FROM jt_secondary_unique.root r "
+        "LEFT JOIN jt_secondary_unique.child c ON c.parent=r.id "
+        "WHERE r.id=1 GROUP BY r.value;")
+    record("secondary child uniqueness diagnostics are preserved",
+           db.state(secondary_conflict) == "23505"
+           and "child_value_unique" in secondary_conflict.stderr
+           and secondary_state == "root:1",
+           f"state={db.state(secondary_conflict)},constraint="
+           f"{'child_value_unique' in secondary_conflict.stderr},source={secondary_state}")
+
     binding_role = f"jt_binding_writer_{time.time_ns()}"
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
 DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
