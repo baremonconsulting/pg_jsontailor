@@ -249,19 +249,19 @@ CREATE VIEW jt_bad.v AS SELECT 1 id;""")
 
     def test14(self):
         self.run("""DROP SCHEMA IF EXISTS jt_v7 CASCADE; CREATE SCHEMA jt_v7;
-CREATE TABLE jt_v7.root(id integer PRIMARY KEY,t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,u uuid);
-CREATE TABLE jt_v7.child(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_v7.root(id),t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,u uuid);
-INSERT INTO jt_v7.root VALUES(1,'é','v','c',2,3,4,5.20,true,'2026-11-03','2026-11-03 10:00','00000000-0000-0000-0000-000000000001');
-INSERT INTO jt_v7.child VALUES(1,1,'x','y','z',2,3,4,5.20,false,'2026-11-04','2026-11-04 10:00','00000000-0000-0000-0000-000000000002');
-CREATE TABLE jt_v7.excluded(id integer PRIMARY KEY,tz timestamptz,r real,d double precision,iv interval,m money,ba bytea);""")
-        fields={"t":"t","v":"v","c":"c","s":"s","i":"i","b":"b","n":"n","flag":"flag","d":"d","ts":"ts","u":"u"}
+CREATE TABLE jt_v7.root(id integer PRIMARY KEY,t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,tz timestamptz,u uuid);
+CREATE TABLE jt_v7.child(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_v7.root(id),t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,tz timestamptz,u uuid);
+INSERT INTO jt_v7.root VALUES(1,'é','v','c',2,3,4,5.20,true,'2026-11-03','2026-11-03 10:00','2026-11-03 10:00+01','00000000-0000-0000-0000-000000000001');
+INSERT INTO jt_v7.child VALUES(1,1,'x','y','z',2,3,4,5.20,false,'2026-11-04','2026-11-04 10:00','2026-11-04 10:00+01','00000000-0000-0000-0000-000000000002');
+CREATE TABLE jt_v7.excluded(id integer PRIMARY KEY,r real,d double precision,iv interval,m money,ba bytea);""")
+        fields={"t":"t","v":"v","c":"c","s":"s","i":"i","b":"b","n":"n","flag":"flag","d":"d","ts":"ts","tz":"tz","u":"u"}
         spec={"root":{"table":"jt_v7.root","key":"id","fields":fields,"insert":True,"update":True,"delete":True},"array":{"name":"items","table":"jt_v7.child","key":"id","parent_fk":"parent","fields":{"id":"id",**fields},"insert":True,"update":True,"delete":True}}
         self.run("SELECT jsontailor.create_duality_view('jt_v7.dv',"+lit(json.dumps(spec))+"::jsonb);")
         tags=[]
         for settings in ("SET TimeZone='UTC';SET DateStyle='ISO, MDY';SET extra_float_digits=0;","SET TimeZone='Pacific/Auckland';SET DateStyle='German, DMY';SET extra_float_digits=3;"):
             tags.append(self.scalar(settings+"SELECT data#>>'{_metadata,etag}' FROM jt_v7.dv WHERE _id=1;"))
         excluded=[]
-        for col in ("tz","r","d","iv","m","ba"):
+        for col in ("r","d","iv","m","ba"):
             bad={"root":{"table":"jt_v7.excluded","key":"id","fields":{"bad":col}}}
             excluded.append(self.state(self.run("SELECT jsontailor.duality_view_ddl('jt_v7.bad_"+col+"',"+lit(json.dumps(bad))+"::jsonb);",False)))
         passed=len(set(tags))==1 and all(x=="22023" for x in excluded)

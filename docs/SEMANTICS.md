@@ -17,13 +17,17 @@ A replacement or delete must carry the ETag obtained from a preceding read. The 
 An insert validates the complete document, creates the root row and then creates configured child rows. Database defaults and supported generated keys remain available when the corresponding document fields are omitted. The returned document contains generated identifiers and its current ETag.
 
 Mapped JSON values must use the JSON type expected by the target PostgreSQL
-column: strings for character, date, timestamp and UUID columns; numbers for
+column: strings for character, date, timestamp, timestamp-with-time-zone and UUID columns; numbers for
 integer and numeric columns; and booleans for boolean columns. JSON `null`
 continues to be governed by the target column's nullability. Numeric conversion
 must be lossless at the declared target precision and scale. A type mismatch,
 lossy numeric conversion, explicit value for a `GENERATED ALWAYS` identity, or
 an array element that cannot be routed to a partition is rejected with
 `PT422`. Other relational constraints retain their native PostgreSQL error.
+
+Timestamp-with-time-zone values are rendered in UTC with a `Z` suffix and six
+fractional-second digits. Their document representation and ETag therefore do
+not change with the session `TimeZone`.
 
 ## Replacement
 

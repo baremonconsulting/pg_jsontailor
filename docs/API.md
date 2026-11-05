@@ -65,13 +65,16 @@ Field names must match `^[A-Za-z][A-Za-z0-9_]{0,62}$`. `_id` and `_metadata` are
 | `text`, `varchar`, `bpchar` | string |
 | `int2`, `int4`, `int8`, `numeric` | number |
 | `boolean` | boolean |
-| `date`, `timestamp`, `uuid` | string |
+| `date`, `timestamp`, `timestamptz`, `uuid` | string |
 
 Mapped domains, enums, `json`/`jsonb`, arrays and other types are not
-supported. `timestamptz` is documented separately as a planned extension of
-the type contract; it is not accepted by this version. An unmapped column may
-use any type supported by its source table, including a domain, because the
-generated write projection omits it.
+supported. An unmapped column may use any type supported by its source table,
+including a domain, because the generated write projection omits it.
+
+`timestamptz` values are emitted as UTC strings in the fixed form
+`YYYY-MM-DDTHH:MM:SS.ffffffZ`. Input strings may contain any PostgreSQL-accepted
+time-zone offset; reads normalize the represented instant to UTC. This makes
+documents and ETags independent of the session `TimeZone` setting.
 
 ## Generated objects
 
