@@ -54,6 +54,7 @@ Native SQL `MERGE` uses the same insert, update and delete triggers as direct wr
 ## Known limits
 
 - one root table, one optional referenced object and one optional child array;
+- ordinary source tables must not have classic `INHERITS` descendants; declaratively partitioned roots are supported;
 - single-column primary and foreign keys;
 - complete replacement rather than partial patching;
 - no recursive nesting;
