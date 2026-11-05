@@ -1,0 +1,682 @@
+[
+  {
+    "size": 0,
+    "operation": "read",
+    "direct": {
+      "median_ms": 0.029,
+      "p95_ms": 0.036,
+      "min_ms": 0.027,
+      "max_ms": 0.05
+    },
+    "duality": {
+      "median_ms": 0.042,
+      "p95_ms": 0.044,
+      "min_ms": 0.039,
+      "max_ms": 0.046
+    },
+    "median_ratio": 1.4482758620689655
+  },
+  {
+    "size": 0,
+    "operation": "insert",
+    "direct": {
+      "median_ms": 0.068,
+      "p95_ms": 0.07,
+      "min_ms": 0.047,
+      "max_ms": 0.07300000000000001
+    },
+    "duality": {
+      "median_ms": 1.1295,
+      "p95_ms": 1.676,
+      "min_ms": 1.069,
+      "max_ms": 1.851
+    },
+    "median_ratio": 16.610294117647058
+  },
+  {
+    "size": 0,
+    "operation": "root_update",
+    "direct": {
+      "median_ms": 0.0235,
+      "p95_ms": 0.025,
+      "min_ms": 0.021,
+      "max_ms": 0.032
+    },
+    "duality": {
+      "median_ms": 1.3570000000000002,
+      "p95_ms": 1.871,
+      "min_ms": 1.314,
+      "max_ms": 2.046
+    },
+    "median_ratio": 57.74468085106384
+  },
+  {
+    "size": 0,
+    "operation": "update",
+    "direct": {
+      "median_ms": 0.049,
+      "p95_ms": 0.052000000000000005,
+      "min_ms": 0.046,
+      "max_ms": 0.056999999999999995
+    },
+    "duality": {
+      "median_ms": 1.35,
+      "p95_ms": 1.378,
+      "min_ms": 1.323,
+      "max_ms": 1.388
+    },
+    "median_ratio": 27.551020408163264
+  },
+  {
+    "size": 0,
+    "operation": "delete",
+    "direct": {
+      "median_ms": 0.0665,
+      "p95_ms": 0.06799999999999999,
+      "min_ms": 0.047,
+      "max_ms": 0.071
+    },
+    "duality": {
+      "median_ms": 0.6145,
+      "p95_ms": 0.639,
+      "min_ms": 0.581,
+      "max_ms": 0.641
+    },
+    "median_ratio": 9.240601503759398
+  },
+  {
+    "size": 0,
+    "operation": "merge_insert",
+    "direct": {
+      "median_ms": 0.086,
+      "p95_ms": 0.094,
+      "min_ms": 0.063,
+      "max_ms": 0.118
+    },
+    "duality": {
+      "median_ms": 1.2155,
+      "p95_ms": 1.267,
+      "min_ms": 1.166,
+      "max_ms": 1.285
+    },
+    "median_ratio": 14.13372093023256
+  },
+  {
+    "size": 0,
+    "operation": "merge_update",
+    "direct": {
+      "median_ms": 0.055,
+      "p95_ms": 0.058,
+      "min_ms": 0.052,
+      "max_ms": 0.07400000000000001
+    },
+    "duality": {
+      "median_ms": 1.371,
+      "p95_ms": 1.407,
+      "min_ms": 1.333,
+      "max_ms": 1.419
+    },
+    "median_ratio": 24.927272727272726
+  },
+  {
+    "size": 0,
+    "operation": "merge_delete",
+    "direct": {
+      "median_ms": 0.085,
+      "p95_ms": 0.108,
+      "min_ms": 0.063,
+      "max_ms": 0.116
+    },
+    "duality": {
+      "median_ms": 0.6859999999999999,
+      "p95_ms": 0.873,
+      "min_ms": 0.631,
+      "max_ms": 0.924
+    },
+    "median_ratio": 8.070588235294116
+  },
+  {
+    "size": 1,
+    "operation": "read",
+    "direct": {
+      "median_ms": 0.035,
+      "p95_ms": 0.054,
+      "min_ms": 0.034,
+      "max_ms": 0.063
+    },
+    "duality": {
+      "median_ms": 0.0495,
+      "p95_ms": 0.052,
+      "min_ms": 0.047,
+      "max_ms": 0.073
+    },
+    "median_ratio": 1.4142857142857141
+  },
+  {
+    "size": 1,
+    "operation": "insert",
+    "direct": {
+      "median_ms": 0.10200000000000001,
+      "p95_ms": 0.134,
+      "min_ms": 0.07200000000000001,
+      "max_ms": 0.14
+    },
+    "duality": {
+      "median_ms": 1.307,
+      "p95_ms": 1.443,
+      "min_ms": 1.224,
+      "max_ms": 1.509
+    },
+    "median_ratio": 12.813725490196077
+  },
+  {
+    "size": 1,
+    "operation": "root_update",
+    "direct": {
+      "median_ms": 0.024,
+      "p95_ms": 0.026,
+      "min_ms": 0.021,
+      "max_ms": 0.037
+    },
+    "duality": {
+      "median_ms": 1.5025,
+      "p95_ms": 1.537,
+      "min_ms": 1.459,
+      "max_ms": 1.555
+    },
+    "median_ratio": 62.604166666666664
+  },
+  {
+    "size": 1,
+    "operation": "update",
+    "direct": {
+      "median_ms": 0.081,
+      "p95_ms": 0.099,
+      "min_ms": 0.074,
+      "max_ms": 0.153
+    },
+    "duality": {
+      "median_ms": 2.1944999999999997,
+      "p95_ms": 2.239,
+      "min_ms": 2.129,
+      "max_ms": 2.418
+    },
+    "median_ratio": 27.092592592592588
+  },
+  {
+    "size": 1,
+    "operation": "delete",
+    "direct": {
+      "median_ms": 0.0645,
+      "p95_ms": 0.07400000000000001,
+      "min_ms": 0.051,
+      "max_ms": 0.091
+    },
+    "duality": {
+      "median_ms": 0.6525000000000001,
+      "p95_ms": 0.701,
+      "min_ms": 0.616,
+      "max_ms": 0.736
+    },
+    "median_ratio": 10.116279069767442
+  },
+  {
+    "size": 1,
+    "operation": "merge_insert",
+    "direct": {
+      "median_ms": 0.21100000000000002,
+      "p95_ms": 0.23700000000000002,
+      "min_ms": 0.17300000000000001,
+      "max_ms": 0.255
+    },
+    "duality": {
+      "median_ms": 1.3695,
+      "p95_ms": 1.432,
+      "min_ms": 1.303,
+      "max_ms": 1.448
+    },
+    "median_ratio": 6.490521327014217
+  },
+  {
+    "size": 1,
+    "operation": "merge_update",
+    "direct": {
+      "median_ms": 0.08499999999999999,
+      "p95_ms": 0.103,
+      "min_ms": 0.08,
+      "max_ms": 0.131
+    },
+    "duality": {
+      "median_ms": 2.2075,
+      "p95_ms": 2.325,
+      "min_ms": 2.174,
+      "max_ms": 2.372
+    },
+    "median_ratio": 25.97058823529412
+  },
+  {
+    "size": 1,
+    "operation": "merge_delete",
+    "direct": {
+      "median_ms": 0.091,
+      "p95_ms": 0.11299999999999999,
+      "min_ms": 0.068,
+      "max_ms": 0.123
+    },
+    "duality": {
+      "median_ms": 0.7335,
+      "p95_ms": 0.77,
+      "min_ms": 0.695,
+      "max_ms": 0.78
+    },
+    "median_ratio": 8.06043956043956
+  },
+  {
+    "size": 10,
+    "operation": "read",
+    "direct": {
+      "median_ms": 0.057,
+      "p95_ms": 0.078,
+      "min_ms": 0.056,
+      "max_ms": 0.078
+    },
+    "duality": {
+      "median_ms": 0.078,
+      "p95_ms": 0.08,
+      "min_ms": 0.076,
+      "max_ms": 0.098
+    },
+    "median_ratio": 1.368421052631579
+  },
+  {
+    "size": 10,
+    "operation": "insert",
+    "direct": {
+      "median_ms": 0.17200000000000001,
+      "p95_ms": 0.19699999999999998,
+      "min_ms": 0.134,
+      "max_ms": 0.21400000000000002
+    },
+    "duality": {
+      "median_ms": 1.6070000000000002,
+      "p95_ms": 1.66,
+      "min_ms": 1.539,
+      "max_ms": 1.693
+    },
+    "median_ratio": 9.343023255813954
+  },
+  {
+    "size": 10,
+    "operation": "root_update",
+    "direct": {
+      "median_ms": 0.031,
+      "p95_ms": 0.033,
+      "min_ms": 0.026,
+      "max_ms": 0.045
+    },
+    "duality": {
+      "median_ms": 1.9355,
+      "p95_ms": 1.996,
+      "min_ms": 1.851,
+      "max_ms": 2.13
+    },
+    "median_ratio": 62.435483870967744
+  },
+  {
+    "size": 10,
+    "operation": "update",
+    "direct": {
+      "median_ms": 0.133,
+      "p95_ms": 0.159,
+      "min_ms": 0.116,
+      "max_ms": 0.178
+    },
+    "duality": {
+      "median_ms": 2.7575000000000003,
+      "p95_ms": 2.817,
+      "min_ms": 2.71,
+      "max_ms": 2.849
+    },
+    "median_ratio": 20.73308270676692
+  },
+  {
+    "size": 10,
+    "operation": "delete",
+    "direct": {
+      "median_ms": 0.074,
+      "p95_ms": 0.079,
+      "min_ms": 0.053,
+      "max_ms": 0.08600000000000001
+    },
+    "duality": {
+      "median_ms": 0.743,
+      "p95_ms": 0.777,
+      "min_ms": 0.72,
+      "max_ms": 0.789
+    },
+    "median_ratio": 10.04054054054054
+  },
+  {
+    "size": 10,
+    "operation": "merge_insert",
+    "direct": {
+      "median_ms": 0.303,
+      "p95_ms": 0.34700000000000003,
+      "min_ms": 0.257,
+      "max_ms": 0.356
+    },
+    "duality": {
+      "median_ms": 1.737,
+      "p95_ms": 1.792,
+      "min_ms": 1.643,
+      "max_ms": 1.827
+    },
+    "median_ratio": 5.732673267326733
+  },
+  {
+    "size": 10,
+    "operation": "merge_update",
+    "direct": {
+      "median_ms": 0.136,
+      "p95_ms": 0.181,
+      "min_ms": 0.128,
+      "max_ms": 0.20900000000000002
+    },
+    "duality": {
+      "median_ms": 2.8075,
+      "p95_ms": 2.882,
+      "min_ms": 2.73,
+      "max_ms": 2.909
+    },
+    "median_ratio": 20.643382352941178
+  },
+  {
+    "size": 10,
+    "operation": "merge_delete",
+    "direct": {
+      "median_ms": 0.098,
+      "p95_ms": 0.105,
+      "min_ms": 0.075,
+      "max_ms": 0.10999999999999999
+    },
+    "duality": {
+      "median_ms": 0.9155,
+      "p95_ms": 0.932,
+      "min_ms": 0.874,
+      "max_ms": 0.938
+    },
+    "median_ratio": 9.341836734693876
+  },
+  {
+    "size": 100,
+    "operation": "read",
+    "direct": {
+      "median_ms": 0.261,
+      "p95_ms": 0.288,
+      "min_ms": 0.257,
+      "max_ms": 0.289
+    },
+    "duality": {
+      "median_ms": 0.466,
+      "p95_ms": 0.477,
+      "min_ms": 0.444,
+      "max_ms": 0.482
+    },
+    "median_ratio": 1.78544061302682
+  },
+  {
+    "size": 100,
+    "operation": "insert",
+    "direct": {
+      "median_ms": 0.8605,
+      "p95_ms": 0.962,
+      "min_ms": 0.644,
+      "max_ms": 0.9910000000000001
+    },
+    "duality": {
+      "median_ms": 4.5535,
+      "p95_ms": 4.686,
+      "min_ms": 4.325,
+      "max_ms": 4.979
+    },
+    "median_ratio": 5.291690877396862
+  },
+  {
+    "size": 100,
+    "operation": "root_update",
+    "direct": {
+      "median_ms": 0.033,
+      "p95_ms": 0.036,
+      "min_ms": 0.028,
+      "max_ms": 0.037
+    },
+    "duality": {
+      "median_ms": 5.167,
+      "p95_ms": 5.308,
+      "min_ms": 5.095,
+      "max_ms": 5.387
+    },
+    "median_ratio": 156.57575757575756
+  },
+  {
+    "size": 100,
+    "operation": "update",
+    "direct": {
+      "median_ms": 0.523,
+      "p95_ms": 0.5710000000000001,
+      "min_ms": 0.455,
+      "max_ms": 0.8
+    },
+    "duality": {
+      "median_ms": 7.532500000000001,
+      "p95_ms": 7.641,
+      "min_ms": 7.254,
+      "max_ms": 8.681
+    },
+    "median_ratio": 14.402485659655833
+  },
+  {
+    "size": 100,
+    "operation": "delete",
+    "direct": {
+      "median_ms": 0.118,
+      "p95_ms": 0.13,
+      "min_ms": 0.104,
+      "max_ms": 0.152
+    },
+    "duality": {
+      "median_ms": 1.763,
+      "p95_ms": 1.803,
+      "min_ms": 1.715,
+      "max_ms": 1.856
+    },
+    "median_ratio": 14.940677966101696
+  },
+  {
+    "size": 100,
+    "operation": "merge_insert",
+    "direct": {
+      "median_ms": 0.9745000000000001,
+      "p95_ms": 1.1320000000000001,
+      "min_ms": 0.894,
+      "max_ms": 1.1520000000000001
+    },
+    "duality": {
+      "median_ms": 4.8095,
+      "p95_ms": 4.915,
+      "min_ms": 4.636,
+      "max_ms": 5.049
+    },
+    "median_ratio": 4.935351462288352
+  },
+  {
+    "size": 100,
+    "operation": "merge_update",
+    "direct": {
+      "median_ms": 0.5095000000000001,
+      "p95_ms": 0.528,
+      "min_ms": 0.46099999999999997,
+      "max_ms": 0.546
+    },
+    "duality": {
+      "median_ms": 7.693,
+      "p95_ms": 8.134,
+      "min_ms": 7.484,
+      "max_ms": 8.45
+    },
+    "median_ratio": 15.099116781157996
+  },
+  {
+    "size": 100,
+    "operation": "merge_delete",
+    "direct": {
+      "median_ms": 0.154,
+      "p95_ms": 0.178,
+      "min_ms": 0.131,
+      "max_ms": 0.184
+    },
+    "duality": {
+      "median_ms": 2.1135,
+      "p95_ms": 2.162,
+      "min_ms": 2.059,
+      "max_ms": 2.202
+    },
+    "median_ratio": 13.724025974025976
+  },
+  {
+    "size": 1000,
+    "operation": "read",
+    "direct": {
+      "median_ms": 2.883,
+      "p95_ms": 2.904,
+      "min_ms": 2.852,
+      "max_ms": 2.92
+    },
+    "duality": {
+      "median_ms": 4.27,
+      "p95_ms": 4.311,
+      "min_ms": 4.229,
+      "max_ms": 4.341
+    },
+    "median_ratio": 1.4810960804717306
+  },
+  {
+    "size": 1000,
+    "operation": "insert",
+    "direct": {
+      "median_ms": 6.2765,
+      "p95_ms": 6.424,
+      "min_ms": 5.847,
+      "max_ms": 6.53
+    },
+    "duality": {
+      "median_ms": 32.208,
+      "p95_ms": 32.52,
+      "min_ms": 31.63,
+      "max_ms": 32.633
+    },
+    "median_ratio": 5.131522345256114
+  },
+  {
+    "size": 1000,
+    "operation": "root_update",
+    "direct": {
+      "median_ms": 0.048,
+      "p95_ms": 0.062,
+      "min_ms": 0.042,
+      "max_ms": 0.067
+    },
+    "duality": {
+      "median_ms": 34.6415,
+      "p95_ms": 34.951,
+      "min_ms": 34.231,
+      "max_ms": 35.27
+    },
+    "median_ratio": 721.6979166666666
+  },
+  {
+    "size": 1000,
+    "operation": "update",
+    "direct": {
+      "median_ms": 6.0655,
+      "p95_ms": 6.204000000000001,
+      "min_ms": 5.821,
+      "max_ms": 6.432
+    },
+    "duality": {
+      "median_ms": 50.4715,
+      "p95_ms": 50.876,
+      "min_ms": 49.024,
+      "max_ms": 50.997
+    },
+    "median_ratio": 8.321078229329816
+  },
+  {
+    "size": 1000,
+    "operation": "delete",
+    "direct": {
+      "median_ms": 2.317,
+      "p95_ms": 2.885,
+      "min_ms": 1.4220000000000002,
+      "max_ms": 3.936
+    },
+    "duality": {
+      "median_ms": 13.256499999999999,
+      "p95_ms": 13.961,
+      "min_ms": 11.815,
+      "max_ms": 14.23
+    },
+    "median_ratio": 5.72140699179974
+  },
+  {
+    "size": 1000,
+    "operation": "merge_insert",
+    "direct": {
+      "median_ms": 7.1385000000000005,
+      "p95_ms": 7.305000000000001,
+      "min_ms": 6.771,
+      "max_ms": 7.402
+    },
+    "duality": {
+      "median_ms": 32.229,
+      "p95_ms": 32.56,
+      "min_ms": 31.9,
+      "max_ms": 33.792
+    },
+    "median_ratio": 4.514814036562303
+  },
+  {
+    "size": 1000,
+    "operation": "merge_update",
+    "direct": {
+      "median_ms": 6.0545,
+      "p95_ms": 6.208,
+      "min_ms": 5.781,
+      "max_ms": 6.286
+    },
+    "duality": {
+      "median_ms": 49.282,
+      "p95_ms": 49.664,
+      "min_ms": 48.761,
+      "max_ms": 49.88
+    },
+    "median_ratio": 8.1397307787596
+  },
+  {
+    "size": 1000,
+    "operation": "merge_delete",
+    "direct": {
+      "median_ms": 3.1535,
+      "p95_ms": 3.989,
+      "min_ms": 0.512,
+      "max_ms": 4.117
+    },
+    "duality": {
+      "median_ms": 17.798000000000002,
+      "p95_ms": 19.929,
+      "min_ms": 15.971,
+      "max_ms": 20.3
+    },
+    "median_ratio": 5.643887743776756
+  }
+]

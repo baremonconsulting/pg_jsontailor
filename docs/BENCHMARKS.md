@@ -2,7 +2,7 @@
 
 The included benchmark compares generated document views with direct relational SQL in the same PostgreSQL instance. It measures server execution time with prebuilt JSON payloads and rolls back every mutation.
 
-## Historical reference environment
+## Current reference environment
 
 - PostgreSQL 18.6;
 - Azure Linux x86-64;
@@ -12,19 +12,23 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The historical reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. It predates the current write-path guards and must not be presented as performance of the current branch. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster. The complete [reference evidence](../bench/reference/azure-04d053e/) and [baseline evidence](../bench/reference/azure-acecaae/) are versioned with this repository. PM-25 will replace this section only after a verified run from the current authoritative commit.
+The current reference run used commit `11e6d74fef237e8376a22e68b3f715e3fc3418fa`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. The complete [current evidence](../bench/reference/azure-11e6d74/) is versioned with this repository and passes the independent verifier.
+
+An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). For 1,000 child items the final set-wise validation reduced median insert, root-only update, complete replacement, MERGE insert and MERGE update time by 69.0%, 67.7%, 58.9%, 69.1% and 59.3% respectively relative to that intermediate build. At zero and one child it adds roughly 8–25% to those paths; the optimization is intentionally targeted at larger arrays.
+
+The earlier `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8` run predates strict type conversion, current catalogue guards, `timestamptz` normalization and lifecycle tooling. Its [historical evidence](../bench/reference/azure-04d053e/) remains reproducible but is not semantically equivalent to the current write path.
 
 ## Set-based reconciliation result
 
 | Items | Operation | Median | p95 | Direct SQL median |
 | ---: | --- | ---: | ---: | ---: |
-| 10 | complete replacement | 1.913 ms | 1.930 ms | 0.128 ms |
-| 100 | complete replacement | 5.589 ms | 5.656 ms | 0.519 ms |
-| 1,000 | read | 4.205 ms | 4.224 ms | 2.874 ms |
-| 1,000 | insert | 26.433 ms | 26.769 ms | 9.419 ms |
-| 1,000 | root-only update | 25.180 ms | 25.314 ms | 0.054 ms |
-| 1,000 | complete replacement | 39.613 ms | 39.773 ms | 5.866 ms |
-| 1,000 | ETag-checked delete | 11.323 ms | 11.475 ms | 2.065 ms |
+| 10 | complete replacement | 2.758 ms | 2.817 ms | 0.133 ms |
+| 100 | complete replacement | 7.533 ms | 7.641 ms | 0.523 ms |
+| 1,000 | read | 4.270 ms | 4.311 ms | 2.883 ms |
+| 1,000 | insert | 32.208 ms | 32.520 ms | 6.277 ms |
+| 1,000 | root-only update | 34.642 ms | 34.951 ms | 0.048 ms |
+| 1,000 | complete replacement | 50.471 ms | 50.876 ms | 6.066 ms |
+| 1,000 | ETag-checked delete | 13.256 ms | 13.961 ms | 2.317 ms |
 
 ## Native MERGE result
 
@@ -32,20 +36,20 @@ The MERGE groups execute native PostgreSQL MERGE against both the generated docu
 
 | Items | MERGE action | Median | p95 | Relational MERGE median |
 | ---: | --- | ---: | ---: | ---: |
-| 0 | INSERT | 0.481 ms | 0.519 ms | 0.074 ms |
-| 0 | UPDATE | 0.729 ms | 0.748 ms | 0.055 ms |
-| 0 | ETag-checked DELETE | 0.488 ms | 0.526 ms | 0.084 ms |
-| 10 | INSERT | 0.918 ms | 0.956 ms | 0.298 ms |
-| 10 | UPDATE | 1.908 ms | 1.938 ms | 0.136 ms |
-| 10 | ETag-checked DELETE | 0.734 ms | 0.764 ms | 0.100 ms |
-| 100 | INSERT | 3.281 ms | 3.368 ms | 1.119 ms |
-| 100 | UPDATE | 5.598 ms | 5.645 ms | 0.519 ms |
-| 100 | ETag-checked DELETE | 1.885 ms | 1.911 ms | 0.166 ms |
-| 1,000 | INSERT | 22.712 ms | 22.979 ms | 6.515 ms |
-| 1,000 | UPDATE | 41.855 ms | 42.133 ms | 6.104 ms |
-| 1,000 | ETag-checked DELETE | 17.215 ms | 17.367 ms | 2.778 ms |
+| 0 | INSERT | 1.216 ms | 1.267 ms | 0.086 ms |
+| 0 | UPDATE | 1.371 ms | 1.407 ms | 0.055 ms |
+| 0 | ETag-checked DELETE | 0.686 ms | 0.873 ms | 0.085 ms |
+| 10 | INSERT | 1.737 ms | 1.792 ms | 0.303 ms |
+| 10 | UPDATE | 2.808 ms | 2.882 ms | 0.136 ms |
+| 10 | ETag-checked DELETE | 0.915 ms | 0.932 ms | 0.098 ms |
+| 100 | INSERT | 4.809 ms | 4.915 ms | 0.975 ms |
+| 100 | UPDATE | 7.693 ms | 8.134 ms | 0.510 ms |
+| 100 | ETag-checked DELETE | 2.114 ms | 2.162 ms | 0.154 ms |
+| 1,000 | INSERT | 32.229 ms | 32.560 ms | 7.139 ms |
+| 1,000 | UPDATE | 49.282 ms | 49.664 ms | 6.054 ms |
+| 1,000 | ETag-checked DELETE | 17.798 ms | 19.929 ms | 3.154 ms |
 
-Against `acecaae` on the same Azure VM, complete replacement improved by 7.9% at zero children, 32.1% at one, 26.6% at ten, 14.9% at 100 and 6.9% at 1,000. Insert medians increased by 5.5–56.7% depending on document size; this is the main path selected for further profiling. Read medians remained within approximately ±5%.
+Read medians remain close to the historical build. Write medians must not be compared as if the contracts were identical: the current path adds strict JSON type and lossless numeric checks, statement-level schema guards, deterministic `timestamptz` rendering and stronger lifecycle metadata. Use the intermediate optimization run above to evaluate the set-wise validation change in isolation.
 
 Delete results are not equivalent to the old baseline. The current path locks the root, ETag-covered referenced object and child rows, reads the document again and validates its post-lock ETag before mutation. The baseline did not provide that contract.
 

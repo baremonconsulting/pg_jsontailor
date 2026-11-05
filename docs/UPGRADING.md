@@ -68,6 +68,7 @@ BEGIN
               'orders_dv__insert',
               'orders_dv__update',
               'orders_dv__delete',
+              'orders_dv__guard',
               'orders_dv__delete_document',
               'orders_dv__check'
           ])

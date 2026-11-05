@@ -14,11 +14,11 @@ DECLARE
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text; qcheck text;
+    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text; qcheck text; qguard text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; check_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
+    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -27,7 +27,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must be a qualified schema.name';
     END;
     IF cardinality(vp)<>2 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must have exactly two parts'; END IF;
-    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 OR octet_length(vp[2]||'__check')>63 THEN
+    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 OR octet_length(vp[2]||'__check')>63 OR octet_length(vp[2]||'__guard')>63 THEN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='generated object name exceeds 63 bytes';
     END IF;
     IF jsonb_typeof(spec) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='spec must be an object'; END IF;
@@ -158,7 +158,7 @@ BEGIN
     IF cfg?'object' AND NOT (cfg#>>'{object,etag}')::boolean THEN
         etag_payload:=format('jsonb_set(d.payload,ARRAY[%L],CASE WHEN jsonb_typeof(d.payload->%L)=''object'' THEN jsonb_build_object(%L,d.payload#>ARRAY[%L,%L]) ELSE ''null''::jsonb END)',cfg#>>'{object,name}',cfg#>>'{object,name}',object_key_field,cfg#>>'{object,name}',object_key_field);
     END IF;
-    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');qcheck:=format('%I.%I',vp[1],vp[2]||'__check');
+    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');qcheck:=format('%I.%I',vp[1],vp[2]||'__check');qguard:=format('%I.%I',vp[1],vp[2]||'__guard');
     FOR s IN SELECT unnest(ARRAY['root','object','array']) LOOP
         IF NOT cfg?s THEN CONTINUE; END IF;
         tp:=parse_ident(cfg#>>ARRAY[s,'table']);
@@ -195,7 +195,10 @@ BEGIN
     END IF;
     SELECT encode(sha256(convert_to(pg_get_functiondef('jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex') INTO generator_hash;
     metadata:=jsonb_build_object('format',1,'spec',cfg,'generator',jsonb_build_object('version','0.2.0','hash',generator_hash));
-    check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,relation_checks,generator_hash);
+    guard_checks:=relation_checks;
+    check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,guard_checks,generator_hash);
+    guard_body:=format('BEGIN %s RETURN NULL; END',guard_checks);
+    relation_checks:='';
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
@@ -244,13 +247,11 @@ BEGIN
         SELECT x INTO unknown_field FROM jsonb_object_keys(el)x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{array,fields}'))) LIMIT 1;
         IF unknown_field IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown array field %%s',unknown_field);END IF;
         IF el?bad AND el->bad='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key must not be null';END IF;
-        FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
-          IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
-            IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
-            IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
-          END IF;
-        END LOOP;
+      END LOOP;
+      FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        IF EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]')) e WHERE e.value?unknown_field AND e.value->unknown_field<>'null'::jsonb AND jsonb_typeof(e.value->unknown_field) IS DISTINCT FROM sql_kind) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
+        IF sql_kind='number' THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($1)e CROSS JOIN LATERAL jsonb_to_record(jsonb_build_object(''v'',e.value->$2)) AS x(v %%s) WHERE e.value?$2 AND e.value->$2<>''null''::jsonb AND to_jsonb(x.v) IS DISTINCT FROM e.value->$2)',sql_type) INTO changed USING coalesce(doc->(cfg#>>'{array,name}'),'[]'),unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad)<>(SELECT count(DISTINCT e->bad) FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e?bad) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
       SELECT coalesce(jsonb_agg(jsonb_build_object(cfg#>>'{array,key}',e.value->bad)),'[]'::jsonb) INTO mapped FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'))e WHERE e.value?bad;
@@ -334,14 +335,12 @@ BEGIN
         IF jsonb_typeof(el)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element must be an object';END IF;
         SELECT x INTO bad FROM jsonb_object_keys(el)x WHERE x<>ALL(ARRAY(SELECT key FROM jsonb_each(cfg#>'{array,fields}'))) LIMIT 1;
         IF bad IS NOT NULL OR (el?%L AND el->%L='null'::jsonb) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid array element';END IF;
-        FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
-          IF el?unknown_field AND el->unknown_field<>'null'::jsonb THEN
-            SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
-            IF jsonb_typeof(el->unknown_field) IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
-            IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING el->unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
-          END IF;
-        END LOOP;
         IF el?%L AND EXISTS(SELECT 1 FROM jsonb_object_keys(cfg#>'{array,fields}')x WHERE x<>%L AND NOT el?x) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='existing array element is incomplete';END IF;
+      END LOOP;
+      FOR unknown_field,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP
+        SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
+        IF EXISTS(SELECT 1 FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) e WHERE e.value?unknown_field AND e.value->unknown_field<>'null'::jsonb AND jsonb_typeof(e.value->unknown_field) IS DISTINCT FROM sql_kind) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s has wrong JSON type',unknown_field);END IF;
+        IF sql_kind='number' THEN EXECUTE format('SELECT EXISTS(SELECT 1 FROM jsonb_array_elements($1)e CROSS JOIN LATERAL jsonb_to_record(jsonb_build_object(''v'',e.value->$2)) AS x(v %%s) WHERE e.value?$2 AND e.value->$2<>''null''::jsonb AND to_jsonb(x.v) IS DISTINCT FROM e.value->$2)',sql_type) INTO changed USING doc->(cfg#>>'{array,name}'),unknown_field;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('array field %%s loses precision in the mapped SQL type',unknown_field);END IF;END IF;
       END LOOP;
       IF (SELECT count(*) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L)<>(SELECT count(DISTINCT e->%L) FROM jsonb_array_elements(doc->(cfg#>>'{array,name}'))e WHERE e?%L) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='duplicate array key';END IF;
       SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
@@ -579,8 +578,8 @@ BEGIN
   IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;
   RETURN cur;
 END
-$delete_body$,cfg,relation_checks,qview);
-    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
+$delete_body$,cfg,guard_checks,qview);
+    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qguard,guard_body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I BEFORE INSERT ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_insert',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE UPDATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_update',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_delete',qview,qguard)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
     RETURN ddl;
 END
 $generator$;
@@ -710,13 +709,13 @@ BEGIN
   END LOOP;
 
   generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
-                         vp[2]||'__delete_document',vp[2]||'__check'];
+                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
   FOR r IN
     SELECT p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,
            p.proowner,obj_description(p.oid,'pg_proc') description
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
@@ -747,7 +746,7 @@ BEGIN
     SELECT p.oid::regprocedure identity
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
@@ -768,7 +767,7 @@ BEGIN
     SELECT p.oid::regprocedure identity
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
