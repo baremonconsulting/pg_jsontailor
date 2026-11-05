@@ -16,9 +16,20 @@ A replacement or delete must carry the ETag obtained from a preceding read. The 
 
 An insert validates the complete document, creates the root row and then creates configured child rows. Database defaults and supported generated keys remain available when the corresponding document fields are omitted. The returned document contains generated identifiers and its current ETag.
 
+Mapped JSON values must use the JSON type expected by the target PostgreSQL
+column: strings for character, date, timestamp and UUID columns; numbers for
+integer and numeric columns; and booleans for boolean columns. JSON `null`
+continues to be governed by the target column's nullability. Numeric conversion
+must be lossless at the declared target precision and scale. A type mismatch,
+lossy numeric conversion, explicit value for a `GENERATED ALWAYS` identity, or
+an array element that cannot be routed to a partition is rejected with
+`PT422`. Other relational constraints retain their native PostgreSQL error.
+
 ## Replacement
 
 An update is a complete document replacement, not a partial patch. `NEW.data` must be a complete valid document, but the client may pass only the identity, an earlier ETag and changed values while PostgreSQL constructs that document from the current view row in the statement. The root identity cannot change. Child rows are reconciled by key using set-based insert, update and delete operations. Operation flags in the specification determine which changes are allowed.
+
+Replacement applies the same JSON-type and lossless-conversion rules as insert.
 
 For a non-`GENERATED ALWAYS` child key, a supplied key identifies an existing element when it belongs to the document and creates a new element when it is globally unused and array insertion is enabled. A key owned by another document or an existing orphan key whose parent is `NULL` is rejected with `PT422`. Explicit new values for `GENERATED ALWAYS` child keys are rejected; omit those keys and let PostgreSQL generate them.
 

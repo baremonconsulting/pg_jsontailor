@@ -58,6 +58,21 @@ Source roles may use ordinary leaf tables or declaratively partitioned table roo
 
 Field names must match `^[A-Za-z][A-Za-z0-9_]{0,62}$`. `_id` and `_metadata` are reserved. Source identifiers are resolved from PostgreSQL catalogues and quoted in generated SQL.
 
+## Supported mapped column types
+
+| PostgreSQL type | Required JSON type |
+|---|---|
+| `text`, `varchar`, `bpchar` | string |
+| `int2`, `int4`, `int8`, `numeric` | number |
+| `boolean` | boolean |
+| `date`, `timestamp`, `uuid` | string |
+
+Mapped domains, enums, `json`/`jsonb`, arrays and other types are not
+supported. `timestamptz` is documented separately as a planned extension of
+the type contract; it is not accepted by this version. An unmapped column may
+use any type supported by its source table, including a domain, because the
+generated write projection omits it.
+
 ## Generated objects
 
 For a view named `api.orders_dv`, the generator creates:
@@ -89,6 +104,13 @@ The caller needs `CREATE` on the target schema and the relevant privileges on so
 - `PT428`: required ETag missing;
 - `PT422`: invalid document or operation disabled by the specification;
 - `42501`: insufficient privilege or RLS coverage failure.
+
+`PT422` includes a mapped JSON value with the wrong JSON type, a numeric value
+that cannot be represented without loss at the target precision and scale, an
+explicit value for a `GENERATED ALWAYS` identity, an array key owned by another
+document, and an array row for which no target partition exists. SQL/JSON null
+is passed to PostgreSQL so target nullability remains authoritative. Unrelated
+table constraints keep their native SQLSTATE rather than being rewritten.
 
 PostgreSQL can also return `40001` (serialization failure) or `40P01` (deadlock) for concurrent transactions. Retry
 the complete transaction after either error, re-read the document and use its current ETag; do not replay only the

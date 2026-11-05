@@ -957,6 +957,80 @@ INSERT INTO jt_unmapped_domain.object(id,label) VALUES(7,'reference');""")
            f"insert={domain_insert.returncode},update={domain_update.returncode},"
            f"state={domain_defaults}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_json_contract CASCADE; CREATE SCHEMA jt_json_contract;
+CREATE TABLE jt_json_contract.root(
+ id numeric(12,2) PRIMARY KEY,label text,amount numeric(12,2),flag boolean);
+CREATE TABLE jt_json_contract.child(
+ id numeric(12,2) PRIMARY KEY,parent numeric(12,2) REFERENCES jt_json_contract.root(id),label text);
+INSERT INTO jt_json_contract.root VALUES(9, 'owner', 1, true);
+INSERT INTO jt_json_contract.child VALUES(99, 9, 'foreign');""")
+    contract_spec = {
+        "root": {"table": "jt_json_contract.root", "key": "id",
+                 "fields": {"label": "label", "amount": "amount", "flag": "flag"},
+                 "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_json_contract.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_json_contract.documents", contract_spec)
+    contract_documents = [
+        '{"_id":"1","label":"x","amount":1,"flag":true,"items":[]}',
+        '{"_id":1,"label":true,"amount":1,"flag":true,"items":[]}',
+        '{"_id":1,"label":"x","amount":"1","flag":true,"items":[]}',
+        '{"_id":1,"label":"x","amount":1,"flag":"true","items":[]}',
+        '{"_id":2.005,"label":"x","amount":1,"flag":true,"items":[]}',
+        '{"_id":2,"label":"x","amount":1.005,"flag":true,"items":[]}',
+        '{"_id":2,"label":"x","amount":1,"flag":true,"items":[{"id":3.005,"label":"x"}]}',
+        '{"_id":2,"label":"x","amount":1,"flag":true,"items":[{"id":99,"label":"foreign"}]}',
+    ]
+    contract_states = [db.state(db.run(
+        "INSERT INTO jt_json_contract.documents(data) VALUES(" + quote(document) + "::jsonb);",
+        False)) for document in contract_documents]
+
+    db.run("""CREATE TABLE jt_json_contract.generated_root(
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,label text);
+CREATE TABLE jt_json_contract.generated_child(
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ parent bigint REFERENCES jt_json_contract.generated_root(id),label text);""")
+    generated_spec = {
+        "root": {"table": "jt_json_contract.generated_root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True},
+        "array": {"name": "items", "table": "jt_json_contract.generated_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True}}
+    create_view(db, "jt_json_contract.generated_documents", generated_spec)
+    generated_root = db.run(
+        "INSERT INTO jt_json_contract.generated_documents(data) VALUES"
+        "('{\"_id\":10,\"label\":\"x\",\"items\":[]}'::jsonb);", False)
+    generated_child = db.run(
+        "INSERT INTO jt_json_contract.generated_documents(data) VALUES"
+        "('{\"label\":\"x\",\"items\":[{\"id\":10,\"label\":\"x\"}]}'::jsonb);",
+        False)
+    db.run("""CREATE TABLE jt_json_contract.partition_root(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_json_contract.partition_child(
+ id integer,parent integer REFERENCES jt_json_contract.partition_root(id),label text,
+ PRIMARY KEY(id)) PARTITION BY RANGE(id);
+CREATE TABLE jt_json_contract.partition_child_low
+ PARTITION OF jt_json_contract.partition_child FOR VALUES FROM (0) TO (10);""")
+    partition_spec = {
+        "root": {"table": "jt_json_contract.partition_root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True},
+        "array": {"name": "items", "table": "jt_json_contract.partition_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True}}
+    create_view(db, "jt_json_contract.partition_documents", partition_spec)
+    missing_partition = db.run(
+        "INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+        "('{\"_id\":1,\"label\":\"x\",\"items\":[{\"id\":99,\"label\":\"x\"}]}'::jsonb);",
+        False)
+    record("JSON types, numeric precision and INSERT identity errors use PT422",
+           contract_states == ["PT422"] * len(contract_documents)
+           and db.state(generated_root) == "PT422" and db.state(generated_child) == "PT422"
+           and db.state(missing_partition) == "PT422"
+           and db.value("SELECT count(*) FROM jt_json_contract.root WHERE id<>9;") == "0",
+           f"documents={contract_states},generated="
+           f"{db.state(generated_root)}/{db.state(generated_child)},"
+           f"partition={db.state(missing_partition)}")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:
