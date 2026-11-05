@@ -77,6 +77,9 @@ BEGIN
         IF cardinality(tp)<>2 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.table must have two parts',s); END IF;
         SELECT c.oid,c.relkind INTO rel,kind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=tp[1] AND c.relname=tp[2];
         IF rel IS NULL OR kind<>ALL(ARRAY['r'::"char",'p'::"char"]) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.table is not an ordinary or partitioned table',s); END IF;
+        IF kind='r' AND EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent=rel) THEN
+            RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.table has unsupported classic inheritance descendants',s);
+        END IF;
         SELECT a.attnum,a.attidentity,a.attgenerated,t.typname INTO att,ident,generated,typ FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=rel AND a.attname=j->>'key' AND a.attnum>0 AND NOT a.attisdropped AND n.nspname='pg_catalog';
         IF att IS NULL OR generated<>'' OR typ<>ALL(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','uuid']) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('invalid or unsupported %s.key',s); END IF;
         IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=rel AND contype='p' AND conkey=ARRAY[att]::smallint[]) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE=format('%s.key is not a single-column primary key',s); END IF;

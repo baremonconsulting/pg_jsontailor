@@ -187,12 +187,31 @@ CREATE TABLE jt_bad.order_bad(id integer PRIMARY KEY,parent integer REFERENCES j
 CREATE TABLE jt_bad.ident_field(id integer PRIMARY KEY,g bigint GENERATED ALWAYS AS IDENTITY);
 CREATE TABLE jt_bad.arr_ident(id integer PRIMARY KEY,parent integer REFERENCES jt_bad.parent(id),g bigint GENERATED ALWAYS AS IDENTITY);
 CREATE TABLE jt_bad.root_fk_ident(id integer PRIMARY KEY,fk bigint GENERATED ALWAYS AS IDENTITY REFERENCES jt_bad.ident(id));
+CREATE TABLE jt_bad.inherited_root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_bad.inherited_root_child() INHERITS(jt_bad.inherited_root);
+ALTER TABLE jt_bad.inherited_root_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.inherited_array(id integer PRIMARY KEY,parent integer REFERENCES jt_bad.parent(id),value text);
+CREATE TABLE jt_bad.inherited_array_child() INHERITS(jt_bad.inherited_array);
+ALTER TABLE jt_bad.inherited_array_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.inherited_object(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_bad.inherited_object_child() INHERITS(jt_bad.inherited_object);
+ALTER TABLE jt_bad.inherited_object_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.object_owner(id integer PRIMARY KEY,object_id integer REFERENCES jt_bad.inherited_object(id));
+CREATE TABLE jt_bad.partitioned_object(id integer PRIMARY KEY,value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_object_low PARTITION OF jt_bad.partitioned_object FOR VALUES FROM (0) TO (100);
+CREATE TABLE jt_bad.partitioned_root(id integer PRIMARY KEY,object_id integer REFERENCES jt_bad.partitioned_object(id),value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_root_low PARTITION OF jt_bad.partitioned_root FOR VALUES FROM (0) TO (100);
+CREATE TABLE jt_bad.partitioned_array(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_bad.partitioned_root(id),value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_array_low PARTITION OF jt_bad.partitioned_array FOR VALUES FROM (0) TO (100);
 CREATE VIEW jt_bad.v AS SELECT 1 id;""")
         base=json.loads(self.spec.read_text()); cases=[]
         cases += [("null_spec","shop.bad",None),("three_part","a.b.c",base),("unknown_top","shop.bad",{"x":1}),("missing_root","shop.bad",{}),("root_wrong_type","shop.bad",{"root":[]})]
         def variant(name,edit):
             x=json.loads(json.dumps(base));edit(x);cases.append((name,"shop.bad_"+str(len(cases)),x))
         variant("table_parts",lambda x:x["root"].update(table="orders"));variant("table_missing",lambda x:x["root"].update(table="shop.nope"));variant("not_table",lambda x:x["root"].update(table="jt_bad.v"))
+        cases.append(("classic_inherited_root","shop.bad_inherited_root",{"root":{"table":"jt_bad.inherited_root","key":"id","fields":{"value":"value"}}}))
+        cases.append(("classic_inherited_array","shop.bad_inherited_array",{"root":{"table":"jt_bad.parent","key":"id","fields":{}},"array":{"name":"items","table":"jt_bad.inherited_array","key":"id","parent_fk":"parent","fields":{"id":"id","value":"value"}}}))
+        cases.append(("classic_inherited_object","shop.bad_inherited_object",{"root":{"table":"jt_bad.object_owner","key":"id","fields":{}},"object":{"name":"object","table":"jt_bad.inherited_object","key":"id","root_fk":"object_id","fields":{"id":"id","value":"value"}}}))
         variant("column_missing",lambda x:x["root"]["fields"].update(status="nope"));variant("unsupported",lambda x:x["root"].update(table="jt_bad.gen",key="id",fields={"u":"u"}))
         variant("generated",lambda x:x["root"].update(table="jt_bad.gen",key="id",fields={"g":"g"}));variant("key_not_pk",lambda x:x["root"].update(key="status"))
         variant("root_key_mapped",lambda x:x["root"]["fields"].update(bad="order_id"));variant("array_parent_mapped",lambda x:x["array"]["fields"].update(bad="order_id"))
@@ -217,8 +236,16 @@ CREATE VIEW jt_bad.v AS SELECT 1 id;""")
             p=self.run("SELECT jsontailor.duality_view_ddl("+lit(view)+","+expr+");",False)
             bad.append(f"{name}:{self.state(p)}")
         passed=all(x.endswith(":22023") for x in bad)
+        partitioned={"root":{"table":"jt_bad.partitioned_root","key":"id","fields":{"value":"value"},"insert":True,"update":True},"object":{"name":"object","table":"jt_bad.partitioned_object","key":"id","root_fk":"object_id","fields":{"id":"id","value":"value"}},"array":{"name":"items","table":"jt_bad.partitioned_array","key":"id","parent_fk":"parent","fields":{"id":"id","value":"value"},"insert":True,"update":True,"delete":True}}
+        partitioned_result=self.run("INSERT INTO jt_bad.partitioned_object VALUES(7,'reference');SELECT jsontailor.create_duality_view('shop.good_partitioned',"+lit(json.dumps(partitioned))+"::jsonb);INSERT INTO shop.good_partitioned(data) VALUES('{\"_id\":1,\"value\":\"root\",\"object\":{\"id\":7},\"items\":[{\"id\":11,\"value\":\"first\"}]}'::jsonb);UPDATE shop.good_partitioned SET data=jsonb_set(data,'{items,0,value}','\"changed\"'::jsonb) WHERE _id=1;",False)
+        partitioned_state=self.scalar("SELECT count(*)::text||':'||max(data#>>'{object,value}')||':'||max(data#>>'{items,0,value}') FROM shop.good_partitioned WHERE _id=1;") if partitioned_result.returncode==0 else "not-created"
+        passed &= partitioned_result.returncode==0 and partitioned_state=="1:reference:changed"
+        bad.append(f"declarative_partition:{partitioned_state if partitioned_result.returncode==0 else self.state(partitioned_result)}")
+        leaf_result=self.run("SELECT jsontailor.duality_view_ddl('shop.good_leaf','{\"root\":{\"table\":\"jt_bad.parent\",\"key\":\"id\",\"fields\":{}}}'::jsonb);",False)
+        passed &= leaf_result.returncode==0
+        bad.append(f"ordinary_leaf:{'accepted' if leaf_result.returncode==0 else self.state(leaf_result)}")
         self.add(12,"validation","PASS" if passed else "FAIL","invalid-specification catalogue returns 22023",";".join(bad),
-                 "Cases directly cover structural, catalogue, mapping, FK enforcement/action, identity and generated-name rules.")
+                 "Cases directly cover structural, catalogue, mapping, FK enforcement/action, identity, inheritance and generated-name rules; declarative partitioning remains supported.")
 
     def test14(self):
         self.run("""DROP SCHEMA IF EXISTS jt_v7 CASCADE; CREATE SCHEMA jt_v7;

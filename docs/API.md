@@ -13,6 +13,8 @@ jsontailor.create_duality_view(view_name text, spec jsonb) RETURNS void
 
 Both the view name and source table names must contain exactly two identifier parts, for example `api.orders_dv` and `shop.orders`.
 
+Source roles may use ordinary leaf tables or declaratively partitioned table roots. Ordinary tables with classic `INHERITS` descendants are rejected because their default scans cannot guarantee document-key uniqueness across independently constrained physical tables.
+
 ## Specification shape
 
 ```json
