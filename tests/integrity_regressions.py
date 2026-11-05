@@ -602,8 +602,8 @@ BEGIN
     GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
       tab=TABLE_NAME,sch=SCHEMA_NAME;
   END;
-  IF st<>'23505' OR con<>'child_value_unique' OR tab<>'child'
-     OR sch<>'jt_secondary_unique' THEN
+  IF st IS DISTINCT FROM '23505' OR con IS DISTINCT FROM 'child_value_unique'
+     OR tab IS DISTINCT FROM 'child' OR sch IS DISTINCT FROM 'jt_secondary_unique' THEN
     RAISE EXCEPTION 'secondary diagnostics mismatch: %/%/%.%',st,con,sch,tab;
   END IF;
 END $probe$;
@@ -638,8 +638,8 @@ BEGIN
     GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
       tab=TABLE_NAME,sch=SCHEMA_NAME;
   END;
-  IF st<>'23505' OR con<>'child_pkey' OR tab<>'audit'
-     OR sch<>'jt_secondary_audit' THEN
+  IF st IS DISTINCT FROM '23505' OR con IS DISTINCT FROM 'child_pkey'
+     OR tab IS DISTINCT FROM 'audit' OR sch IS DISTINCT FROM 'jt_secondary_audit' THEN
     RAISE EXCEPTION 'trigger diagnostics mismatch: %/%/%.%',st,con,sch,tab;
   END IF;
 END $probe$;
@@ -656,7 +656,7 @@ BEGIN
     GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
       tab=TABLE_NAME,sch=SCHEMA_NAME;
   END;
-  IF st<>'PT422' OR coalesce(con,'')<>'' THEN
+  IF st IS DISTINCT FROM 'PT422' OR coalesce(con,'')<>'' THEN
     RAISE EXCEPTION 'child identity remap mismatch: %/%/%.%',st,con,sch,tab;
   END IF;
 END $probe$;""", False)
