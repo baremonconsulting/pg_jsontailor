@@ -43,5 +43,6 @@ regardless of commit-message wording.
 - Moved catalogue guards to statement scope and made mapped-array validation set-wise.
 - Added verified current benchmark evidence, custom and plain dump/restore CI, and a release-candidate consistency gate.
 - Prevented lifecycle inventory from executing health callbacks owned by another role with the inventory caller's privileges.
+- Preserved column ACLs during regeneration and rejected unmanaged view triggers or rules instead of silently dropping them.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
