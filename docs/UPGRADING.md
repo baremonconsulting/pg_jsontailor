@@ -2,6 +2,28 @@
 
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
+Any view generated from an untagged 0.2.0 development snapshot, including an
+earlier public `main` commit, must be regenerated from the eventual tagged
+release before it is treated as a pilot deployment.
+
+## Source-schema change matrix
+
+| Change | Effect | Required action |
+|---|---|---|
+| Add or drop an unmapped column | Binding remains valid | No regeneration; run the health check |
+| Rename, replace or move a source table | Stored specification no longer identifies the same relation | Update the specification in source control and explicitly recreate the mapping |
+| Rename, reuse or permute a mapped column | Writes return `PT422` | Review the mapping and regenerate |
+| Change a mapped column type | PostgreSQL normally blocks the change while binding views depend on it | Regenerate through a reviewed migration using the updated specification |
+| Rename a bound primary-key constraint | Writes return `PT422` | Regenerate |
+| Change or invalidate a required foreign key | Writes return `PT422`; unsupported actions are rejected | Restore a validated, enforced, non-deferrable supported FK and regenerate |
+| Add classic `INHERITS` descendants | Writes return `PT422` | Remove the unsupported inheritance or redesign the mapping |
+| Attach or detach declarative partitions | Supported when the mapped root contract remains valid | Run health and functional checks |
+| Dump and restore | Generated bindings are restored by catalogue dependency | Run inventory, health, privilege and smoke checks |
+| Logical replication | DDL and generated objects are not assumed to replicate | Install the extension and generate or regenerate mappings separately on the subscriber |
+
+Never use regeneration to guess a new table or column name. Update the
+source-controlled specification explicitly when names or mappings change.
+
 Keep every JSON mapping in source control. Before regeneration, inventory objects that depend on the generated view and confirm that no application writer is active. Inspect all managed views and their catalogue health first:
 
 ```sql

@@ -32,7 +32,7 @@ Keep the complete document returned by an earlier read, including `_metadata.eta
 INSERT INTO document_stage(root_id, doc)
 SELECT _id, jsonb_set(data, '{status}', '"approved"'::jsonb)
 FROM api.orders_dv
-WHERE _id = 1001;
+WHERE _id = 42;
 
 MERGE INTO api.orders_dv AS target
 USING document_stage AS source

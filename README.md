@@ -8,7 +8,7 @@ The design follows the same core idea as Oracle JSON Relational Duality Views: o
 
 ## Status
 
-The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier, PostgREST and Oracle ORDS comparison scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
+The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier and PostgREST scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
 
 The current implementation supports:
 
@@ -159,6 +159,9 @@ The complete example specification is in [`examples/orders_dv.spec.json`](exampl
 
 Generated functions contain copied write logic. Follow [`docs/UPGRADING.md`](docs/UPGRADING.md) to regenerate existing mappings transactionally after relevant extension or source-schema changes.
 
+Before a controlled deployment, complete the fit, acceptance, SLO and release
+checks in [`docs/PILOT_READINESS.md`](docs/PILOT_READINESS.md).
+
 PostgreSQL 17, 18 and 19 can also route a documented subset of native SQL `MERGE` through the generated insert, update and delete paths. The source key must be unique, updates remain complete ETag-checked replacements, deletes require an ETag action condition, and the `WHEN NOT MATCHED` branch must be used only when creation is intended. See [`docs/MERGE.md`](docs/MERGE.md) for the supported subset and copyable staging examples.
 
 ## Testing
@@ -182,7 +185,11 @@ Every push to `main` and every pull request targeting `main` runs the installati
 
 ## Performance
 
-The write path uses set-based array reconciliation. In the current Azure single-session reference, replacing a document with 1,000 child items took 39.613 ms median and 39.773 ms p95, compared with a 42.549 ms median for the published earlier commit on the same VM. Results are host-specific and do not represent a production SLO. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+The write path uses set-based array reconciliation. The repository contains a
+historical Azure single-session reference tied to an exact earlier commit; it
+predates the current write-path guards and is not a performance claim for this
+branch. Results are host-specific and do not represent a production SLO. See
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Limitations
 
@@ -192,10 +199,13 @@ The write path uses set-based array reconciliation. In the current Azure single-
 - Concurrent throughput, network latency and client-specific access policies must be measured for each deployment.
 - PostgREST configuration, authentication, TLS and operational controls remain deployment responsibilities.
 
+The complete mapped-type, foreign-key, identity and source-shape limits are in
+[`docs/SEMANTICS.md`](docs/SEMANTICS.md).
+
 ## Licence
 
 `pg_jsontailor` is released under the PostgreSQL Licence. See [`LICENSE`](LICENSE).
 
-Copyright © 2026 Baremon Consulting.
+Copyright © 2026 Baremon s.r.o.
 
 For support and contribution guidance, see [`SUPPORT.md`](SUPPORT.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).

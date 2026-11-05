@@ -4,6 +4,10 @@ All notable changes to `pg_jsontailor` are documented in this file.
 
 ## 0.2.0 — unreleased
 
+`0.2.0` remains unreleased until an immutable `v0.2.0` tag and checksummed
+archive are published. Earlier repository snapshots are development builds,
+regardless of commit-message wording.
+
 - Added catalogue-driven generation of writable JSON document views.
 - Added root, optional object and optional array mappings.
 - Added insert, full-document replacement and ETag-guarded delete paths.
@@ -11,7 +15,7 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Added validation for specifications, catalogue objects and supported types.
 - Added invoker-rights and row-level security coverage.
 - Added PGXS regression and isolation tests.
-- Added PostgREST and Oracle ORDS comparison scenarios.
+- Added PostgREST integration scenarios.
 - Reworked array reconciliation to use set-based operations.
 - Added typed key reconciliation, nested input validation and source-relation binding checks.
 - Added synthetic pilot and reproducible benchmark tooling.
@@ -33,5 +37,8 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Added replacement-time insertion of globally unused explicit child business keys while preserving ownership, feature-flag, identity and atomicity checks.
 - Rejected existing orphan child identities with a null-safe ownership check during complete replacement.
 - Preserved SQLSTATE and constraint diagnostics for secondary child uniqueness conflicts.
+- Added strict JSON type and lossless numeric conversion semantics.
+- Added deterministic UTC-normalized `timestamptz` mappings.
+- Added generator provenance, inventory, non-mutating health checks and transactional regeneration.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

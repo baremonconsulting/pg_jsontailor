@@ -101,8 +101,9 @@ def main() -> int:
             "14.9% at 100 and 6.9% at 1,000",
             "Insert medians increased by 5.5–56.7%"):
         require(claim in benchmarks, f"published benchmark claim is missing: {claim}")
-    require("39.613 ms median and 39.773 ms p95" in readme,
-            "README benchmark summary differs from the reference data")
+    require("historical Azure single-session reference" in readme
+            and "predates the current write-path guards" in readme,
+            "README must identify the bundled benchmark as historical")
     return 0
 
 

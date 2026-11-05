@@ -4,4 +4,4 @@ Use GitHub issues for reproducible bugs and focused feature requests. Include th
 
 Do not publish credentials, personal data, customer identifiers or production traces. Report suspected vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
 
-Commercial migration, architecture and implementation support is available from [Baremon Consulting](https://www.baremon.eu/).
+Commercial migration, architecture and implementation support is available from [Baremon s.r.o.](https://www.baremon.eu/).

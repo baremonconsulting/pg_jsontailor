@@ -2,7 +2,7 @@
 
 The included benchmark compares generated document views with direct relational SQL in the same PostgreSQL instance. It measures server execution time with prebuilt JSON payloads and rolls back every mutation.
 
-## Current reference environment
+## Historical reference environment
 
 - PostgreSQL 18.6;
 - Azure Linux x86-64;
@@ -12,7 +12,7 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The current reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster. The complete [reference evidence](../bench/reference/azure-04d053e/) and [baseline evidence](../bench/reference/azure-acecaae/) are versioned with this repository.
+The historical reference run used commit `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. It predates the current write-path guards and must not be presented as performance of the current branch. A baseline run of `acecaae3b62ab7e4ff833cc5e5ec2bd6eef4dc0d` used the same VM and a separate PostgreSQL 18.6 cluster. The complete [reference evidence](../bench/reference/azure-04d053e/) and [baseline evidence](../bench/reference/azure-acecaae/) are versioned with this repository. PM-25 will replace this section only after a verified run from the current authoritative commit.
 
 ## Set-based reconciliation result
 
