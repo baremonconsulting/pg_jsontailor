@@ -74,6 +74,10 @@ Generated objects have no runtime dependency on the `jsontailor` schema. Existin
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
 
+Write paths deserialize only the physical columns named by the specification.
+Unmapped columns, including columns using NOT NULL domains, are omitted from
+the generated projection so their table or domain defaults remain effective.
+
 ## Permissions
 
 The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`; a referenced object included in the ETag is stabilized with `SELECT FOR SHARE` and requires `SELECT`.
