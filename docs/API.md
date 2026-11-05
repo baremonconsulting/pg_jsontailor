@@ -86,6 +86,7 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__insert()` and its `INSTEAD OF INSERT` trigger;
 - `api.orders_dv__update()` and its `INSTEAD OF UPDATE` trigger;
 - `api.orders_dv__delete()` and its `INSTEAD OF DELETE` trigger;
+- `api.orders_dv__guard()` and statement-level catalogue-guard triggers;
 - `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
 - `api.orders_dv__check()`, a non-mutating catalogue health check;
 - zero-row `api.orders_dv__root_binding` and optional `__object_binding` and `__array_binding` internal views;

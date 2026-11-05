@@ -14,11 +14,11 @@ DECLARE
     fk_oid oid; fk_enforced boolean;
     root_pk smallint; object_pk smallint; array_pk smallint;
     root_schema text; root_table text; object_schema text; object_table text; array_schema text; array_table text;
-    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text; qcheck text;
+    qview text; qrel text; qbinding text; qinsert text; qupdate text; qdelete text; qdelete_document text; qcheck text; qguard text;
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; check_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
+    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -27,7 +27,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must be a qualified schema.name';
     END;
     IF cardinality(vp)<>2 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must have exactly two parts'; END IF;
-    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 OR octet_length(vp[2]||'__check')>63 THEN
+    IF octet_length(vp[2]||'__insert')>63 OR octet_length(vp[2]||'__update')>63 OR octet_length(vp[2]||'__delete')>63 OR octet_length(vp[2]||'__delete_document')>63 OR octet_length(vp[2]||'__check')>63 OR octet_length(vp[2]||'__guard')>63 THEN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='generated object name exceeds 63 bytes';
     END IF;
     IF jsonb_typeof(spec) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='spec must be an object'; END IF;
@@ -158,7 +158,7 @@ BEGIN
     IF cfg?'object' AND NOT (cfg#>>'{object,etag}')::boolean THEN
         etag_payload:=format('jsonb_set(d.payload,ARRAY[%L],CASE WHEN jsonb_typeof(d.payload->%L)=''object'' THEN jsonb_build_object(%L,d.payload#>ARRAY[%L,%L]) ELSE ''null''::jsonb END)',cfg#>>'{object,name}',cfg#>>'{object,name}',object_key_field,cfg#>>'{object,name}',object_key_field);
     END IF;
-    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');qcheck:=format('%I.%I',vp[1],vp[2]||'__check');
+    qview:=format('%I.%I',vp[1],vp[2]);qinsert:=format('%I.%I',vp[1],vp[2]||'__insert');qupdate:=format('%I.%I',vp[1],vp[2]||'__update');qdelete:=format('%I.%I',vp[1],vp[2]||'__delete');qdelete_document:=format('%I.%I',vp[1],vp[2]||'__delete_document');qcheck:=format('%I.%I',vp[1],vp[2]||'__check');qguard:=format('%I.%I',vp[1],vp[2]||'__guard');
     FOR s IN SELECT unnest(ARRAY['root','object','array']) LOOP
         IF NOT cfg?s THEN CONTINUE; END IF;
         tp:=parse_ident(cfg#>>ARRAY[s,'table']);
@@ -195,7 +195,10 @@ BEGIN
     END IF;
     SELECT encode(sha256(convert_to(pg_get_functiondef('jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex') INTO generator_hash;
     metadata:=jsonb_build_object('format',1,'spec',cfg,'generator',jsonb_build_object('version','0.2.0','hash',generator_hash));
-    check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,relation_checks,generator_hash);
+    guard_checks:=relation_checks;
+    check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,guard_checks,generator_hash);
+    guard_body:=format('BEGIN %s RETURN NULL; END',guard_checks);
+    relation_checks:='';
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
@@ -579,8 +582,8 @@ BEGIN
   IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;
   RETURN cur;
 END
-$delete_body$,cfg,relation_checks,qview);
-    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
+$delete_body$,cfg,guard_checks,qview);
+    ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qguard,guard_body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I BEFORE INSERT ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_insert',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE UPDATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_update',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_delete',qview,qguard)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
     RETURN ddl;
 END
 $generator$;
@@ -710,13 +713,13 @@ BEGIN
   END LOOP;
 
   generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
-                         vp[2]||'__delete_document',vp[2]||'__check'];
+                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
   FOR r IN
     SELECT p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,
            p.proowner,obj_description(p.oid,'pg_proc') description
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
@@ -747,7 +750,7 @@ BEGIN
     SELECT p.oid::regprocedure identity
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
@@ -768,7 +771,7 @@ BEGIN
     SELECT p.oid::regprocedure identity
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
-      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete'])
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
             AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
         OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
         OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2

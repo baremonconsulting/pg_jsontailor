@@ -836,7 +836,7 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
            "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
            "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
            "WHERE n.nspname='jt_integrity' AND p.proname=ANY(ARRAY['documents__insert',"
-           "'documents__update','documents__delete','documents__delete_document','documents__check']) LOOP "
+           "'documents__update','documents__delete','documents__guard','documents__delete_document','documents__check']) LOOP "
            "EXECUTE format('DROP FUNCTION %s',item); END LOOP; END$$;")
     create_view(db, "jt_integrity.documents", spec)
     regenerated_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;"))

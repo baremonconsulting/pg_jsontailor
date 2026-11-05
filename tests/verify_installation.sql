@@ -89,7 +89,7 @@ BEGIN
     SELECT count(*) INTO trigger_count
       FROM pg_catalog.pg_trigger
      WHERE tgrelid='installation_check.documents'::regclass AND NOT tgisinternal;
-    IF trigger_count<>3
+    IF trigger_count<>6
        OR to_regprocedure('installation_check.documents__delete_document(integer,text)') IS NULL THEN
         RAISE EXCEPTION 'generated write contract is incomplete';
     END IF;
