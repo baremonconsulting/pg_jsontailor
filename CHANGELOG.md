@@ -31,5 +31,6 @@ All notable changes to `pg_jsontailor` are documented in this file.
 - Corrected NOCHECK reference drift, GENERATED ALWAYS root touch and typed child-key duplicate handling.
 - Made generated relation-binding views intrinsically non-updatable even under broad or default write grants.
 - Added replacement-time insertion of globally unused explicit child business keys while preserving ownership, feature-flag, identity and atomicity checks.
+- Rejected existing orphan child identities with a null-safe ownership check during complete replacement.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
