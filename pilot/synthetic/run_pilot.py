@@ -8,11 +8,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-import statistics
 import subprocess
 import time
 import urllib.error
 import urllib.request
+
+from checks import operational_read_sample
 
 ROOT = Path(__file__).resolve().parents[2]
 PILOT = ROOT / "pilot" / "synthetic"
@@ -252,25 +253,9 @@ try:
     add_check("delete", sd==200 and left == "0", {"status":sd,"rows":left}, "200 and zero rows")
 
     # Small operational sample, not a benchmark claim.
-    operational_samples=[]
-    for n in range(20):
-        status,rows,elapsed=http(f"operational read {n+1}", query="?_id=eq.201")
-        data = rows[0].get("data") if isinstance(rows,list) and len(rows) == 1 else None
-        valid = (status == 200 and isinstance(rows,list) and len(rows) == 1
-                 and rows[0].get("_id") == 201 and isinstance(data,dict)
-                 and data.get("_id") == 201 and isinstance(data.get("_metadata"),dict)
-                 and isinstance(data["_metadata"].get("etag"),str)
-                 and bool(data["_metadata"]["etag"]))
-        operational_samples.append({"status":status,"valid":valid,"elapsed_ms":elapsed})
+    operational_passed, operational_observed = operational_read_sample(http)
     add_check("operational-read-sample",
-              all(sample["valid"] and sample["elapsed_ms"] < 1000
-                  for sample in operational_samples),
-              {"statuses":[sample["status"] for sample in operational_samples],
-               "valid_documents":sum(sample["valid"] for sample in operational_samples),
-               "median_ms":round(statistics.median(
-                   sample["elapsed_ms"] for sample in operational_samples),3),
-               "max_ms":round(max(
-                   sample["elapsed_ms"] for sample in operational_samples),3)},
+              operational_passed, operational_observed,
               "20 successful valid local reads under 1000 ms")
 finally:
     server.terminate()

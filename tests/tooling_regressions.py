@@ -2,13 +2,11 @@
 """Regression checks for benchmark evidence and pilot acceptance tooling."""
 from __future__ import annotations
 
-import ast
 import csv
 import importlib.util
 import json
 from pathlib import Path
 import shutil
-import statistics
 import tempfile
 
 
@@ -22,6 +20,15 @@ def load_verifier():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.verify_results
+
+
+def load_jsonl_verifier():
+    path = ROOT / "tools/verify_jsonl_results.py"
+    spec = importlib.util.spec_from_file_location("jsonl_verifier", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.verify
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -78,43 +85,48 @@ def benchmark_checks() -> None:
             expect_rejection(verify, case, expected)
 
 
+def jsonl_checks() -> None:
+    verify = load_jsonl_verifier()
+    with tempfile.TemporaryDirectory(prefix="pgjt-jsonl-") as temporary:
+        folder = Path(temporary)
+        valid = folder / "valid.jsonl"
+        valid.write_text('{"name":"one","status":"PASS"}\n')
+        if verify(valid) != 1:
+            raise AssertionError("valid JSONL result count is wrong")
+        for name, content, expected in (
+                ("empty", "", "no test results"),
+                ("duplicate", '{"name":"one","status":"PASS"}\n'
+                 '{"name":"one","status":"PASS"}\n', "duplicate test names"),
+                ("failure", '{"name":"one","status":"FAIL"}\n', "non-PASS")):
+            path = folder / f"{name}.jsonl"
+            path.write_text(content)
+            try:
+                verify(path)
+            except RuntimeError as error:
+                if expected not in str(error):
+                    raise AssertionError(f"unexpected JSONL rejection: {error}") from error
+            else:
+                raise AssertionError(f"invalid JSONL results accepted: {name}")
+
+
 def pilot_check() -> None:
-    path = ROOT / "pilot/synthetic/run_pilot.py"
-    tree = ast.parse(path.read_text(), filename=str(path))
-    selected = None
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
-            continue
-        for index, statement in enumerate(node.body):
-            if (isinstance(statement, ast.Expr)
-                    and isinstance(statement.value, ast.Call)
-                    and isinstance(statement.value.func, ast.Name)
-                    and statement.value.func.id == "add_check"
-                    and isinstance(statement.value.args[0], ast.Constant)
-                    and statement.value.args[0].value == "operational-read-sample"):
-                selected = node.body[index - 2:index + 1]
-    if selected is None:
-        raise AssertionError("operational-read acceptance block is missing")
-
-    module = ast.Module(body=selected, type_ignores=[])
+    path = ROOT / "pilot/synthetic/checks.py"
+    spec = importlib.util.spec_from_file_location("pilot_checks", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     for response in ((500,{"error":"injected"},2.0),(200,[{"_id":201,"data":{}}],2.0)):
-        checks = []
-
         def http(*_args, **_kwargs):
             return response
-
-        def add_check(name, passed, observed, expected):
-            checks.append((name, passed, observed, expected))
-
-        exec(compile(module, str(path), "exec"), {
-            "http": http, "add_check": add_check, "statistics": statistics})
-        if (len(checks) != 1 or checks[0][0] != "operational-read-sample"
-                or checks[0][1]):
-            raise AssertionError(f"invalid response passed pilot acceptance: {response}/{checks}")
+        passed, observed = module.operational_read_sample(http)
+        if passed:
+            raise AssertionError(
+                f"invalid response passed pilot acceptance: {response}/{observed}")
 
 
 def main() -> int:
     benchmark_checks()
+    jsonl_checks()
     pilot_check()
     return 0
 
