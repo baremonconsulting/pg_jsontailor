@@ -11,11 +11,11 @@ def verify(path: Path) -> int:
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     if not rows:
         raise RuntimeError(f"{path} contains no test results")
-    names = [row.get("name") for row in rows]
-    if any(not isinstance(name, str) or not name for name in names):
-        raise RuntimeError(f"{path} contains a result without a name")
-    if len(names) != len(set(names)):
-        raise RuntimeError(f"{path} contains duplicate test names")
+    identifiers = [row.get("name", row.get("id")) for row in rows]
+    if any(not isinstance(identifier, str) or not identifier for identifier in identifiers):
+        raise RuntimeError(f"{path} contains a result without a name or id")
+    if len(identifiers) != len(set(identifiers)):
+        raise RuntimeError(f"{path} contains duplicate test identifiers")
     failures = [row for row in rows if row.get("status") != "PASS"]
     if failures:
         raise RuntimeError(f"{path} contains {len(failures)} non-PASS results")

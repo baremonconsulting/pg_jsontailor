@@ -93,10 +93,14 @@ def jsonl_checks() -> None:
         valid.write_text('{"name":"one","status":"PASS"}\n')
         if verify(valid) != 1:
             raise AssertionError("valid JSONL result count is wrong")
+        valid_id = folder / "valid-id.jsonl"
+        valid_id.write_text('{"id":"one","status":"PASS"}\n')
+        if verify(valid_id) != 1:
+            raise AssertionError("valid id-based JSONL result count is wrong")
         for name, content, expected in (
                 ("empty", "", "no test results"),
                 ("duplicate", '{"name":"one","status":"PASS"}\n'
-                 '{"name":"one","status":"PASS"}\n', "duplicate test names"),
+                 '{"name":"one","status":"PASS"}\n', "duplicate test identifiers"),
                 ("failure", '{"name":"one","status":"FAIL"}\n', "non-PASS")):
             path = folder / f"{name}.jsonl"
             path.write_text(content)
