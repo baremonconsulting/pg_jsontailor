@@ -480,6 +480,38 @@ INSERT INTO jt_manual_keys.child VALUES('other',2,'owned elsewhere');""")
            f"append={append_manual.returncode},foreign={db.state(foreign_manual)},"
            f"disabled={db.state(disabled_manual)},state={manual_state}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_nullable_owner CASCADE; CREATE SCHEMA jt_nullable_owner;
+CREATE TABLE jt_nullable_owner.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_nullable_owner.child(id text PRIMARY KEY,parent integer REFERENCES jt_nullable_owner.root(id),value text);""")
+    nullable_spec = {
+        "root": {"table": "jt_nullable_owner.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_nullable_owner.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": False}}
+    create_view(db, "jt_nullable_owner.documents", nullable_spec)
+    db.run("""INSERT INTO jt_nullable_owner.documents(data) VALUES
+('{"_id":1,"value":"source","items":[{"id":"orphan","value":"unlinked"}]}'::jsonb),
+('{"_id":2,"value":"target","items":[{"id":"owned","value":"existing"}]}'::jsonb);
+SELECT jt_nullable_owner.documents__delete_document(
+  1,data#>>'{_metadata,etag}') FROM jt_nullable_owner.documents WHERE _id=1;""")
+    nullable_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents WHERE _id=2;"))
+    nullable_doc["value"] = "must roll back"
+    nullable_doc["items"].append({"id": "orphan", "value": "unlinked"})
+    orphan_append = db.run(
+        "UPDATE jt_nullable_owner.documents SET data=" + quote(json.dumps(nullable_doc))
+        + "::jsonb WHERE _id=2;", False)
+    nullable_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL'),',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
+    record("NULL-parent child identities are rejected as foreign atomically",
+           db.state(orphan_append) == "PT422"
+           and nullable_state == "target:orphan=NULL,owned=2",
+           f"append={db.state(orphan_append)},state={nullable_state}")
+
     binding_role = f"jt_binding_writer_{time.time_ns()}"
     db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
 DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
