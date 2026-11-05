@@ -328,7 +328,7 @@ CREATE TABLE jt_id.rb(id bigint PRIMARY KEY);CREATE TABLE jt_id.cb(id bigint PRI
         self.run("CREATE TABLE jt_id.ref(id bigint PRIMARY KEY);CREATE TABLE jt_id.rc(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,ref_id bigint REFERENCES jt_id.ref(id));")
         defaults={"root":{"table":"jt_id.rc","key":"id","fields":{},"insert":True},"object":{"name":"ref","table":"jt_id.ref","key":"id","root_fk":"ref_id","fields":{"id":"id"}}}
         self.run("SELECT jsontailor.create_duality_view('jt_id.dvc',"+lit(json.dumps(defaults))+"::jsonb);");default_root=self.run("INSERT INTO jt_id.dvc(data) VALUES ('{}');",False)
-        passed=pa.returncode==0 and pb.returncode==0 and before_a!=after_a and before_b!=after_b and no_key.returncode==0 and self.state(explicit)=="428C9" and default_root.returncode==0
+        passed=pa.returncode==0 and pb.returncode==0 and before_a!=after_a and before_b!=after_b and no_key.returncode==0 and self.state(explicit)=="PT422" and default_root.returncode==0
         self.add(20,"identity variants","PASS" if passed else "FAIL","root and child identity rewrite semantics",f"a={pa.returncode}/{before_a}->{after_a};b={pb.returncode}/{before_b}->{after_b};child_default={no_key.returncode};child_explicit={self.state(explicit)};root_defaults={default_root.returncode}")
 
 
