@@ -12,8 +12,8 @@ customer-approved environment. Confirm for every proposed document:
 - single-column primary and foreign keys;
 - mapped types appear in the supported matrix in [`API.md`](API.md);
 - no mapped domains, enums, JSON types, SQL arrays or classic inheritance;
-- the child foreign key is validated, enforced, non-deferrable and uses
-  `NO ACTION` or `RESTRICT`;
+- required object and child foreign keys are validated, enforced and
+  non-deferrable, and the child foreign key uses `NO ACTION` or `RESTRICT`;
 - all unmapped `NOT NULL` columns have usable defaults or are otherwise
   populated by the database;
 - mapped names, operation flags, object ETag inclusion and array ordering are

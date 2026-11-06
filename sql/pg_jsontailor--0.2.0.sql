@@ -104,11 +104,11 @@ BEGIN
         IF att IS NULL OR ident='a' OR generated<>'' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk is not writable'; END IF;
         SELECT a.attnum INTO object_pk FROM pg_attribute a WHERE a.attrelid=object_rel AND a.attname=cfg#>>'{object,key}' AND a.attnum>0 AND NOT a.attisdropped;
         IF cfg#>>'{object,root_fk}'=cfg#>>'{root,key}' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk must not be the root primary key'; END IF;
-        SELECT oid INTO fk_oid FROM pg_constraint WHERE conrelid=root_rel AND confrelid=object_rel AND contype='f' AND conkey=ARRAY[att]::smallint[] AND confkey=ARRAY[object_pk]::smallint[] AND NOT condeferrable LIMIT 1;
-        IF fk_oid IS NULL THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk requires an enforced non-deferrable foreign key'; END IF;
+        SELECT oid INTO fk_oid FROM pg_constraint WHERE conrelid=root_rel AND confrelid=object_rel AND contype='f' AND conkey=ARRAY[att]::smallint[] AND confkey=ARRAY[object_pk]::smallint[] AND NOT condeferrable AND convalidated LIMIT 1;
+        IF fk_oid IS NULL THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk requires a validated enforced non-deferrable foreign key'; END IF;
         IF current_setting('server_version_num')::integer>=180000 THEN
             EXECUTE 'SELECT conenforced FROM pg_catalog.pg_constraint WHERE oid=$1' INTO fk_enforced USING fk_oid;
-            IF NOT fk_enforced THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk requires an enforced non-deferrable foreign key'; END IF;
+            IF NOT fk_enforced THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='object.root_fk requires a validated enforced non-deferrable foreign key'; END IF;
         END IF;
     END IF;
     IF cfg?'array' THEN
@@ -118,11 +118,11 @@ BEGIN
         SELECT attnum,attidentity,attgenerated INTO att,ident,generated FROM pg_attribute WHERE attrelid=array_rel AND attname=cfg#>>'{array,parent_fk}' AND attnum>0 AND NOT attisdropped;
         SELECT a.attnum INTO array_pk FROM pg_attribute a WHERE a.attrelid=array_rel AND a.attname=cfg#>>'{array,key}' AND a.attnum>0 AND NOT a.attisdropped;
         IF att IS NULL OR ident='a' OR generated<>'' THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk is not writable'; END IF;
-        SELECT oid INTO fk_oid FROM pg_constraint WHERE conrelid=array_rel AND confrelid=root_rel AND contype='f' AND conkey=ARRAY[att]::smallint[] AND confkey=ARRAY[root_pk]::smallint[] AND NOT condeferrable AND confdeltype IN ('a','r') LIMIT 1;
-        IF fk_oid IS NULL THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk requires an enforced non-deferrable NO ACTION/RESTRICT foreign key'; END IF;
+        SELECT oid INTO fk_oid FROM pg_constraint WHERE conrelid=array_rel AND confrelid=root_rel AND contype='f' AND conkey=ARRAY[att]::smallint[] AND confkey=ARRAY[root_pk]::smallint[] AND NOT condeferrable AND convalidated AND confdeltype IN ('a','r') LIMIT 1;
+        IF fk_oid IS NULL THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk requires a validated enforced non-deferrable NO ACTION/RESTRICT foreign key'; END IF;
         IF current_setting('server_version_num')::integer>=180000 THEN
             EXECUTE 'SELECT conenforced FROM pg_catalog.pg_constraint WHERE oid=$1' INTO fk_enforced USING fk_oid;
-            IF NOT fk_enforced THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk requires an enforced non-deferrable NO ACTION/RESTRICT foreign key'; END IF;
+            IF NOT fk_enforced THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.parent_fk requires a validated enforced non-deferrable NO ACTION/RESTRICT foreign key'; END IF;
         END IF;
         IF NOT EXISTS(SELECT 1 FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE a.attrelid=array_rel AND a.attname=cfg#>>'{array,order_by}' AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' AND n.nspname='pg_catalog' AND t.typname=ANY(ARRAY['text','varchar','bpchar','int2','int4','int8','numeric','bool','date','timestamp','timestamptz','uuid'])) THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='array.order_by is invalid or unsupported'; END IF;
     END IF;

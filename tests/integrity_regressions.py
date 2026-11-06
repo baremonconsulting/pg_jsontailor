@@ -909,6 +909,84 @@ INSERT INTO {schema}.child VALUES(10,1,'item');""")
            and enforcement_states in ([], ["PT422", "PT422"]),
            f"inheritance={drift_states},enforcement={enforcement_states}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_notvalid CASCADE; CREATE SCHEMA jt_notvalid;
+CREATE TABLE jt_notvalid.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_notvalid.root(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE jt_notvalid.child(id integer PRIMARY KEY,parent_id integer,value text);
+ALTER TABLE jt_notvalid.root ADD CONSTRAINT root_ref_fk
+  FOREIGN KEY(ref_id) REFERENCES jt_notvalid.ref(id) NOT VALID;
+ALTER TABLE jt_notvalid.child ADD CONSTRAINT child_root_fk
+  FOREIGN KEY(parent_id) REFERENCES jt_notvalid.root(id) NOT VALID;""")
+    notvalid_object_spec = {
+        "root": {"table": "jt_notvalid.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "object": {"name": "reference", "table": "jt_notvalid.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"}},
+    }
+    notvalid_array_spec = {
+        "root": {"table": "jt_notvalid.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_notvalid.child", "key": "id",
+                  "parent_fk": "parent_id", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True},
+    }
+    notvalid_states = []
+    for name, mapping in (("object_documents", notvalid_object_spec),
+                          ("array_documents", notvalid_array_spec)):
+        encoded = quote(json.dumps(mapping)) + "::jsonb"
+        notvalid_states.append(db.state(db.run(
+            f"SELECT jsontailor.duality_view_ddl('jt_notvalid.{name}',{encoded});", False)))
+        notvalid_states.append(db.state(db.run(
+            f"SELECT jsontailor.create_duality_view('jt_notvalid.{name}',{encoded});", False)))
+    rejected_objects = db.value("""SELECT
+      (to_regclass('jt_notvalid.object_documents') IS NULL)::text||':'||
+      (to_regclass('jt_notvalid.array_documents') IS NULL)::text;""")
+    db.run("""ALTER TABLE jt_notvalid.root VALIDATE CONSTRAINT root_ref_fk;
+ALTER TABLE jt_notvalid.child VALIDATE CONSTRAINT child_root_fk;
+INSERT INTO jt_notvalid.ref VALUES(7,'reference');""")
+    validated_spec = json.loads(json.dumps(notvalid_object_spec))
+    validated_spec["array"] = notvalid_array_spec["array"]
+    create_view(db, "jt_notvalid.documents", validated_spec)
+    validated_insert = db.run("""INSERT INTO jt_notvalid.documents(data) VALUES(
+      '{"_id":1,"value":"one","reference":{"id":7},
+        "items":[{"id":10,"value":"item"}]}'::jsonb);""", False)
+    validated_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+
+    db.run("""ALTER TABLE jt_notvalid.root DROP CONSTRAINT root_ref_fk;
+ALTER TABLE jt_notvalid.root ADD CONSTRAINT root_ref_fk
+  FOREIGN KEY(ref_id) REFERENCES jt_notvalid.ref(id) NOT VALID;""")
+    object_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+    object_drift = db.run("""UPDATE jt_notvalid.documents
+      SET data=jsonb_set(data,'{value}','"object-drift"') WHERE _id=1;""", False)
+    object_preserved = db.value("SELECT value FROM jt_notvalid.root WHERE id=1;")
+    db.run("ALTER TABLE jt_notvalid.root VALIDATE CONSTRAINT root_ref_fk;")
+
+    db.run("""ALTER TABLE jt_notvalid.child DROP CONSTRAINT child_root_fk;
+ALTER TABLE jt_notvalid.child ADD CONSTRAINT child_root_fk
+  FOREIGN KEY(parent_id) REFERENCES jt_notvalid.root(id) NOT VALID;""")
+    array_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+    array_drift = db.run("""UPDATE jt_notvalid.documents
+      SET data=jsonb_set(data,'{value}','"array-drift"') WHERE _id=1;""", False)
+    array_preserved = db.value("SELECT value FROM jt_notvalid.root WHERE id=1;")
+    record("unvalidated mapping foreign keys are rejected and later drift fails closed",
+           notvalid_states == ["22023", "22023", "22023", "22023"]
+           and rejected_objects == "true:true"
+           and validated_insert.returncode == 0 and validated_health == "OK"
+           and object_health == "PT422" and db.state(object_drift) == "PT422"
+           and object_preserved == "one"
+           and array_health == "PT422" and db.state(array_drift) == "PT422"
+           and array_preserved == "one",
+           f"initial={notvalid_states},objects={rejected_objects},"
+           f"validated={validated_insert.returncode}/{validated_health},"
+           f"object={object_health}/{db.state(object_drift)}/{object_preserved},"
+           f"array={array_health}/{db.state(array_drift)}/{array_preserved}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_unmapped_domain CASCADE;
 CREATE SCHEMA jt_unmapped_domain;
 CREATE DOMAIN jt_unmapped_domain.required_text AS text NOT NULL DEFAULT 'domain-default';
