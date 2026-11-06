@@ -43,6 +43,15 @@ def verify_results(folder: Path) -> dict[str, int | str]:
         operations = tuple(dict.fromkeys(row["operation"] for row in measurements))
     warmups = environment["warmups"]
     repetitions = environment["repetitions"]
+    if "product_hashes" in environment:
+        product_hashes = environment["product_hashes"]
+        require(isinstance(product_hashes, dict) and product_hashes,
+                "invalid product fingerprints")
+        require(all(isinstance(path, str) and path
+                    and isinstance(digest, str) and len(digest) == 64
+                    and all(character in "0123456789abcdef" for character in digest)
+                    for path, digest in product_hashes.items()),
+                "invalid product fingerprints")
     require(isinstance(warmups, int) and not isinstance(warmups, bool)
             and isinstance(repetitions, int) and not isinstance(repetitions, bool),
             "invalid sampling configuration")

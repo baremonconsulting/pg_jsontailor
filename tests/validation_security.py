@@ -285,16 +285,19 @@ INSERT INTO jt_v5.root VALUES(1);INSERT INTO jt_v5.child VALUES('a',1,'same','a'
         self.add(16,"V5","PASS" if observed==expected else "FAIL","C collation ordering for order_by and text key",f"observed={observed};expected={expected};source_collation={coll}")
 
     def test17(self):
-        root="root$fn$; ' \" space"; child="child$$; ' \" space"; key="id$fn$; ' \""; parent="parent$$; ' \""; value="value$fn$; ' \""
+        root="root*/$fn$; ' \" space"; child="child*/$$; ' \" space"; key="id$fn$; ' \""; parent="parent$$; ' \""; value="value$fn$; ' \""
         qi=lambda x:'"'+x.replace('"','""')+'"'
         self.run(f"DROP SCHEMA IF EXISTS jt_host CASCADE;CREATE SCHEMA jt_host;CREATE TABLE jt_host.{qi(root)}({qi(key)} integer PRIMARY KEY,{qi(value)} text);CREATE TABLE jt_host.{qi(child)}({qi(key)} integer PRIMARY KEY,{qi(parent)} integer REFERENCES jt_host.{qi(root)}({qi(key)}),{qi(value)} text);INSERT INTO jt_host.{qi(root)} VALUES(1,'r');INSERT INTO jt_host.{qi(child)} VALUES(1,1,'c');CREATE SCHEMA IF NOT EXISTS rusive_schema;")
-        spec={"root":{"table":"jt_host."+qi(root),"key":key,"fields":{"value":value}},"array":{"name":"items","table":"jt_host."+qi(child),"key":key,"parent_fk":parent,"fields":{"id":key,"value":value}}}
+        spec={"root":{"table":"jt_host."+qi(root),"key":key,"fields":{"value":value},"insert":True,"update":True},"array":{"name":"items","table":"jt_host."+qi(child),"key":key,"parent_fk":parent,"fields":{"id":key,"value":value},"insert":True,"update":True,"delete":True}}
         p=self.run("SET search_path=rusive_schema,pg_catalog;SELECT jsontailor.create_duality_view('jt_host.\"odd$fn$; name\"',"+lit(json.dumps(spec))+"::jsonb);",False)
         ddl=self.run("SELECT jsontailor.duality_view_ddl('jt_host.\"odd$$; second\"',"+lit(json.dumps(spec))+"::jsonb);").stdout.strip()
         p2=self.run("SET search_path=rusive_schema,pg_catalog;"+ddl,False)
-        values=self.scalar("SELECT (SELECT data#>>'{value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=1)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$$; second\" WHERE _id=1);") if p.returncode==0 and p2.returncode==0 else "not-created"
-        passed=p.returncode==0 and p2.returncode==0 and values=="r:c"
-        self.add(17,"hostile identifiers","PASS" if passed else "FAIL","hostile search_path and hostile table/column names",f"create={p.returncode};ddl={p2.returncode};values={values}")
+        update=self.run("UPDATE jt_host.\"odd$fn$; name\" SET data=jsonb_set(data,'{value}','\"changed\"') WHERE _id=1;",False) if p.returncode==0 else p
+        inserted={"_id":2,"value":"new","items":[{"id":2,"value":"child"}]}
+        insert=self.run("INSERT INTO jt_host.\"odd$fn$; name\"(data) VALUES("+lit(json.dumps(inserted))+"::jsonb);",False) if p.returncode==0 else p
+        values=self.scalar("SELECT (SELECT data#>>'{value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=1)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=2)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$$; second\" WHERE _id=1);") if p.returncode==0 and p2.returncode==0 and update.returncode==0 and insert.returncode==0 else "not-created"
+        passed=p.returncode==0 and p2.returncode==0 and update.returncode==0 and insert.returncode==0 and values=="changed:child:c"
+        self.add(17,"hostile identifiers","PASS" if passed else "FAIL","hostile search_path and hostile table/column names including comment terminators",f"create={p.returncode};ddl={p2.returncode};update={update.returncode};insert={insert.returncode};values={values}")
 
     def test18(self):
         values=self.scalar("""SELECT count(*)::text||':'||string_agg(proname||'/'||provolatile::text||'/'||prosecdef::text||'/'||array_to_string(proconfig,','),';' ORDER BY proname)

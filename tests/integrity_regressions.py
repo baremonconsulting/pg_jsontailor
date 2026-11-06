@@ -164,14 +164,22 @@ VALUES('{"_id":2,"value":"two","reference":{"id":7},"items":[{},{}]}'::jsonb);""
     changed["items"][0]["value"] = "changed"
     numeric = db.run("UPDATE jt_integrity.documents SET data=" + quote(json.dumps(changed)) +
                      "::jsonb WHERE _id=1;", False)
+    lossy = json.loads(numeric_doc)
+    lossy["_id"] = 1.001
+    lossy["value"] = "must-not-change"
+    lossy_update = db.run("UPDATE jt_integrity.documents SET data=" +
+                          quote(json.dumps(lossy)) + "::jsonb WHERE _id=1;", False)
+    lossless_value = db.value("SELECT value FROM jt_integrity.root WHERE id=1;")
     typed_predicates = db.value("SELECT position('to_jsonb(t.' in string_agg(pg_get_functiondef(p.oid),''))=0 "
         "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jt_integrity' "
         "AND p.proname LIKE 'documents__%';")
     db.run("INSERT INTO jt_integrity.root(id,value) SELECT g,'bulk' FROM generate_series(3,5000)g;")
     plan = db.run("EXPLAIN (COSTS OFF,FORMAT JSON) SELECT * FROM jt_integrity.root WHERE id=1;").stdout
-    record("numeric keys use typed indexed identity", numeric.returncode == 0
+    record("numeric keys use lossless typed indexed identity", numeric.returncode == 0
+           and db.state(lossy_update) == "PT422" and lossless_value != "must-not-change"
            and typed_predicates == "t" and "Index" in plan,
-           f"update={numeric.returncode},typed={typed_predicates},indexed={'Index' in plan}")
+           f"update={numeric.returncode},lossy={db.state(lossy_update)},"
+           f"value={lossless_value},typed={typed_predicates},indexed={'Index' in plan}")
 
     immutable = json.loads(json.dumps(spec))
     immutable["root"]["update"] = False

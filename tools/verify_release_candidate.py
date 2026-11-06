@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -29,9 +30,29 @@ def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
                           capture_output=True, check=check)
 
 
+def product_hashes(repo: Path, commit: str,
+                   product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS
+                   ) -> dict[str, str] | None:
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", commit, "--", *product_paths],
+        cwd=repo, capture_output=True, text=True)
+    if listing.returncode:
+        return None
+    names = tuple(name for name in listing.stdout.splitlines() if name)
+    hashes: dict[str, str] = {}
+    for name in names:
+        content = subprocess.run(["git", "show", f"{commit}:{name}"], cwd=repo,
+                                 capture_output=True)
+        if content.returncode:
+            return None
+        hashes[name] = hashlib.sha256(content.stdout).hexdigest()
+    return hashes
+
+
 def benchmark_source_status(repo: Path, source_commit: str,
                             candidate: str = "HEAD",
-                            product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS
+                            product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS,
+                            recorded_hashes: dict[str, str] | None = None
                             ) -> tuple[bool, str]:
     def run(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=repo, text=True,
@@ -39,6 +60,21 @@ def benchmark_source_status(repo: Path, source_commit: str,
 
     if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         return False, "reference benchmark source commit is invalid"
+    if source_commit == "0" * 40:
+        return False, "reference benchmark source commit is invalid"
+    if recorded_hashes is not None:
+        if not recorded_hashes:
+            return False, "reference benchmark product fingerprints are invalid"
+        candidate_hashes = product_hashes(repo, candidate, product_paths)
+        if candidate_hashes is None:
+            return False, "candidate product inputs cannot be read"
+        if candidate_hashes != recorded_hashes:
+            return False, "product SQL changed after the current reference benchmark"
+        if run("cat-file", "-e", source_commit + "^{commit}").returncode == 0:
+            source_hashes = product_hashes(repo, source_commit, product_paths)
+            if source_hashes != recorded_hashes:
+                return False, "reference benchmark fingerprints differ from its source commit"
+        return True, "product-equivalent benchmark fingerprint"
     if run("cat-file", "-e", source_commit + "^{commit}").returncode:
         return False, "reference benchmark commit is absent"
     if run("merge-base", "--is-ancestor", source_commit, candidate).returncode:
@@ -92,7 +128,8 @@ def main() -> int:
 
     environment = json.loads((REFERENCE / "environment.json").read_text())
     source_commit = environment.get("source_commit", "")
-    benchmark_ok, benchmark_detail = benchmark_source_status(ROOT, source_commit)
+    benchmark_ok, benchmark_detail = benchmark_source_status(
+        ROOT, source_commit, recorded_hashes=environment.get("product_hashes"))
     require(benchmark_ok, benchmark_detail)
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
