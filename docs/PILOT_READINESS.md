@@ -68,13 +68,17 @@ PostgreSQL major version, followed by catalogue and application smoke tests.
 Provide a pilot only from an immutable release tag. Archive the source, release
 notes and checksums. Do not label historical benchmark numbers as current.
 Fingerprint-bearing measurements may support a tagged release when the
-release-candidate verifier confirms that every defined product input under
-`sql/`, `pg_jsontailor.control` and `Makefile` is byte-identical to the measured
-inputs. A reviewed product-equivalent squash therefore remains eligible even
+release-candidate verifier confirms identical fingerprints for every defined
+product input under `sql/`, `pg_jsontailor.control` and the runtime/install
+content of `Makefile`. Safe literal PGXS test-runner declarations are excluded
+from the Makefile fingerprint only at their exact canonical positions;
+ambiguous, relocated or dynamic Make syntax remains included, as do file modes.
+A reviewed product-equivalent squash therefore remains eligible even
 when the measured feature commit is no longer an ancestor or locally reachable.
 Legacy evidence without product fingerprints retains the stricter requirement
 that its recorded source commit exists, is an ancestor of the tag and contains
-byte-identical product inputs. Any product-input change requires fresh evidence.
+identical defined product inputs under the fingerprint policy. Any product-input
+change requires fresh evidence.
 
 Preserve the actual measurement `source_commit`; never relabel an older run as
 if it were measured from the tag. Artifact and release-candidate verification

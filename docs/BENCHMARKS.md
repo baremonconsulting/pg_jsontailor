@@ -31,12 +31,18 @@ The included benchmark compares generated document views with direct relational 
 
 The current release-candidate measurements used commit `039a555b55f89b849c98ab918ba279889fbf38bf`. PostgreSQL 17.11, 18.6 and 19rc1 each completed 2,640 of 2,640 benchmark executions with PASS status across 40 groups, including native MERGE actions. The PostgreSQL 18 [reference evidence](../bench/reference/azure-039a555-pg18/) is the published performance reference; the matching [PostgreSQL 17](../bench/reference/azure-039a555-pg17/) and [PostgreSQL 19](../bench/reference/azure-039a555-pg19/) evidence records cross-version behaviour on the same Azure VM. All three sets pass the independent artifact verifier. The runs were executed sequentially and contain 7,920 benchmark executions in total: 7,200 measured executions and 720 warm-ups.
 
-Release-candidate verification separately determines whether these measurements are transferable to a later candidate. New evidence records SHA-256 fingerprints for every file under `sql/`, `pg_jsontailor.control` and `Makefile`; the candidate must have the identical fingerprint set. This remains valid after a reviewed squash merge even when the measured feature commit is no longer an ancestor or locally reachable. Older evidence without fingerprints retains the stricter ancestor-and-byte-identity rule. If any defined product input changed, the run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
+Release-candidate verification separately determines whether these measurements are transferable to a later candidate. Schema-v2 evidence records mode-aware SHA-256 fingerprints for every regular file under `sql/`, `pg_jsontailor.control` and `Makefile`. Only the values of the four safe literal test-runner declarations `REGRESS`, `REGRESS_OPTS`, `ISOLATION` and `ISOLATION_OPTS` are normalized, and only at their exact positions in the canonical project Makefile. Raw and normalized fingerprints use separate domains; any other layout, syntax, file mode or inventory change remains significant. The candidate must have the identical fingerprint set. This remains valid after a reviewed squash merge even when the measured feature commit is no longer an ancestor or locally reachable. Older evidence without fingerprints retains the stricter ancestor and defined-product-identity rule. If any defined product input changed, the run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
 
 The artifact verifier validates the stored results, environment metadata and
 declared product fingerprints. The original invocation, environment record and
 run logs provide native execution provenance; validating a stored artifact does
 not independently attest the execution host or actor.
+
+The current PostgreSQL 18 reference preserves its originally emitted
+schema-v1 hashes in `environment.json`. The adjacent `fingerprint-v2.json`
+records the auditable derivation used by the release gate, including the
+original inventory and environment Git blob. Fingerprint-policy semantics are
+versioned; they are not changed in place under an existing schema number.
 
 An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). Compared with the completed set-wise build at [`11e6d74`](../bench/reference/azure-11e6d74/), 1,000-child median insert, root-only update, complete replacement, MERGE insert and MERGE update time fell by 69.0%, 67.7%, 58.9%, 69.1% and 59.3%. At zero and one child that optimization adds roughly 8–25% to those paths; it is intentionally targeted at larger arrays. These percentages describe the two named historical builds, not the current reference.
 

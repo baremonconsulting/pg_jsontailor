@@ -44,6 +44,9 @@ def verify_results(folder: Path) -> dict[str, int | str]:
     warmups = environment["warmups"]
     repetitions = environment["repetitions"]
     if "product_hashes" in environment:
+        if "product_fingerprint_schema" in environment:
+            require(environment["product_fingerprint_schema"] == 2,
+                    "unsupported product fingerprint schema")
         product_hashes = environment["product_hashes"]
         require(isinstance(product_hashes, dict) and product_hashes,
                 "invalid product fingerprints")

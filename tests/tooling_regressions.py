@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 from unittest import mock
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bench.product_fingerprint import digest, working_tree_hashes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -558,22 +560,35 @@ def release_policy_checks() -> None:
 
     with tempfile.TemporaryDirectory(prefix="pgjt-release-policy-") as temporary:
         repo = Path(temporary)
+        canonical_makefile = (ROOT / "Makefile").read_text()
         run(repo, "init", "-q")
         run(repo, "config", "user.name", "Policy Test")
         run(repo, "config", "user.email", "policy@example.invalid")
         (repo / "sql").mkdir()
         (repo / "sql/product.sql").write_text("SELECT 1;\n")
         (repo / "pg_jsontailor.control").write_text("default_version = '0.2.0'\n")
-        (repo / "Makefile").write_text("all:\n\t@true\n")
+        (repo / "Makefile").write_text(canonical_makefile)
         run(repo, "add", ".")
         run(repo, "commit", "-qm", "base")
         base = run(repo, "rev-parse", "HEAD")
         fingerprints = verifier.product_hashes(repo, base)
         if not fingerprints:
             raise AssertionError("product fingerprints were not produced")
+        expected_inputs = {"Makefile", "pg_jsontailor.control", "sql/product.sql"}
+        if set(fingerprints) != expected_inputs:
+            raise AssertionError(f"product fingerprint inventory differs: {fingerprints}")
+        if working_tree_hashes(repo) != fingerprints:
+            raise AssertionError("benchmark producer and release verifier fingerprints differ")
         ok, _ = verifier.benchmark_source_status(repo, base, base)
         if not ok:
             raise AssertionError("exact benchmark source commit was rejected")
+        legacy_hashes = verifier.product_hashes(
+            repo, base, fingerprint_schema=1)
+        ok, detail = verifier.benchmark_source_status(
+            repo, base, base, recorded_hashes=legacy_hashes,
+            fingerprint_schema=1)
+        if not ok:
+            raise AssertionError(f"exact-source schema-v1 evidence was rejected: {detail}")
 
         (repo / "README.md").write_text("documentation only\n")
         run(repo, "add", "README.md")
@@ -582,6 +597,128 @@ def release_policy_checks() -> None:
         ok, _ = verifier.benchmark_source_status(repo, base, docs)
         if not ok:
             raise AssertionError("product-equivalent benchmark ancestor was rejected")
+
+        declaration_changes = {
+            "REGRESS": ("REGRESS = basic", "REGRESS = basic additional_contract"),
+            "REGRESS_OPTS": (
+                "REGRESS_OPTS = --inputdir=tests --outputdir=tests/output",
+                "REGRESS_OPTS = --inputdir=tests --outputdir=tests/output --load-extension=pg_jsontailor"),
+            "ISOLATION": (
+                "ISOLATION = concurrency pgjt_43_concurrency pgjt_47_partition",
+                "ISOLATION = concurrency pgjt_43_concurrency pgjt_47_partition additional_contract"),
+            "ISOLATION_OPTS": (
+                "ISOLATION_OPTS = --inputdir=tests --outputdir=tests/output_iso",
+                "ISOLATION_OPTS = --inputdir=tests --outputdir=tests/output_iso --load-extension=pg_jsontailor"),
+        }
+        for declaration, (original, literal) in declaration_changes.items():
+            run(repo, "switch", "-qC", f"literal-{declaration.lower()}", base)
+            (repo / "Makefile").write_text(
+                canonical_makefile.replace(original, literal))
+            run(repo, "add", "Makefile")
+            run(repo, "commit", "-qm", f"literal {declaration} test-only change")
+            test_only = run(repo, "rev-parse", "HEAD")
+            ok, detail = verifier.benchmark_source_status(repo, base, test_only)
+            if not ok:
+                raise AssertionError(
+                    f"literal {declaration} change invalidated performance evidence: {detail}")
+            ok, _ = verifier.benchmark_source_status(
+                repo, base, test_only, fingerprint_schema=1)
+            if ok:
+                raise AssertionError(
+                    f"schema-v1 evidence accepted a {declaration} byte change")
+
+        (repo / "Makefile").write_text(canonical_makefile.replace(
+            "DATA = sql/pg_jsontailor--0.2.0.sql", "DATA = sql/other.sql"))
+        run(repo, "add", "Makefile")
+        run(repo, "commit", "-qm", "runtime PGXS change")
+        runtime_make = run(repo, "rev-parse", "HEAD")
+        ok, detail = verifier.benchmark_source_status(repo, base, runtime_make)
+        if ok or "product SQL changed" not in detail:
+            raise AssertionError(f"runtime Makefile change was accepted: {detail}")
+
+        for declaration, (original, _) in declaration_changes.items():
+            run(repo, "switch", "-qC", f"dynamic-{declaration.lower()}", base)
+            dynamic = (f"{declaration} = "
+                       "$(eval DATA = sql/other.sql)")
+            (repo / "Makefile").write_text(
+                canonical_makefile.replace(original, dynamic))
+            run(repo, "add", "Makefile")
+            run(repo, "commit", "-qm", f"dynamic {declaration} declaration")
+            dynamic_make = run(repo, "rev-parse", "HEAD")
+            ok, detail = verifier.benchmark_source_status(repo, base, dynamic_make)
+            if ok or "product SQL changed" not in detail:
+                raise AssertionError(
+                    f"dynamic {declaration} expression was accepted: {detail}")
+
+        run(repo, "switch", "-qC", "bare-cr", base)
+        (repo / "Makefile").write_bytes(
+            b"all:\n\t@true\nDATA = sql/product.sql\rREGRESS = basic\n")
+        run(repo, "add", "Makefile")
+        run(repo, "commit", "-qm", "bare CR Makefile mutation")
+        bare_cr = run(repo, "rev-parse", "HEAD")
+        ok, detail = verifier.benchmark_source_status(repo, base, bare_cr)
+        if ok or "product SQL changed" not in detail:
+            raise AssertionError(f"bare-CR Makefile mutation was accepted: {detail}")
+
+        contextual_makefiles = {
+            "continuation": (
+                b"DATA = sql/product.sql \\" + b"\nREGRESS = first.sql\n",
+                b"DATA = sql/product.sql \\" + b"\nREGRESS = changed.sql\n"),
+            "define": (
+                b"define DATA\nREGRESS = first.sql\nendef\n",
+                b"define DATA\nREGRESS = changed.sql\nendef\n"),
+            "dependent-runtime": (
+                b"DATA = $(REGRESS)\nREGRESS = first.sql\n",
+                b"DATA = $(REGRESS)\nREGRESS = changed.sql\n"),
+            "substitution-runtime": (
+                b"DATA = $(REGRESS:%=sql/%.sql)\nREGRESS = first\n",
+                b"DATA = $(REGRESS:%=sql/%.sql)\nREGRESS = changed\n"),
+            "conditional-runtime": (
+                b"REGRESS =\nifdef REGRESS\nDATA = sql/first.sql\nendif\n",
+                b"REGRESS = changed\nifdef REGRESS\nDATA = sql/first.sql\nendif\n"),
+            "recipe-prefix": (
+                b".RECIPEPREFIX = R\ninstall:\nREGRESS = first.sql\n",
+                b".RECIPEPREFIX = R\ninstall:\nREGRESS = changed.sql\n"),
+            "exported-test-variable": (
+                b"REGRESS = first.sql\nexport REGRESS\n",
+                b"REGRESS = changed.sql\nexport REGRESS\n"),
+        }
+        for label, (before, after) in contextual_makefiles.items():
+            if digest("Makefile", before) == digest("Makefile", after):
+                raise AssertionError(
+                    f"contextual Makefile mutation was normalized: {label}")
+
+        canonical_bytes = canonical_makefile.encode()
+        moved = canonical_makefile.splitlines()
+        declarations = moved[3:7]
+        del moved[3:7]
+        include_index = moved.index("include $(PGXS)")
+        moved[include_index + 1:include_index + 1] = declarations
+        removed = "\n".join(canonical_makefile.splitlines()[:3] +
+                            canonical_makefile.splitlines()[7:]) + "\n"
+        for label, changed in (("relocated", "\n".join(moved) + "\n"),
+                               ("removed", removed)):
+            if digest("Makefile", canonical_bytes) == digest("Makefile", changed.encode()):
+                raise AssertionError(f"test declaration {label} collision")
+
+        run(repo, "switch", "-qC", "unicode-input", base)
+        (repo / "sql/extraé.sql").write_text("SELECT 2;\n")
+        run(repo, "add", "sql/extraé.sql")
+        run(repo, "commit", "-qm", "unicode product input")
+        unicode_commit = run(repo, "rev-parse", "HEAD")
+        unicode_hashes = verifier.product_hashes(repo, unicode_commit)
+        if unicode_hashes is None or "sql/extraé.sql" not in unicode_hashes:
+            raise AssertionError("Unicode product input did not round-trip")
+
+        run(repo, "switch", "-qC", "symlink-input", base)
+        (repo / "control-target").write_text("default_version = '0.2.0'\n")
+        (repo / "pg_jsontailor.control").unlink()
+        os.symlink("control-target", repo / "pg_jsontailor.control")
+        run(repo, "add", "control-target", "pg_jsontailor.control")
+        run(repo, "commit", "-qm", "symlink product input")
+        symlink_commit = run(repo, "rev-parse", "HEAD")
+        if verifier.product_hashes(repo, symlink_commit) is not None:
+            raise AssertionError("non-regular product input was accepted")
 
         for index, path in enumerate(verifier.PRODUCT_EQUIVALENCE_PATHS):
             run(repo, "switch", "-qC", f"changed-{index}", base)
@@ -603,7 +740,7 @@ def release_policy_checks() -> None:
         (repo / "sql").mkdir()
         (repo / "sql/product.sql").write_text("SELECT 1;\n")
         (repo / "pg_jsontailor.control").write_text("default_version = '0.2.0'\n")
-        (repo / "Makefile").write_text("all:\n\t@true\n")
+        (repo / "Makefile").write_text(canonical_makefile)
         run(repo, "add", ".")
         run(repo, "commit", "-qm", "unrelated")
         unrelated = run(repo, "rev-parse", "HEAD")

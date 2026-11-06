@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +16,7 @@ import time
 import uuid
 
 from verify_results import verify_results
+from product_fingerprint import PRODUCT_INPUTS, SCHEMA_VERSION, working_tree_hashes
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -50,7 +50,6 @@ RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 OUT = args.output or ROOT / "results" / f"duality-benchmark-{RUN_ID}"
 ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port), "PGUSER": args.pg_user}
 ARTIFACTS = ("measurements.csv", "plans.json", "summary.json", "environment.json")
-PRODUCT_INPUTS = ("sql", "pg_jsontailor.control", "Makefile")
 
 if not SIZES or any(size < 0 for size in SIZES) or len(set(SIZES)) != len(SIZES):
     parser.error("--sizes must contain distinct non-negative integers")
@@ -80,15 +79,7 @@ def lit(value):
 
 
 def product_hashes():
-    hashes = {}
-    for relative in PRODUCT_INPUTS:
-        source = ROOT / relative
-        files = sorted(path for path in source.rglob("*") if path.is_file()) \
-            if source.is_dir() else [source]
-        for path in files:
-            hashes[path.relative_to(ROOT).as_posix()] = hashlib.sha256(
-                path.read_bytes()).hexdigest()
-    return hashes
+    return working_tree_hashes(ROOT)
 
 
 class PersistentPsql:
@@ -302,7 +293,7 @@ for size in SIZES:
         summary.append({"size":size,"operation":operation,**values,
                         "median_ratio":values["duality"]["median_ms"]/values["direct"]["median_ms"]})
 (OUT/"summary.json").write_text(json.dumps(summary,indent=2))
-metadata={"run_id":RUN_ID,"postgresql":sql("SHOW server_version;",tuples=True).strip(),"platform":platform.platform(),"cpu_count":os.cpu_count(),"sizes":SIZES,"operations":OPERATIONS,"warmups":WARMUPS,"repetitions":REPETITIONS,"jit":"off","parallel_gather_workers":0,"database":DB,"pg_host":args.pg_host,"pg_port":str(args.pg_port),"pg_user":args.pg_user,"backend_mode":"one persistent psql backend for all measurements","source_commit":source_commit,"source_dirty":source_dirty,"product_hashes":product_hashes()}
+metadata={"run_id":RUN_ID,"postgresql":sql("SHOW server_version;",tuples=True).strip(),"platform":platform.platform(),"cpu_count":os.cpu_count(),"sizes":SIZES,"operations":OPERATIONS,"warmups":WARMUPS,"repetitions":REPETITIONS,"jit":"off","parallel_gather_workers":0,"database":DB,"pg_host":args.pg_host,"pg_port":str(args.pg_port),"pg_user":args.pg_user,"backend_mode":"one persistent psql backend for all measurements","source_commit":source_commit,"source_dirty":source_dirty,"product_fingerprint_schema":SCHEMA_VERSION,"product_hashes":product_hashes()}
 (OUT/"environment.json").write_text(json.dumps(metadata,indent=2))
 verification = verify_results(OUT)
 if args.drop_database_after:
