@@ -1,0 +1,17 @@
+{
+  "product_fingerprint_schema": 2,
+  "source_commit": "039a555b55f89b849c98ab918ba279889fbf38bf",
+  "source_environment_git_blob": "ec3b414531f9fa9a6ad2adaf51431ff591c4fd71",
+  "derived_at": "2026-11-06",
+  "policy_implementation": "bench/product_fingerprint.py",
+  "original_product_hashes": {
+    "sql/pg_jsontailor--0.2.0.sql": "95deee1005b28a62309f2cb36ddb76ce0a7701a3cf2838313539c44f7e954c42",
+    "pg_jsontailor.control": "745fb894b3d68051ef4c6e263616ba789d774eb7106c2c2ef00e1b49431f4051",
+    "Makefile": "6de49b6af6b5d935cb1189be5cb1f2274bd71318ae003522e877e0e68cf1499e"
+  },
+  "product_hashes": {
+    "Makefile": "4ae2b4fb39cad4021d258d808c0027044b5c99bf4e1e7ec468248e476f9b2239",
+    "pg_jsontailor.control": "02398f67871ecca84db168975541971df7bc3e50707c141f24bb457cbce7f29d",
+    "sql/pg_jsontailor--0.2.0.sql": "77913ecbec6b2621c029a46f7adc39a07c1f4af337f8e7f168dc003d921c66bd"
+  }
+}

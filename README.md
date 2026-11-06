@@ -173,7 +173,7 @@ The repository contains several layers of verification:
 - `tests/validation_security.py` for validation, security, RLS and edge cases;
 - `tests/integrity_regressions.py` for generated write-path and integrity regressions;
 - `tests/merge_operations.py` for native SQL MERGE compatibility and concurrency;
-- `tests/run_postgrest.py` for the optional REST surface;
+- `tests/run_postgrest.py` for the automated REST contract;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `tests/dump_restore.py` for custom and plain dump/restore verification;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
@@ -182,13 +182,13 @@ The repository contains several layers of verification:
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. Repository checks also enforce the release-candidate version, benchmark and public-source contract. CodeQL and dependency review run separately with read-only default permissions. PostgREST, pilot and benchmark execution are explicit integration or measurement scenarios rather than per-commit CI gates; committed benchmark evidence is independently verified on every run. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
+Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, benchmark and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and benchmark execution remain explicit integration or measurement scenarios; committed benchmark evidence is independently verified on every run. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
 
 ## Performance
 
 The write path uses set-based array reconciliation and set-wise validation.
-The current Azure reference at commit `e5b41a5` records a 49.615 ms
-median and 50.436 ms p95 for complete replacement of a document with 1,000
+The current Azure reference at commit `039a555` records a 49.782 ms
+median and 50.721 ms p95 for complete replacement of a document with 1,000
 children. It is current release evidence only when the release-candidate
 verifier proves product equivalence with the candidate. Results are
 host-specific and do not represent a production SLO. See

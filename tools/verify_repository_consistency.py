@@ -9,14 +9,14 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT = ROOT / "bench/reference/azure-e5b41a5-pg18/summary.json"
+CURRENT = ROOT / "bench/reference/azure-039a555-pg18/summary.json"
 FINAL_SETWISE = ROOT / "bench/reference/azure-11e6d74/summary.json"
 INTERMEDIATE = ROOT / "bench/reference/azure-afa643c/summary.json"
 HISTORICAL = ROOT / "bench/reference/azure-04d053e/summary.json"
 VERSION_REFERENCES = (
-    ROOT / "bench/reference/azure-e5b41a5-pg17",
-    ROOT / "bench/reference/azure-e5b41a5-pg18",
-    ROOT / "bench/reference/azure-e5b41a5-pg19",
+    ROOT / "bench/reference/azure-039a555-pg17",
+    ROOT / "bench/reference/azure-039a555-pg18",
+    ROOT / "bench/reference/azure-039a555-pg19",
 )
 PREVIOUS_VERSION_REFERENCES = (
     ROOT / "bench/reference/azure-a9a455e-pg17",
@@ -76,14 +76,14 @@ def main() -> int:
     intermediate = rows(INTERMEDIATE)
 
     claims = {
-        (1000, "read"): (4.231, 4.293, 2.889),
-        (1000, "insert"): (38.386, 38.951, 9.561),
-        (1000, "root_update"): (35.038, 35.279, 0.058),
-        (1000, "update"): (49.615, 50.436, 5.847),
-        (1000, "delete"): (13.559, 13.902, 2.655),
-        (1000, "merge_insert"): (34.207, 34.520, 6.521),
-        (1000, "merge_update"): (51.791, 52.411, 6.008),
-        (1000, "merge_delete"): (13.178, 13.464, 0.851),
+        (1000, "read"): (4.2125, 4.275, 2.878),
+        (1000, "insert"): (38.492, 38.932, 9.5075),
+        (1000, "root_update"): (35.2075, 35.408, 0.057),
+        (1000, "update"): (49.7825, 50.721, 5.698),
+        (1000, "delete"): (10.65, 10.902, 0.87),
+        (1000, "merge_insert"): (35.33, 35.56, 7.115),
+        (1000, "merge_update"): (51.51, 51.918, 5.545),
+        (1000, "merge_delete"): (14.8585, 15.39, 0.5605),
     }
     for key, expected in claims.items():
         row = current[key]
@@ -111,13 +111,13 @@ def main() -> int:
     benchmarks = text("docs/BENCHMARKS.md")
     readme = text("README.md")
     for claim in (
-            "49.615 ms | 50.436 ms | 5.847 ms",
-            "34.207 ms | 34.520 ms | 6.521 ms",
-            "51.791 ms | 52.411 ms | 6.008 ms",
-            "13.178 ms | 13.464 ms | 0.851 ms",
+            "49.782 ms | 50.721 ms | 5.698 ms",
+            "35.330 ms | 35.560 ms | 7.115 ms",
+            "51.510 ms | 51.918 ms | 5.545 ms",
+            "14.858 ms | 15.390 ms | 0.560 ms",
             "69.0%, 67.7%, 58.9%, 69.1% and 59.3%"):
         require(claim in benchmarks, f"published benchmark claim is missing: {claim}")
-    require("49.615 ms" in readme and "50.436 ms" in readme,
+    require("49.782 ms" in readme and "50.721 ms" in readme,
             "README benchmark summary differs from the current reference")
     return 0
 

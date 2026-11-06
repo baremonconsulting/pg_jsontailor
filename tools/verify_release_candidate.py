@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from typing import Sequence
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bench.product_fingerprint import PRODUCT_INPUTS, SCHEMA_VERSION, digest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = ROOT / "bench/reference/azure-e5b41a5-pg18"
-PRODUCT_EQUIVALENCE_PATHS = ("sql", "pg_jsontailor.control", "Makefile")
+REFERENCE = ROOT / "bench/reference/azure-039a555-pg18"
+REFERENCE_FINGERPRINT = REFERENCE / "fingerprint-v2.json"
+PRODUCT_EQUIVALENCE_PATHS = PRODUCT_INPUTS
 EXACT_SHA_CHECKS = (
     "Repository checks", "PostgreSQL 17", "PostgreSQL 18", "PostgreSQL 19",
     "CodeQL (Python)", "Dependency review")
@@ -31,28 +35,37 @@ def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 
 def product_hashes(repo: Path, commit: str,
-                   product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS
+                   product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS,
+                   fingerprint_schema: int = SCHEMA_VERSION,
                    ) -> dict[str, str] | None:
     listing = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", commit, "--", *product_paths],
-        cwd=repo, capture_output=True, text=True)
+        ["git", "ls-tree", "-rz", "--full-tree", commit, "--", *product_paths],
+        cwd=repo, capture_output=True)
     if listing.returncode:
         return None
-    names = tuple(name for name in listing.stdout.splitlines() if name)
     hashes: dict[str, str] = {}
-    for name in names:
+    for entry in (value for value in listing.stdout.split(b"\0") if value):
+        try:
+            metadata, raw_name = entry.split(b"\t", 1)
+            mode, kind, _object = metadata.split(b" ", 2)
+        except ValueError:
+            return None
+        if kind != b"blob" or mode not in {b"100644", b"100755"}:
+            return None
+        name = os.fsdecode(raw_name)
         content = subprocess.run(["git", "show", f"{commit}:{name}"], cwd=repo,
                                  capture_output=True)
         if content.returncode:
             return None
-        hashes[name] = hashlib.sha256(content.stdout).hexdigest()
+        hashes[name] = digest(name, content.stdout, mode.decode(), fingerprint_schema)
     return hashes
 
 
 def benchmark_source_status(repo: Path, source_commit: str,
                             candidate: str = "HEAD",
                             product_paths: Sequence[str] = PRODUCT_EQUIVALENCE_PATHS,
-                            recorded_hashes: dict[str, str] | None = None
+                            recorded_hashes: dict[str, str] | None = None,
+                            fingerprint_schema: int = SCHEMA_VERSION,
                             ) -> tuple[bool, str]:
     def run(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=repo, text=True,
@@ -65,13 +78,15 @@ def benchmark_source_status(repo: Path, source_commit: str,
     if recorded_hashes is not None:
         if not recorded_hashes:
             return False, "reference benchmark product fingerprints are invalid"
-        candidate_hashes = product_hashes(repo, candidate, product_paths)
+        candidate_hashes = product_hashes(repo, candidate, product_paths,
+                                          fingerprint_schema)
         if candidate_hashes is None:
             return False, "candidate product inputs cannot be read"
         if candidate_hashes != recorded_hashes:
             return False, "product SQL changed after the current reference benchmark"
         if run("cat-file", "-e", source_commit + "^{commit}").returncode == 0:
-            source_hashes = product_hashes(repo, source_commit, product_paths)
+            source_hashes = product_hashes(repo, source_commit, product_paths,
+                                           fingerprint_schema)
             if source_hashes != recorded_hashes:
                 return False, "reference benchmark fingerprints differ from its source commit"
         return True, "product-equivalent benchmark fingerprint"
@@ -79,8 +94,18 @@ def benchmark_source_status(repo: Path, source_commit: str,
         return False, "reference benchmark commit is absent"
     if run("merge-base", "--is-ancestor", source_commit, candidate).returncode:
         return False, "reference benchmark commit is not an ancestor"
-    if run("diff", "--quiet", source_commit, candidate, "--", *product_paths).returncode:
-        return False, "product SQL changed after the current reference benchmark"
+    if fingerprint_schema == 1:
+        if run("diff", "--quiet", source_commit, candidate, "--", *product_paths).returncode:
+            return False, "product SQL changed after the current reference benchmark"
+    else:
+        source_hashes = product_hashes(repo, source_commit, product_paths,
+                                       fingerprint_schema)
+        candidate_hashes = product_hashes(repo, candidate, product_paths,
+                                          fingerprint_schema)
+        if source_hashes is None or candidate_hashes is None:
+            return False, "benchmark product inputs cannot be read"
+        if source_hashes != candidate_hashes:
+            return False, "product SQL changed after the current reference benchmark"
     return True, "product-equivalent benchmark source"
 
 
@@ -127,9 +152,17 @@ def main() -> int:
             "legal identity differs")
 
     environment = json.loads((REFERENCE / "environment.json").read_text())
+    migration = json.loads(REFERENCE_FINGERPRINT.read_text())
+    require(migration.get("product_fingerprint_schema") == SCHEMA_VERSION,
+            "reference benchmark fingerprint schema differs")
+    require(migration.get("source_commit") == environment.get("source_commit"),
+            "reference fingerprint source differs from benchmark environment")
+    require(migration.get("original_product_hashes") == environment.get("product_hashes"),
+            "reference fingerprint migration does not preserve original hashes")
     source_commit = environment.get("source_commit", "")
     benchmark_ok, benchmark_detail = benchmark_source_status(
-        ROOT, source_commit, recorded_hashes=environment.get("product_hashes"))
+        ROOT, source_commit, recorded_hashes=migration.get("product_hashes"),
+        fingerprint_schema=migration.get("product_fingerprint_schema"))
     require(benchmark_ok, benchmark_detail)
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
