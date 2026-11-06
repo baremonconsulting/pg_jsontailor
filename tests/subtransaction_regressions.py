@@ -43,7 +43,7 @@ SELECT jsontailor.create_duality_view(
         "root-only bulk UPDATE":
             "SET data=jsonb_set(data,'{value}',to_jsonb('after-'||_id::text))",
         "explicit-child append bulk UPDATE":
-            "SET data=jsonb_set(data,'{items}',jsonb_build_array(jsonb_build_object(" 
+            "SET data=jsonb_set(data,'{items}',jsonb_build_array(jsonb_build_object("
             "'id',100000+_id,'value','child')))"
     }
     for workload, assignment in workloads.items():

@@ -9,11 +9,16 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT = ROOT / "bench/reference/azure-a9a455e-pg18/summary.json"
+CURRENT = ROOT / "bench/reference/azure-e5b41a5-pg18/summary.json"
 FINAL_SETWISE = ROOT / "bench/reference/azure-11e6d74/summary.json"
 INTERMEDIATE = ROOT / "bench/reference/azure-afa643c/summary.json"
 HISTORICAL = ROOT / "bench/reference/azure-04d053e/summary.json"
 VERSION_REFERENCES = (
+    ROOT / "bench/reference/azure-e5b41a5-pg17",
+    ROOT / "bench/reference/azure-e5b41a5-pg18",
+    ROOT / "bench/reference/azure-e5b41a5-pg19",
+)
+PREVIOUS_VERSION_REFERENCES = (
     ROOT / "bench/reference/azure-a9a455e-pg17",
     ROOT / "bench/reference/azure-a9a455e-pg18",
     ROOT / "bench/reference/azure-a9a455e-pg19",
@@ -61,6 +66,8 @@ def main() -> int:
     verify_benchmark = benchmark_verifier()
     for reference in VERSION_REFERENCES:
         verify_benchmark(reference)
+    for reference in PREVIOUS_VERSION_REFERENCES:
+        verify_benchmark(reference)
     verify_benchmark(FINAL_SETWISE.parent)
     verify_benchmark(INTERMEDIATE.parent)
     verify_benchmark(HISTORICAL.parent)
@@ -69,14 +76,14 @@ def main() -> int:
     intermediate = rows(INTERMEDIATE)
 
     claims = {
-        (1000, "read"): (4.230, 4.284, 3.004),
-        (1000, "insert"): (35.112, 35.377, 9.530),
-        (1000, "root_update"): (34.067, 34.358, 0.061),
-        (1000, "update"): (48.725, 49.277, 5.902),
-        (1000, "delete"): (12.354, 12.692, 2.171),
-        (1000, "merge_insert"): (31.526, 31.855, 6.633),
-        (1000, "merge_update"): (51.020, 51.485, 6.111),
-        (1000, "merge_delete"): (19.254, 19.798, 3.305),
+        (1000, "read"): (4.231, 4.293, 2.889),
+        (1000, "insert"): (38.386, 38.951, 9.561),
+        (1000, "root_update"): (35.038, 35.279, 0.058),
+        (1000, "update"): (49.615, 50.436, 5.847),
+        (1000, "delete"): (13.559, 13.902, 2.655),
+        (1000, "merge_insert"): (34.207, 34.520, 6.521),
+        (1000, "merge_update"): (51.791, 52.411, 6.008),
+        (1000, "merge_delete"): (13.178, 13.464, 0.851),
     }
     for key, expected in claims.items():
         row = current[key]
@@ -104,13 +111,13 @@ def main() -> int:
     benchmarks = text("docs/BENCHMARKS.md")
     readme = text("README.md")
     for claim in (
-            "48.725 ms | 49.277 ms | 5.902 ms",
-            "31.526 ms | 31.855 ms | 6.633 ms",
-            "51.020 ms | 51.485 ms | 6.111 ms",
-            "19.254 ms | 19.798 ms | 3.305 ms",
+            "49.615 ms | 50.436 ms | 5.847 ms",
+            "34.207 ms | 34.520 ms | 6.521 ms",
+            "51.791 ms | 52.411 ms | 6.008 ms",
+            "13.178 ms | 13.464 ms | 0.851 ms",
             "69.0%, 67.7%, 58.9%, 69.1% and 59.3%"):
         require(claim in benchmarks, f"published benchmark claim is missing: {claim}")
-    require("48.725 ms" in readme and "49.277 ms" in readme,
+    require("49.615 ms" in readme and "50.436 ms" in readme,
             "README benchmark summary differs from the current reference")
     return 0
 
