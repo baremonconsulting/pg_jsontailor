@@ -10,7 +10,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,15 @@ def load_jsonl_verifier():
 def load_release_verifier():
     path = ROOT / "tools/verify_release_candidate.py"
     spec = importlib.util.spec_from_file_location("release_candidate_verifier", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_dump_restore():
+    path = ROOT / "tests/dump_restore.py"
+    spec = importlib.util.spec_from_file_location("dump_restore_harness", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -252,11 +263,80 @@ def release_policy_checks() -> None:
             raise AssertionError(f"unrelated benchmark source was accepted: {detail}")
 
 
+def dump_restore_command_checks() -> None:
+    harness = load_dump_restore()
+
+    def execute(maintenance: str, fail_after_source: bool = False):
+        calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def captured(command, name: str, *args: str, input_text: str | None = None):
+            calls.append((name, args))
+            if (fail_after_source and name == "psql" and input_text
+                    and "CREATE EXTENSION pg_jsontailor" in input_text):
+                raise RuntimeError("injected restore setup failure")
+            stdout = ""
+            if name == "psql" and input_text and "SELECT extversion" in input_text:
+                stdout = "0.2.0\n1:1\ntrue:false:dump restore health\nUPDATE 1\nt\n"
+            return subprocess.CompletedProcess([name, *args], 0, stdout, "")
+
+        argv = ["dump_restore.py", "--pg-bin", "/unused",
+                "--maintenance-database", maintenance,
+                "--database-prefix", "probe"]
+        with mock.patch.object(harness.Commands, "run", captured), \
+                mock.patch.object(sys, "argv", argv):
+            if fail_after_source:
+                try:
+                    harness.main()
+                except RuntimeError as error:
+                    if "injected restore setup failure" not in str(error):
+                        raise
+                else:
+                    raise AssertionError("injected dump/restore failure was ignored")
+            elif harness.main() != 0:
+                raise AssertionError("captured dump/restore main failed")
+        return [(name, args) for name, args in calls if name in ("createdb", "dropdb")]
+
+    for maintenance in ("postgres", "selected_maintenance"):
+        lifecycle = execute(maintenance)
+        expected = [
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_custom")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_plain")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_source")),
+            ("createdb", ("--maintenance-db", maintenance, "probe_source")),
+            ("createdb", ("--maintenance-db", maintenance, "probe_custom")),
+            ("createdb", ("--maintenance-db", maintenance, "probe_plain")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_plain")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_custom")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db", maintenance,
+                        "probe_source")),
+        ]
+        if lifecycle != expected:
+            raise AssertionError(
+                f"dump/restore maintenance forwarding differs for {maintenance}: {lifecycle}")
+
+    failed = execute("failure_maintenance", fail_after_source=True)
+    cleanup = failed[-3:]
+    if cleanup != [
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db",
+                        "failure_maintenance", "probe_plain")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db",
+                        "failure_maintenance", "probe_custom")),
+            ("dropdb", ("--if-exists", "--force", "--maintenance-db",
+                        "failure_maintenance", "probe_source"))]:
+        raise AssertionError(f"failure cleanup lost maintenance database: {cleanup}")
+
+
 def main() -> int:
     benchmark_checks()
     jsonl_checks()
     pilot_check()
     release_policy_checks()
+    dump_restore_command_checks()
     return 0
 
 

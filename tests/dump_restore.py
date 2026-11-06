@@ -41,10 +41,12 @@ class Commands:
                         input_text=sql).stdout.strip()
 
     def drop(self, database: str) -> None:
-        self.run("dropdb", "--if-exists", "--force", identifier(database))
+        self.run("dropdb", "--if-exists", "--force", "--maintenance-db",
+                 self.maintenance, identifier(database))
 
     def create(self, database: str) -> None:
-        self.run("createdb", identifier(database))
+        self.run("createdb", "--maintenance-db", self.maintenance,
+                 identifier(database))
 
 
 def verify_restored(commands: Commands, database: str) -> None:

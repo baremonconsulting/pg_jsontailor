@@ -48,5 +48,6 @@ regardless of commit-message wording.
 - Corrected and tested the least-privilege contract for locking ETag-included referenced objects.
 - Aligned dependency-audit evidence with squash-merge release checks and clarified benchmark provenance equivalence.
 - Rejected unvalidated object and array foreign keys during view generation.
+- Forwarded the selected maintenance database through every dump/restore database lifecycle command.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
