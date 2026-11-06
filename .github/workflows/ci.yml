@@ -34,9 +34,9 @@ jobs:
       - name: Verify repository consistency
         run: |
           python3 tools/verify_repository_consistency.py
-          python3 bench/verify_results.py bench/reference/azure-06d0f00-pg17
-          python3 bench/verify_results.py bench/reference/azure-06d0f00-pg18
-          python3 bench/verify_results.py bench/reference/azure-06d0f00-pg19
+          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg17
+          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg18
+          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg19
           python3 bench/verify_results.py bench/reference/azure-11e6d74
           python3 bench/verify_results.py bench/reference/azure-afa643c
           python3 bench/verify_results.py bench/reference/azure-04d053e

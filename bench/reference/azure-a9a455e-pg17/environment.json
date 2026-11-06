@@ -1,5 +1,5 @@
 {
-  "run_id": "20261106T071016Z",
+  "run_id": "20261106T072513Z",
   "postgresql": "17.11 (Ubuntu 17.11-1.pgdg24.04+2)",
   "platform": "Linux-7.0.0-1017-azure-x86_64-with-glibc2.39",
   "cpu_count": 4,
@@ -24,11 +24,16 @@
   "repetitions": 30,
   "jit": "off",
   "parallel_gather_workers": 0,
-  "database": "pgjt_bench_06d0f00_pg17",
+  "database": "pgjt_bench_a9a455e_pg17",
   "pg_host": "/home/azureuser/pgjt26-clusters/pg17/socket",
   "pg_port": "56117",
   "pg_user": "azureuser",
   "backend_mode": "one persistent psql backend for all measurements",
-  "source_commit": "06d0f000a21d2e08aa14985e988800c325b33060",
-  "source_dirty": false
+  "source_commit": "a9a455ee64767d5a0af397fa37688665c046e48b",
+  "source_dirty": false,
+  "product_hashes": {
+    "sql/pg_jsontailor--0.2.0.sql": "3c994b62078d5f7eaf6674c9af912f752c7cc1267c4741cb27ed53be68484d12",
+    "pg_jsontailor.control": "745fb894b3d68051ef4c6e263616ba789d774eb7106c2c2ef00e1b49431f4051",
+    "Makefile": "0487a85f96024395bfa2030240ef08489ce80f35305137ddfc14156db33650d8"
+  }
 }
