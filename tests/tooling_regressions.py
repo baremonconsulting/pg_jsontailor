@@ -5,8 +5,11 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tempfile
 
 
@@ -29,6 +32,15 @@ def load_jsonl_verifier():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.verify
+
+
+def load_release_verifier():
+    path = ROOT / "tools/verify_release_candidate.py"
+    spec = importlib.util.spec_from_file_location("release_candidate_verifier", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -128,10 +140,123 @@ def pilot_check() -> None:
                 f"invalid response passed pilot acceptance: {response}/{observed}")
 
 
+def release_policy_checks() -> None:
+    verifier = load_release_verifier()
+    release = (ROOT / ".github/workflows/release.yml").read_text()
+    dependency = (ROOT / ".github/workflows/dependency-review.yml").read_text()
+    verifier.verify_release_policy(release, dependency)
+
+    start = release.index("required_checks=(")
+    end = release.index("\n          archive=", start)
+    gate = release[start:end]
+    gate = re.sub(
+        r"check_runs=\$\(gh api --paginate.*?@tsv'\)",
+        'check_runs="$PROBE_CHECK_RUNS"', gate, flags=re.DOTALL)
+    if "gh api" in gate:
+        raise AssertionError("release gate probe did not isolate the check loop")
+
+    def gate_status(rows: list[tuple[str, str, str]]) -> int:
+        value = "\n".join("\t".join(row) for row in rows)
+        return subprocess.run(
+            ["bash", "-ec", gate], text=True, capture_output=True,
+            env={**os.environ, "PROBE_CHECK_RUNS": value}).returncode
+
+    successful = [(name, "completed", "success")
+                  for name in verifier.EXACT_SHA_CHECKS]
+    if gate_status(successful):
+        raise AssertionError("complete exact-SHA release evidence was rejected")
+    for index, name in enumerate(verifier.EXACT_SHA_CHECKS):
+        if not gate_status(successful[:index] + successful[index + 1:]):
+            raise AssertionError(f"missing release check was accepted: {name}")
+        failed = list(successful)
+        failed[index] = (name, "completed", "failure")
+        if not gate_status(failed):
+            raise AssertionError(f"failed release check was accepted: {name}")
+        unfinished = list(successful)
+        unfinished[index] = (name, "in_progress", "")
+        if not gate_status(unfinished):
+            raise AssertionError(f"unfinished release check was accepted: {name}")
+
+    for changed_release, changed_dependency, expected in (
+        (release.replace("            'Dependency review'\n", ""), dependency,
+         "exact-SHA check list differs"),
+        (release, dependency.replace("  push:\n    branches: [main]\n", ""),
+         "does not run on main pushes"),
+        (release, dependency.replace("base-ref: ${{ github.event.before }}",
+                                     "base-ref: ${{ github.sha }}"),
+         "comparison range is not exact"),
+    ):
+        try:
+            verifier.verify_release_policy(changed_release, changed_dependency)
+        except RuntimeError as error:
+            if expected not in str(error):
+                raise AssertionError(f"unexpected release-policy rejection: {error}") from error
+        else:
+            raise AssertionError("invalid release policy was accepted")
+
+    def run(repo: Path, *args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=repo, text=True,
+                                capture_output=True, check=True)
+        return result.stdout.strip()
+
+    with tempfile.TemporaryDirectory(prefix="pgjt-release-policy-") as temporary:
+        repo = Path(temporary)
+        run(repo, "init", "-q")
+        run(repo, "config", "user.name", "Policy Test")
+        run(repo, "config", "user.email", "policy@example.invalid")
+        (repo / "sql").mkdir()
+        (repo / "sql/product.sql").write_text("SELECT 1;\n")
+        (repo / "pg_jsontailor.control").write_text("default_version = '0.2.0'\n")
+        (repo / "Makefile").write_text("all:\n\t@true\n")
+        run(repo, "add", ".")
+        run(repo, "commit", "-qm", "base")
+        base = run(repo, "rev-parse", "HEAD")
+        ok, _ = verifier.benchmark_source_status(repo, base, base)
+        if not ok:
+            raise AssertionError("exact benchmark source commit was rejected")
+
+        (repo / "README.md").write_text("documentation only\n")
+        run(repo, "add", "README.md")
+        run(repo, "commit", "-qm", "documentation")
+        docs = run(repo, "rev-parse", "HEAD")
+        ok, _ = verifier.benchmark_source_status(repo, base, docs)
+        if not ok:
+            raise AssertionError("product-equivalent benchmark ancestor was rejected")
+
+        for index, path in enumerate(verifier.PRODUCT_EQUIVALENCE_PATHS):
+            run(repo, "switch", "-qC", f"changed-{index}", base)
+            target = repo / path
+            if target.is_dir():
+                target = target / "product.sql"
+            target.write_text(target.read_text() + "# changed\n")
+            run(repo, "add", str(target.relative_to(repo)))
+            run(repo, "commit", "-qm", f"change {path}")
+            changed = run(repo, "rev-parse", "HEAD")
+            ok, detail = verifier.benchmark_source_status(repo, base, changed)
+            if ok or "product SQL changed" not in detail:
+                raise AssertionError(f"changed product input was accepted: {path}/{detail}")
+
+        ok, detail = verifier.benchmark_source_status(repo, "0" * 40, docs)
+        if ok or "absent" not in detail:
+            raise AssertionError(f"missing benchmark source was accepted: {detail}")
+        run(repo, "switch", "-q", "--orphan", "unrelated")
+        (repo / "sql").mkdir()
+        (repo / "sql/product.sql").write_text("SELECT 1;\n")
+        (repo / "pg_jsontailor.control").write_text("default_version = '0.2.0'\n")
+        (repo / "Makefile").write_text("all:\n\t@true\n")
+        run(repo, "add", ".")
+        run(repo, "commit", "-qm", "unrelated")
+        unrelated = run(repo, "rev-parse", "HEAD")
+        ok, detail = verifier.benchmark_source_status(repo, base, unrelated)
+        if ok or "not an ancestor" not in detail:
+            raise AssertionError(f"unrelated benchmark source was accepted: {detail}")
+
+
 def main() -> int:
     benchmark_checks()
     jsonl_checks()
     pilot_check()
+    release_policy_checks()
     return 0
 
 

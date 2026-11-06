@@ -2,7 +2,7 @@
 
 The included benchmark compares generated document views with direct relational SQL in the same PostgreSQL instance. It measures server execution time with prebuilt JSON payloads and rolls back every mutation.
 
-## Current reference environment
+## Last published reference environment
 
 - PostgreSQL 18.6;
 - Azure Linux x86-64;
@@ -12,7 +12,9 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The current reference run used commit `11e6d74fef237e8376a22e68b3f715e3fc3418fa`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. The complete [current evidence](../bench/reference/azure-11e6d74/) is versioned with this repository and passes the independent verifier.
+The last published reference run used commit `11e6d74fef237e8376a22e68b3f715e3fc3418fa`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. The complete [reference evidence](../bench/reference/azure-11e6d74/) is versioned with this repository and passes the independent artifact verifier.
+
+Release-candidate verification separately determines whether these measurements are transferable to a later candidate. The recorded commit must be an ancestor and `sql/`, `pg_jsontailor.control` and `Makefile` must be byte-identical through the candidate. If any defined product input changed, this run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
 
 An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). For 1,000 child items the final set-wise validation reduced median insert, root-only update, complete replacement, MERGE insert and MERGE update time by 69.0%, 67.7%, 58.9%, 69.1% and 59.3% respectively relative to that intermediate build. At zero and one child it adds roughly 8–25% to those paths; the optimization is intentionally targeted at larger arrays.
 

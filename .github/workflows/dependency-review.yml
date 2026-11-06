@@ -1,6 +1,8 @@
 name: Dependency review
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -15,8 +17,28 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
-      - name: Review dependency changes
+      - name: Validate main comparison range
+        if: github.event_name == 'push'
+        env:
+          BASE_REF: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          test "$BASE_REF" != '0000000000000000000000000000000000000000'
+          git cat-file -e "$BASE_REF^{commit}"
+
+      - name: Review pull request dependency changes
+        if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
+          fail-on-severity: moderate
+
+      - name: Review main dependency changes
+        if: github.event_name == 'push'
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          base-ref: ${{ github.event.before }}
+          head-ref: ${{ github.sha }}
           fail-on-severity: moderate

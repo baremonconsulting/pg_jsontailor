@@ -66,9 +66,13 @@ regeneration must occur in a controlled environment with the same schema and
 PostgreSQL major version, followed by catalogue and application smoke tests.
 
 Provide a pilot only from an immutable release tag. Archive the source, release
-notes and checksums. Do not label historical benchmark numbers as current;
-publish measurements only when their recorded source commit equals the tagged
-release and the independent verifier passes.
+notes and checksums. Do not label historical benchmark numbers as current.
+Measurements may support a tagged release only when their recorded source
+commit exists, is an ancestor of the tag, and `sql/`, `pg_jsontailor.control`
+and `Makefile` are byte-identical between that commit and the tag. The
+independent artifact and release-candidate verifiers must also pass. Preserve
+the actual measurement `source_commit`; never relabel an older run as if it
+were measured from the tag.
 
 Before go-live, confirm private security reporting through Baremon, named
 operational ownership, backups, monitoring and a tested rollback window.

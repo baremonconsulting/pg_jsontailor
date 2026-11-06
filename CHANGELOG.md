@@ -46,5 +46,6 @@ regardless of commit-message wording.
 - Preserved column ACLs during regeneration and rejected unmanaged view triggers or rules instead of silently dropping them.
 - Made UTC `timestamptz` JSON and ETag encoding injective and reversible across BC and AD eras.
 - Corrected and tested the least-privilege contract for locking ETag-included referenced objects.
+- Aligned dependency-audit evidence with squash-merge release checks and clarified benchmark provenance equivalence.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
