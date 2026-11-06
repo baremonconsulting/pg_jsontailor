@@ -12,11 +12,11 @@ The included benchmark compares generated document views with direct relational 
 - one persistent local session;
 - three warm-ups and 30 measured repetitions per group.
 
-The last published reference run used commit `11e6d74fef237e8376a22e68b3f715e3fc3418fa`. It completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. The complete [reference evidence](../bench/reference/azure-11e6d74/) is versioned with this repository and passes the independent artifact verifier.
+The current release-candidate measurements used commit `a9a455ee64767d5a0af397fa37688665c046e48b`. PostgreSQL 17.11, 18.6 and 19rc1 each completed 2,640 of 2,640 measurements with PASS status across 40 groups, including native MERGE actions. The PostgreSQL 18 [reference evidence](../bench/reference/azure-a9a455e-pg18/) is the published performance reference; the matching [PostgreSQL 17](../bench/reference/azure-a9a455e-pg17/) and [PostgreSQL 19](../bench/reference/azure-a9a455e-pg19/) evidence records cross-version behaviour on the same Azure VM. All three sets pass the independent artifact verifier.
 
-Release-candidate verification separately determines whether these measurements are transferable to a later candidate. The recorded commit must be an ancestor and `sql/`, `pg_jsontailor.control` and `Makefile` must be byte-identical through the candidate. If any defined product input changed, this run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
+Release-candidate verification separately determines whether these measurements are transferable to a later candidate. New evidence records SHA-256 fingerprints for every file under `sql/`, `pg_jsontailor.control` and `Makefile`; the candidate must have the identical fingerprint set. This remains valid after a reviewed squash merge even when the measured feature commit is no longer an ancestor or locally reachable. Older evidence without fingerprints retains the stricter ancestor-and-byte-identity rule. If any defined product input changed, the run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
 
-An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). For 1,000 child items the final set-wise validation reduced median insert, root-only update, complete replacement, MERGE insert and MERGE update time by 69.0%, 67.7%, 58.9%, 69.1% and 59.3% respectively relative to that intermediate build. At zero and one child it adds roughly 8–25% to those paths; the optimization is intentionally targeted at larger arrays.
+An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). Compared with the completed set-wise build at [`11e6d74`](../bench/reference/azure-11e6d74/), 1,000-child median insert, root-only update, complete replacement, MERGE insert and MERGE update time fell by 69.0%, 67.7%, 58.9%, 69.1% and 59.3%. At zero and one child that optimization adds roughly 8–25% to those paths; it is intentionally targeted at larger arrays. These percentages describe the two named historical builds, not the current reference.
 
 The earlier `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8` run predates strict type conversion, current catalogue guards, `timestamptz` normalization and lifecycle tooling. Its [historical evidence](../bench/reference/azure-04d053e/) remains reproducible but is not semantically equivalent to the current write path.
 
@@ -24,13 +24,13 @@ The earlier `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8` run predates strict type 
 
 | Items | Operation | Median | p95 | Direct SQL median |
 | ---: | --- | ---: | ---: | ---: |
-| 10 | complete replacement | 2.758 ms | 2.817 ms | 0.133 ms |
-| 100 | complete replacement | 7.533 ms | 7.641 ms | 0.523 ms |
-| 1,000 | read | 4.270 ms | 4.311 ms | 2.883 ms |
-| 1,000 | insert | 32.208 ms | 32.520 ms | 6.277 ms |
-| 1,000 | root-only update | 34.642 ms | 34.951 ms | 0.048 ms |
-| 1,000 | complete replacement | 50.471 ms | 50.876 ms | 6.066 ms |
-| 1,000 | ETag-checked delete | 13.256 ms | 13.961 ms | 2.317 ms |
+| 10 | complete replacement | 2.791 ms | 2.853 ms | 0.129 ms |
+| 100 | complete replacement | 7.716 ms | 7.922 ms | 0.522 ms |
+| 1,000 | read | 4.230 ms | 4.284 ms | 3.004 ms |
+| 1,000 | insert | 35.112 ms | 35.377 ms | 9.530 ms |
+| 1,000 | root-only update | 34.067 ms | 34.358 ms | 0.061 ms |
+| 1,000 | complete replacement | 48.725 ms | 49.277 ms | 5.902 ms |
+| 1,000 | ETag-checked delete | 12.354 ms | 12.692 ms | 2.171 ms |
 
 ## Native MERGE result
 
@@ -38,18 +38,18 @@ The MERGE groups execute native PostgreSQL MERGE against both the generated docu
 
 | Items | MERGE action | Median | p95 | Relational MERGE median |
 | ---: | --- | ---: | ---: | ---: |
-| 0 | INSERT | 1.216 ms | 1.267 ms | 0.086 ms |
-| 0 | UPDATE | 1.371 ms | 1.407 ms | 0.055 ms |
-| 0 | ETag-checked DELETE | 0.686 ms | 0.873 ms | 0.085 ms |
-| 10 | INSERT | 1.737 ms | 1.792 ms | 0.303 ms |
-| 10 | UPDATE | 2.808 ms | 2.882 ms | 0.136 ms |
-| 10 | ETag-checked DELETE | 0.915 ms | 0.932 ms | 0.098 ms |
-| 100 | INSERT | 4.809 ms | 4.915 ms | 0.975 ms |
-| 100 | UPDATE | 7.693 ms | 8.134 ms | 0.510 ms |
-| 100 | ETag-checked DELETE | 2.114 ms | 2.162 ms | 0.154 ms |
-| 1,000 | INSERT | 32.229 ms | 32.560 ms | 7.139 ms |
-| 1,000 | UPDATE | 49.282 ms | 49.664 ms | 6.054 ms |
-| 1,000 | ETag-checked DELETE | 17.798 ms | 19.929 ms | 3.154 ms |
+| 0 | INSERT | 1.206 ms | 1.241 ms | 0.086 ms |
+| 0 | UPDATE | 1.394 ms | 1.426 ms | 0.055 ms |
+| 0 | ETag-checked DELETE | 0.661 ms | 0.693 ms | 0.079 ms |
+| 10 | INSERT | 1.788 ms | 1.844 ms | 0.296 ms |
+| 10 | UPDATE | 2.756 ms | 2.791 ms | 0.137 ms |
+| 10 | ETag-checked DELETE | 0.998 ms | 1.047 ms | 0.093 ms |
+| 100 | INSERT | 4.952 ms | 5.087 ms | 1.119 ms |
+| 100 | UPDATE | 7.486 ms | 7.635 ms | 0.522 ms |
+| 100 | ETag-checked DELETE | 2.143 ms | 2.169 ms | 0.163 ms |
+| 1,000 | INSERT | 31.526 ms | 31.855 ms | 6.633 ms |
+| 1,000 | UPDATE | 51.020 ms | 51.485 ms | 6.111 ms |
+| 1,000 | ETag-checked DELETE | 19.254 ms | 19.798 ms | 3.305 ms |
 
 Read medians remain close to the historical build. Write medians must not be compared as if the contracts were identical: the current path adds strict JSON type and lossless numeric checks, statement-level schema guards, deterministic `timestamptz` rendering and stronger lifecycle metadata. Use the intermediate optimization run above to evaluate the set-wise validation change in isolation.
 

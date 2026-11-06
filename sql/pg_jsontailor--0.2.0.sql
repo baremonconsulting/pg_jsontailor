@@ -266,7 +266,7 @@ BEGIN
     IF cardinality(cols)=0 THEN EXECUTE format('INSERT INTO %%I.%%I DEFAULT VALUES RETURNING %%I',%L,%L,%L) INTO root_id;
     ELSE
       SELECT string_agg(format('%%I %%s',a.attname,format_type(a.atttypid,a.atttypmod)),',' ORDER BY u.ord) INTO record_def FROM unnest(cols) WITH ORDINALITY u(name,ord) JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=u.name AND a.attnum>0 AND NOT a.attisdropped;
-      EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source %%I.%%I */ RETURNING %%I',%L,%L,(SELECT string_agg(quote_ident(x),',') FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',') FROM unnest(cols)x),record_def,%L,%L,%L) USING map INTO root_id;
+      EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source_hex %%s.%%s */ RETURNING %%I',%L,%L,(SELECT string_agg(quote_ident(x),',') FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',') FROM unnest(cols)x),record_def,encode(convert_to(%L,'UTF8'),'hex'),encode(convert_to(%L,'UTF8'),'hex'),%L) USING map INTO root_id;
     END IF;
     idj:=to_jsonb(root_id);
     IF cfg?'array' THEN
@@ -295,7 +295,7 @@ BEGIN
           cols:=ARRAY[cfg#>>'{array,parent_fk}'];map:=jsonb_build_object(cfg#>>'{array,parent_fk}',idj);
           FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP IF el?bad THEN cols:=array_append(cols,keyj#>>'{}');map:=map||jsonb_build_object(keyj#>>'{}',el->bad); END IF; END LOOP;
           SELECT string_agg(format('%%I %%s',a.attname,format_type(a.atttypid,a.atttypmod)),',' ORDER BY u.ord) INTO record_def FROM unnest(cols) WITH ORDINALITY u(name,ord) JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=u.name AND a.attnum>0 AND NOT a.attisdropped;
-          EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source %%I.%%I */',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,%L,%L) USING map;
+          EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source_hex %%s.%%s */',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,encode(convert_to(%L,'UTF8'),'hex'),encode(convert_to(%L,'UTF8'),'hex')) USING map;
         END LOOP;
       END IF;
     END IF;
@@ -304,6 +304,7 @@ BEGIN
     root_id:=OLD._id;doc:=NEW.data;IF NEW._id IS DISTINCT FROM OLD._id OR jsonb_typeof(doc)<>'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
     SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod) INTO sql_kind,sql_type FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=cfg#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
     IF jsonb_typeof(doc->'_id') IS DISTINCT FROM sql_kind THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
+    IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->'_id';IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id loses precision in the mapped SQL type';END IF;END IF;
     EXECUTE format('SELECT x.v IS DISTINCT FROM $2 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->'_id',OLD._id;
     IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='invalid document identity';END IF;
     SELECT x INTO bad FROM jsonb_object_keys(doc)x WHERE x<>ALL(ARRAY['_id','_metadata']||ARRAY(SELECT key FROM jsonb_each(cfg#>'{root,fields}'))||CASE WHEN cfg?'object' THEN ARRAY[cfg#>>'{object,name}'] ELSE ARRAY[]::text[] END||CASE WHEN cfg?'array' THEN ARRAY[cfg#>>'{array,name}'] ELSE ARRAY[]::text[] END) LIMIT 1;
@@ -363,7 +364,7 @@ BEGIN
       IF cfg?'object' AND doc->(cfg#>>'{object,name}') IS DISTINCT FROM cur->(cfg#>>'{object,name}') THEN cols:=array_append(cols,cfg#>>'{object,root_fk}');map:=map||jsonb_build_object(cfg#>>'{object,root_fk}',doc#>ARRAY[cfg#>>'{object,name}',%L]);END IF;
       IF cardinality(cols)>0 THEN
         SELECT string_agg(format('%%I %%s',a.attname,format_type(a.atttypid,a.atttypmod)),',' ORDER BY u.ord) INTO record_def FROM unnest(cols) WITH ORDINALITY u(name,ord) JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=u.name AND a.attnum>0 AND NOT a.attisdropped;
-        EXECUTE format('UPDATE %%I.%%I t SET (%%s)=(SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source %%I.%%I */) WHERE t.%%I=$2',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,%L,%L,%L) USING map,root_id;
+        EXECUTE format('UPDATE %%I.%%I t SET (%%s)=(SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source_hex %%s.%%s */) WHERE t.%%I=$2',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,encode(convert_to(%L,'UTF8'),'hex'),encode(convert_to(%L,'UTF8'),'hex'),%L) USING map,root_id;
       ELSE EXECUTE format('UPDATE %%I.%%I SET %%I=%%I WHERE %%I=$1',%L,%L,%L,%L,%L) USING root_id;END IF;
       GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root update denied';END IF;
       -- Array reconciliation is key based and never rewrites unchanged elements.
@@ -431,7 +432,7 @@ BEGIN
           FOR el IN SELECT value FROM jsonb_array_elements(doc->(cfg#>>'{array,name}')) WHERE NOT value?bad LOOP
             cols:=ARRAY[cfg#>>'{array,parent_fk}'];map:=jsonb_build_object(cfg#>>'{array,parent_fk}',to_jsonb(OLD._id));FOR bad,idj IN SELECT key,value FROM jsonb_each(cfg#>'{array,fields}') LOOP IF el?bad THEN cols:=array_append(cols,idj#>>'{}');map:=map||jsonb_build_object(idj#>>'{}',el->bad);END IF;END LOOP;
             SELECT string_agg(format('%%I %%s',a.attname,format_type(a.atttypid,a.atttypmod)),',' ORDER BY u.ord) INTO record_def FROM unnest(cols) WITH ORDINALITY u(name,ord) JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=u.name AND a.attnum>0 AND NOT a.attisdropped;
-            EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source %%I.%%I */',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2]) USING map;
+            EXECUTE format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source_hex %%s.%%s */',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,encode(convert_to((parse_ident(cfg#>>'{array,table}'))[1],'UTF8'),'hex'),encode(convert_to((parse_ident(cfg#>>'{array,table}'))[2],'UTF8'),'hex')) USING map;
           END LOOP;
         END IF;
         END IF;

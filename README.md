@@ -187,8 +187,8 @@ Every push to `main` and every pull request targeting `main` runs the installati
 ## Performance
 
 The write path uses set-based array reconciliation and set-wise validation.
-The last published Azure reference at commit `11e6d74` records a 50.471 ms
-median and 50.876 ms p95 for complete replacement of a document with 1,000
+The current Azure reference at commit `a9a455e` records a 48.725 ms
+median and 49.277 ms p95 for complete replacement of a document with 1,000
 children. It is current release evidence only when the release-candidate
 verifier proves product equivalence with the candidate. Results are
 host-specific and do not represent a production SLO. See

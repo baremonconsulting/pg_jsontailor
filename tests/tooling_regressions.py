@@ -222,6 +222,9 @@ def release_policy_checks() -> None:
         run(repo, "add", ".")
         run(repo, "commit", "-qm", "base")
         base = run(repo, "rev-parse", "HEAD")
+        fingerprints = verifier.product_hashes(repo, base)
+        if not fingerprints:
+            raise AssertionError("product fingerprints were not produced")
         ok, _ = verifier.benchmark_source_status(repo, base, base)
         if not ok:
             raise AssertionError("exact benchmark source commit was rejected")
@@ -247,7 +250,7 @@ def release_policy_checks() -> None:
             if ok or "product SQL changed" not in detail:
                 raise AssertionError(f"changed product input was accepted: {path}/{detail}")
 
-        ok, detail = verifier.benchmark_source_status(repo, "0" * 40, docs)
+        ok, detail = verifier.benchmark_source_status(repo, "2" * 40, docs)
         if ok or "absent" not in detail:
             raise AssertionError(f"missing benchmark source was accepted: {detail}")
         run(repo, "switch", "-q", "--orphan", "unrelated")
@@ -261,6 +264,26 @@ def release_policy_checks() -> None:
         ok, detail = verifier.benchmark_source_status(repo, base, unrelated)
         if ok or "not an ancestor" not in detail:
             raise AssertionError(f"unrelated benchmark source was accepted: {detail}")
+        ok, detail = verifier.benchmark_source_status(
+            repo, base, unrelated, recorded_hashes=fingerprints)
+        if not ok:
+            raise AssertionError(
+                f"product-equivalent squash fingerprint was rejected: {detail}")
+        ok, detail = verifier.benchmark_source_status(
+            repo, "1" * 40, unrelated, recorded_hashes=fingerprints)
+        if not ok:
+            raise AssertionError(
+                f"unreachable squash source fingerprint was rejected: {detail}")
+
+        (repo / "sql/product.sql").write_text("SELECT 2;\n")
+        run(repo, "add", "sql/product.sql")
+        run(repo, "commit", "-qm", "squash product change")
+        changed_squash = run(repo, "rev-parse", "HEAD")
+        ok, detail = verifier.benchmark_source_status(
+            repo, base, changed_squash, recorded_hashes=fingerprints)
+        if ok or "product SQL changed" not in detail:
+            raise AssertionError(
+                f"changed squash product input was accepted: {detail}")
 
 
 def dump_restore_command_checks() -> None:
