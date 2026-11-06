@@ -1608,6 +1608,115 @@ ALTER VIEW jt_binding_scope.root_documents__root_binding OWNER TO {binding_owner
            f"{missing_binding_regeneration.returncode}/{restored_binding}")
     cleanup_binding_owner_role()
 
+    db.run("""DROP SCHEMA IF EXISTS jt_nonfinite CASCADE;
+CREATE SCHEMA jt_nonfinite;
+CREATE TABLE jt_nonfinite.reference(id numeric PRIMARY KEY,label text);
+CREATE TABLE jt_nonfinite.root(
+  id numeric PRIMARY KEY,ref_id numeric REFERENCES jt_nonfinite.reference(id),
+  amount numeric,limited numeric(12,2),int_value integer);
+CREATE TABLE jt_nonfinite.child(
+  id numeric PRIMARY KEY,parent numeric REFERENCES jt_nonfinite.root(id),
+  position integer,amount numeric);
+INSERT INTO jt_nonfinite.reference VALUES('-Infinity','negative infinity'),('NaN','not a number');
+INSERT INTO jt_nonfinite.root VALUES('NaN','-Infinity','Infinity','NaN',1);
+INSERT INTO jt_nonfinite.child VALUES('Infinity','NaN',1,'NaN');""")
+    nonfinite_spec = {
+        "root": {"table": "jt_nonfinite.root", "key": "id",
+                 "fields": {"amount": "amount", "limited": "limited",
+                            "intValue": "int_value"},
+                 "insert": True, "update": True},
+        "object": {"name": "reference", "table": "jt_nonfinite.reference",
+                   "key": "id", "root_fk": "ref_id",
+                   "fields": {"id": "id", "label": "label"}},
+        "array": {"name": "items", "table": "jt_nonfinite.child", "key": "id",
+                  "parent_fk": "parent", "order_by": "position",
+                  "fields": {"id": "id", "amount": "amount"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_nonfinite.documents", nonfinite_spec)
+    direct_document = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='NaN'::numeric;"))
+    direct_etag = direct_document["_metadata"]["etag"]
+    direct_roundtrip = db.run("UPDATE jt_nonfinite.documents SET data=data "
+                              "WHERE _id='NaN'::numeric RETURNING data::text;", False)
+    direct_after = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='NaN'::numeric;"))
+    inserted_document = {
+        "_id": "Infinity", "amount": "-Infinity", "limited": "NaN", "intValue": 2,
+        "reference": {"id": "NaN", "label": "not a number"},
+        "items": [{"id": "-Infinity", "amount": "Infinity"}]}
+    inserted = db.run("INSERT INTO jt_nonfinite.documents(data) VALUES(" +
+                      quote(json.dumps(inserted_document)) + "::jsonb) RETURNING data::text;", False)
+    inserted_after = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='Infinity'::numeric;"))
+    inserted_roundtrip = db.run("UPDATE jt_nonfinite.documents SET data=data "
+                                "WHERE _id='Infinity'::numeric;", False)
+    invalid_states = []
+    for path, value in (("amount", "nan"), ("amount", "1"),
+                        ("limited", "Infinity"), ("intValue", "NaN"),
+                        ("itemAmount", "+Infinity"),
+                        ("_id", "1")):
+        invalid = json.loads(json.dumps(inserted_after))
+        if path == "itemAmount":
+            invalid["items"][0]["amount"] = value
+        else:
+            invalid[path] = value
+        result = db.run("UPDATE jt_nonfinite.documents SET data=" +
+                        quote(json.dumps(invalid)) +
+                        "::jsonb WHERE _id='Infinity'::numeric;", False)
+        invalid_states.append(db.state(result))
+    invalid_insert = json.loads(json.dumps(inserted_document))
+    invalid_insert["_id"] = "inf"
+    invalid_insert_result = db.run(
+        "INSERT INTO jt_nonfinite.documents(data) VALUES(" +
+        quote(json.dumps(invalid_insert)) + "::jsonb);", False)
+    db.run("UPDATE jt_nonfinite.root SET amount='-Infinity' WHERE id='NaN'::numeric;")
+    stale_nonfinite = db.run(
+        "UPDATE jt_nonfinite.documents SET data=" + quote(json.dumps(direct_document)) +
+        "::jsonb WHERE _id='NaN'::numeric;", False)
+    db.run("UPDATE jt_nonfinite.root SET amount='Infinity' WHERE id='NaN'::numeric;")
+    merge_update = db.run(
+        "MERGE INTO jt_nonfinite.documents d USING (VALUES ('NaN'::numeric," +
+        quote(json.dumps(direct_after)) + "::jsonb)) s(id,data) ON d._id=s.id "
+        "WHEN MATCHED THEN UPDATE SET data=s.data;", False)
+    merge_document = {
+        "_id": "-Infinity", "amount": "NaN", "limited": "NaN", "intValue": 3,
+        "reference": {"id": "-Infinity", "label": "negative infinity"},
+        "items": [{"id": "NaN", "amount": "-Infinity"}]}
+    merge_insert = db.run(
+        "MERGE INTO jt_nonfinite.documents d USING (VALUES ('-Infinity'::numeric," +
+        quote(json.dumps(merge_document)) + "::jsonb)) s(id,data) ON d._id=s.id "
+        "WHEN NOT MATCHED THEN INSERT(data) VALUES(s.data);", False)
+    final_nonfinite = db.value("""SELECT count(*)::text||':'||
+      (SELECT amount::text FROM jt_nonfinite.root WHERE id='Infinity'::numeric)||':'||
+      (SELECT int_value::text FROM jt_nonfinite.root WHERE id='Infinity'::numeric)||':'||
+      (SELECT amount::text FROM jt_nonfinite.child WHERE id='-Infinity'::numeric)
+      FROM jt_nonfinite.root;""")
+    record("non-finite numeric values use canonical reversible document strings",
+           direct_document["_id"] == "NaN"
+           and direct_document["amount"] == "Infinity"
+           and direct_document["limited"] == "NaN"
+           and direct_document["reference"]["id"] == "-Infinity"
+           and direct_document["items"][0]["id"] == "Infinity"
+           and direct_document["items"][0]["amount"] == "NaN"
+           and direct_roundtrip.returncode == 0
+           and direct_after["_metadata"]["etag"] == direct_etag
+           and inserted.returncode == 0 and inserted_roundtrip.returncode == 0
+           and inserted_after["_id"] == "Infinity"
+           and inserted_after["amount"] == "-Infinity"
+           and inserted_after["reference"]["id"] == "NaN"
+           and inserted_after["items"][0]["id"] == "-Infinity"
+           and inserted_after["items"][0]["amount"] == "Infinity"
+           and invalid_states == ["PT422"] * 6
+           and db.state(invalid_insert_result) == "PT422"
+           and db.state(stale_nonfinite) == "PT412"
+           and merge_update.returncode == 0 and merge_insert.returncode == 0
+           and final_nonfinite == "3:-Infinity:2:Infinity",
+           f"direct={direct_roundtrip.returncode}/{direct_after},insert="
+           f"{inserted.returncode}/{inserted_roundtrip.returncode}/{inserted_after},"
+           f"invalid={invalid_states}/{db.state(invalid_insert_result)},"
+           f"stale={db.state(stale_nonfinite)},merge="
+           f"{merge_update.returncode}/{merge_insert.returncode},final={final_nonfinite}")
+
     inventory_attacker = "jt_inventory_attacker"
     cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)
     db.run(f"""DROP SCHEMA IF EXISTS jt_inventory_untrusted CASCADE;

@@ -22,6 +22,7 @@ regardless of commit-message wording.
 - Added PostgreSQL 17, 18 and 19 compatibility and continuous-test coverage.
 - Documented and tested native SQL MERGE for insert, complete replacement, ETag-checked delete and DO NOTHING actions.
 - Added post-lock ETag validation for direct SQL and MERGE delete actions.
+- Added reversible document round-trips for PostgreSQL non-finite `numeric` values.
 - Documented and tested inline complete-document construction from ID, ETag and changed values.
 - Bound generated write paths to the physical source attributes selected by the view.
 - Made binding guards reject mapped column-name permutations without depending on rendered view definitions or `quote_all_identifiers`.

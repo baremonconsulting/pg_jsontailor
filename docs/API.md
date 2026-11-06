@@ -65,7 +65,8 @@ Field names must match `^[A-Za-z][A-Za-z0-9_]{0,62}$`. `_id` and `_metadata` are
 | PostgreSQL type | Required JSON type |
 |---|---|
 | `text`, `varchar`, `bpchar` | string |
-| `int2`, `int4`, `int8`, `numeric` | number |
+| `int2`, `int4`, `int8` | number |
+| `numeric` | number; canonical strings `NaN`, `Infinity` and `-Infinity` for non-finite values |
 | `boolean` | boolean |
 | `date`, `timestamp`, `timestamptz`, `uuid` | string |
 
