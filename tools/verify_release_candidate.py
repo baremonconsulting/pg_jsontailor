@@ -12,7 +12,7 @@ from typing import Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = ROOT / "bench/reference/azure-11e6d74"
+REFERENCE = ROOT / "bench/reference/azure-06d0f00-pg18"
 PRODUCT_EQUIVALENCE_PATHS = ("sql", "pg_jsontailor.control", "Makefile")
 EXACT_SHA_CHECKS = (
     "Repository checks", "PostgreSQL 17", "PostgreSQL 18", "PostgreSQL 19",
