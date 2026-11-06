@@ -663,7 +663,9 @@ AS $regenerator$
 DECLARE
   vp text[]; target oid; target_owner oid; description text; metadata jsonb; specification jsonb;
   r record; command text; restore_commands text[]:=ARRAY[]::text[]; revoke_principals text[]:=ARRAY['PUBLIC'];
-  generated_names text[]; generated_name text; dependent text; unmanaged text; ddl text; root_key_oid oid;
+  generated_names text[]; generated_name text; binding_roles text[]:=ARRAY['root']; binding_role text;
+  binding_oid oid; binding_owner oid; binding_kind "char"; source_oid oid;
+  dependent text; unmanaged text; ddl text; root_key_oid oid;
 BEGIN
   IF view_name IS NULL THEN
     RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='view_name must not be SQL NULL';
@@ -701,6 +703,34 @@ BEGIN
   IF specification IS NULL OR jsonb_typeof(specification)<>'object' THEN
     RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='duality view specification is missing';
   END IF;
+  IF specification?'object' THEN binding_roles:=array_append(binding_roles,'object'); END IF;
+  IF specification?'array' THEN binding_roles:=array_append(binding_roles,'array'); END IF;
+
+  FOREACH binding_role IN ARRAY binding_roles LOOP
+    generated_name:=vp[2]||'__'||binding_role||'_binding';
+    source_oid:=to_regclass(specification#>>ARRAY[binding_role,'table']);
+    SELECT c.oid,c.relowner,c.relkind INTO binding_oid,binding_owner,binding_kind
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=vp[1] AND c.relname=generated_name;
+    IF binding_oid IS NULL THEN CONTINUE; END IF;
+    IF binding_kind<>'v' OR binding_owner<>target_owner OR source_oid IS NULL
+       OR NOT EXISTS(
+         SELECT 1 FROM pg_rewrite rw JOIN pg_depend d
+           ON d.classid='pg_rewrite'::regclass AND d.objid=rw.oid
+          AND d.refclassid='pg_class'::regclass
+         WHERE rw.ev_class=binding_oid AND d.refobjid=source_oid)
+       OR EXISTS(
+         SELECT 1 FROM pg_rewrite rw JOIN pg_depend d
+           ON d.classid='pg_rewrite'::regclass AND d.objid=rw.oid
+          AND d.refclassid='pg_class'::regclass
+         WHERE rw.ev_class=binding_oid
+           AND d.refobjid<>binding_oid AND d.refobjid<>source_oid)
+    THEN
+      RAISE EXCEPTION USING ERRCODE='2BP01',
+        MESSAGE='binding collision prevents safe regeneration',
+        DETAIL=format('%I.%I',vp[1],generated_name);
+    END IF;
+  END LOOP;
   SELECT a.atttypid INTO root_key_oid
   FROM pg_attribute a
   WHERE a.attrelid=to_regclass(specification#>>'{root,table}')
@@ -827,7 +857,8 @@ BEGIN
 
   ddl:=jsontailor.duality_view_ddl(format('%I.%I',vp[1],vp[2]),specification);
   EXECUTE format('DROP VIEW %I.%I',vp[1],vp[2]);
-  FOREACH generated_name IN ARRAY ARRAY[vp[2]||'__root_binding',vp[2]||'__object_binding',vp[2]||'__array_binding'] LOOP
+  FOREACH binding_role IN ARRAY binding_roles LOOP
+    generated_name:=vp[2]||'__'||binding_role||'_binding';
     EXECUTE format('DROP VIEW IF EXISTS %I.%I',vp[1],generated_name);
   END LOOP;
   FOR r IN

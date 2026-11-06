@@ -114,6 +114,9 @@ is otherwise `OK`.
 normalised specification, rejects dependent relations and unmanaged view
 triggers or rules, generates and validates replacement DDL before dropping
 anything, and replaces the generated objects inside the caller's transaction.
+Only binding views for source roles configured in the stored specification are
+replaced. Objects using optional binding names for absent roles are left intact;
+an incompatible object at a configured binding name blocks regeneration.
 Direct owner-issued relation and column grants, including grant options,
 generated-function grants and generated-function comments are restored.
 Delegated grant chains are rejected before replacement because replaying them

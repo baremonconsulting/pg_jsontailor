@@ -1498,6 +1498,116 @@ REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {lifecycle_role
     cleanup_delegated_grantee()
     cleanup_delegated_grantor()
 
+    db.run("""DROP SCHEMA IF EXISTS jt_binding_scope CASCADE;
+CREATE SCHEMA jt_binding_scope;
+CREATE TABLE jt_binding_scope.root_only(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_scope.decoy(id integer PRIMARY KEY,label text);
+INSERT INTO jt_binding_scope.root_only VALUES(1,'root');
+INSERT INTO jt_binding_scope.decoy VALUES(9,'decoy');
+CREATE TABLE jt_binding_scope.object_source(id integer PRIMARY KEY,label text);
+INSERT INTO jt_binding_scope.object_source VALUES(1,'object');
+CREATE TABLE jt_binding_scope.root_object(
+  id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding_scope.object_source(id),label text);
+INSERT INTO jt_binding_scope.root_object VALUES(1,1,'root-object');
+CREATE TABLE jt_binding_scope.root_array(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_scope.array_source(
+  id integer PRIMARY KEY,parent integer REFERENCES jt_binding_scope.root_array(id),
+  position integer,label text);
+INSERT INTO jt_binding_scope.root_array VALUES(1,'root-array');
+INSERT INTO jt_binding_scope.array_source VALUES(1,1,1,'child');""")
+    root_only_spec = {"root": {"table": "jt_binding_scope.root_only", "key": "id",
+                                "fields": {"label": "label"}, "update": True}}
+    root_object_spec = {
+        "root": {"table": "jt_binding_scope.root_object", "key": "id",
+                 "fields": {"label": "label"}},
+        "object": {"name": "reference", "table": "jt_binding_scope.object_source",
+                   "key": "id", "root_fk": "ref_id",
+                   "fields": {"id": "id", "label": "label"}}}
+    root_array_spec = {
+        "root": {"table": "jt_binding_scope.root_array", "key": "id",
+                 "fields": {"label": "label"}},
+        "array": {"name": "items", "table": "jt_binding_scope.array_source",
+                  "key": "id", "parent_fk": "parent", "order_by": "position",
+                  "fields": {"id": "id", "label": "label"}}}
+    create_view(db, "jt_binding_scope.root_documents", root_only_spec)
+    create_view(db, "jt_binding_scope.object_documents", root_object_spec)
+    create_view(db, "jt_binding_scope.array_documents", root_array_spec)
+    db.run("""CREATE VIEW jt_binding_scope.root_documents__object_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.root_documents__array_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.object_documents__array_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.array_documents__object_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;""")
+    optional_before = db.value("""SELECT string_agg(c.relname||':'||c.oid::text||':'||
+      pg_get_viewdef(c.oid,true),';' ORDER BY c.relname)
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='jt_binding_scope' AND c.relname IN
+        ('root_documents__object_binding','root_documents__array_binding',
+         'object_documents__array_binding','array_documents__object_binding');""")
+    optional_regenerations = [db.run(
+        f"SELECT jsontailor.regenerate_duality_view('jt_binding_scope.{name}');", False)
+        for name in ("root_documents", "object_documents", "array_documents")]
+    optional_after = db.value("""SELECT string_agg(c.relname||':'||c.oid::text||':'||
+      pg_get_viewdef(c.oid,true),';' ORDER BY c.relname)
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='jt_binding_scope' AND c.relname IN
+        ('root_documents__object_binding','root_documents__array_binding',
+         'object_documents__array_binding','array_documents__object_binding');""")
+
+    root_documents_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("""DROP VIEW jt_binding_scope.root_documents__root_binding;
+CREATE VIEW jt_binding_scope.root_documents__root_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;""")
+    wrong_source_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_source_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("""DROP VIEW jt_binding_scope.root_documents__root_binding;
+CREATE TABLE jt_binding_scope.root_documents__root_binding(id integer);""")
+    wrong_kind_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_kind_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("DROP TABLE jt_binding_scope.root_documents__root_binding;")
+    binding_owner_role = "jt_binding_owner_role"
+    cleanup_binding_owner_role = role_cleanup(db, binding_owner_role)
+    db.run(f"""CREATE ROLE {binding_owner_role} NOLOGIN;
+CREATE VIEW jt_binding_scope.root_documents__root_binding AS
+  SELECT id,label FROM jt_binding_scope.root_only WHERE false;
+ALTER VIEW jt_binding_scope.root_documents__root_binding OWNER TO {binding_owner_role};""")
+    wrong_owner_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_owner_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("DROP VIEW jt_binding_scope.root_documents__root_binding;")
+    missing_binding_regeneration = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    restored_binding = db.value(
+        "SELECT to_regclass('jt_binding_scope.root_documents__root_binding') IS NOT NULL;")
+    record("regeneration scopes binding cleanup to configured source roles",
+           all(result.returncode == 0 for result in optional_regenerations)
+           and optional_after == optional_before
+           and db.state(wrong_source_block) == "2BP01"
+           and db.state(wrong_kind_block) == "2BP01"
+           and db.state(wrong_owner_block) == "2BP01"
+           and wrong_source_oid == root_documents_oid
+           and wrong_kind_oid == root_documents_oid
+           and wrong_owner_oid == root_documents_oid
+           and missing_binding_regeneration.returncode == 0
+           and restored_binding == "t",
+           f"optional={[r.returncode for r in optional_regenerations]}/"
+           f"{optional_after == optional_before},collisions="
+           f"{db.state(wrong_source_block)}/{db.state(wrong_kind_block)}/"
+           f"{db.state(wrong_owner_block)},oids="
+           f"{wrong_source_oid == root_documents_oid}/"
+           f"{wrong_kind_oid == root_documents_oid}/"
+           f"{wrong_owner_oid == root_documents_oid},missing="
+           f"{missing_binding_regeneration.returncode}/{restored_binding}")
+    cleanup_binding_owner_role()
+
     inventory_attacker = "jt_inventory_attacker"
     cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)
     db.run(f"""DROP SCHEMA IF EXISTS jt_inventory_untrusted CASCADE;
