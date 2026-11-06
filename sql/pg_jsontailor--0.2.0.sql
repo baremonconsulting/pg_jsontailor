@@ -886,6 +886,74 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='unmanaged rules prevent safe regeneration',DETAIL=unmanaged;
   END IF;
 
+  generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
+                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
+  SELECT string_agg(item,', ' ORDER BY item) INTO unmanaged
+  FROM (
+    SELECT format('table %I.%I',vp[1],vp[2]) item
+    FROM pg_class c
+    WHERE c.oid=target AND EXISTS(
+      (SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner)))
+       WHERE grantee=c.relowner
+       EXCEPT
+       SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(acldefault('r',c.relowner)) WHERE grantee=c.relowner)
+      UNION ALL
+      (SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(acldefault('r',c.relowner)) WHERE grantee=c.relowner
+       EXCEPT
+       SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner)))
+       WHERE grantee=c.relowner))
+    UNION ALL
+    SELECT format('column %I.%I.%I',vp[1],vp[2],a.attname)
+    FROM pg_attribute a
+    WHERE a.attrelid=target AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(
+      (SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(coalesce(a.attacl,acldefault('c',target_owner)))
+       WHERE grantee=target_owner
+       EXCEPT
+       SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(acldefault('c',target_owner)) WHERE grantee=target_owner)
+      UNION ALL
+      (SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(acldefault('c',target_owner)) WHERE grantee=target_owner
+       EXCEPT
+       SELECT grantor,grantee,privilege_type,is_grantable
+       FROM aclexplode(coalesce(a.attacl,acldefault('c',target_owner)))
+       WHERE grantee=target_owner))
+    UNION ALL
+    SELECT format('function %I.%I(%s)',n.nspname,p.proname,
+                  pg_get_function_identity_arguments(p.oid))
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
+            AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
+        OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
+        OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
+            AND p.proargtypes[0]=root_key_oid AND p.proargtypes[1]='text'::regtype
+            AND p.prorettype='jsonb'::regtype))
+      AND EXISTS(
+        (SELECT grantor,grantee,privilege_type,is_grantable
+         FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner)))
+         WHERE grantee=p.proowner
+         EXCEPT
+         SELECT grantor,grantee,privilege_type,is_grantable
+         FROM aclexplode(acldefault('f',p.proowner)) WHERE grantee=p.proowner)
+        UNION ALL
+        (SELECT grantor,grantee,privilege_type,is_grantable
+         FROM aclexplode(acldefault('f',p.proowner)) WHERE grantee=p.proowner
+         EXCEPT
+         SELECT grantor,grantee,privilege_type,is_grantable
+         FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner)))
+         WHERE grantee=p.proowner))
+  ) owner_acl;
+  IF unmanaged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',
+      MESSAGE='non-default owner privileges prevent safe regeneration',DETAIL=unmanaged;
+  END IF;
+
   SELECT string_agg(item,', ' ORDER BY item) INTO unmanaged
   FROM (
     SELECT DISTINCT format('table %I.%I',vp[1],vp[2]) item
@@ -902,8 +970,6 @@ BEGIN
       MESSAGE='delegated grants prevent safe regeneration',DETAIL=unmanaged;
   END IF;
 
-  generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
-                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
   SELECT string_agg(item,', ' ORDER BY item) INTO unmanaged
   FROM (
     SELECT DISTINCT format('function %I.%I(%s)',n.nspname,p.proname,

@@ -1405,6 +1405,69 @@ FOR EACH ROW EXECUTE FUNCTION jt_provenance.custom_audit();""")
       WHERE ev_class='jt_provenance.documents'::regclass AND rulename='zz_custom_rule';""")
     db.run("DROP RULE zz_custom_rule ON jt_provenance.documents;")
 
+    managed_oid_query = """SELECT string_agg(oid::text,',' ORDER BY oid) FROM (
+      SELECT 'jt_provenance.documents'::regclass::oid oid
+      UNION ALL
+      SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='jt_provenance' AND p.proname LIKE 'documents__%'
+        AND (p.prorettype='trigger'::regtype OR p.proname IN
+          ('documents__check','documents__delete_document'))) managed"""
+    owner_acl_oid_before = db.value(managed_oid_query + ";")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO PUBLIC;
+REVOKE SELECT ON jt_provenance.documents FROM CURRENT_USER;""")
+    owner_view_acl_before = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    owner_view_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_view_acl_after = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    owner_acl_oid_after_view = db.value(managed_oid_query + ";")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO CURRENT_USER;
+REVOKE SELECT ON jt_provenance.documents FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM CURRENT_USER;""")
+    owner_function_acl_before = db.value(
+        "SELECT proacl::text FROM pg_proc WHERE oid="
+        "'jt_provenance.documents__check()'::regprocedure;")
+    owner_function_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_function_acl_after = db.value(
+        "SELECT proacl::text FROM pg_proc WHERE oid="
+        "'jt_provenance.documents__check()'::regprocedure;")
+    owner_acl_oid_after_function = db.value(managed_oid_query + ";")
+    db.run("""GRANT EXECUTE ON FUNCTION jt_provenance.documents__check()
+  TO CURRENT_USER;
+GRANT SELECT (data) ON jt_provenance.documents TO CURRENT_USER WITH GRANT OPTION;""")
+    owner_column_acl_before = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    owner_column_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_column_acl_after = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    owner_acl_oid_after_column = db.value(managed_oid_query + ";")
+    db.run("REVOKE SELECT (data) ON jt_provenance.documents FROM CURRENT_USER;")
+    owner_acl_restored = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    record("regeneration fails closed for non-default owner ACL state",
+           db.state(owner_view_block) == "2BP01"
+           and db.state(owner_function_block) == "2BP01"
+           and db.state(owner_column_block) == "2BP01"
+           and owner_view_acl_before == owner_view_acl_after
+           and owner_function_acl_before == owner_function_acl_after
+           and owner_column_acl_before == owner_column_acl_after
+           and owner_acl_oid_before == owner_acl_oid_after_view
+           and owner_acl_oid_before == owner_acl_oid_after_function
+           and owner_acl_oid_before == owner_acl_oid_after_column
+           and owner_acl_restored.returncode == 0,
+           f"states={db.state(owner_view_block)}/{db.state(owner_function_block)}/"
+           f"{db.state(owner_column_block)},acls="
+           f"{owner_view_acl_before == owner_view_acl_after}/"
+           f"{owner_function_acl_before == owner_function_acl_after}/"
+           f"{owner_column_acl_before == owner_column_acl_after},oids="
+           f"{owner_acl_oid_before == owner_acl_oid_after_view}/"
+           f"{owner_acl_oid_before == owner_acl_oid_after_function}/"
+           f"{owner_acl_oid_before == owner_acl_oid_after_column},"
+           f"restored={owner_acl_restored.returncode}")
+
     view_oid_before_delegated = db.value(
         "SELECT 'jt_provenance.documents'::regclass::oid::text;")
     db.run(f"""GRANT SELECT ON jt_provenance.documents TO {delegated_grantor} WITH GRANT OPTION;
@@ -1476,7 +1539,9 @@ REVOKE ALL ON FUNCTION jt_provenance.documents__check() FROM {delegated_grantor}
         "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
     view_oid_after_owner_block = db.value(
         "SELECT 'jt_provenance.documents'::regclass::oid::text;")
-    db.run(f"ALTER FUNCTION jt_provenance.documents__check() OWNER TO {provenance_owner};")
+    db.run(f"""ALTER FUNCTION jt_provenance.documents__check() OWNER TO {provenance_owner};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check()
+  TO {provenance_owner};""")
     metadata_ok = db.value("""SELECT
       (substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
               length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,version}')='0.2.0'

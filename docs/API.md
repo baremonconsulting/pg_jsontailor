@@ -125,8 +125,13 @@ anything, and replaces the generated objects inside the caller's transaction.
 Only binding views for source roles configured in the stored specification are
 replaced. Objects using optional binding names for absent roles are left intact;
 an incompatible object at a configured binding name blocks regeneration.
-Direct owner-issued relation and column grants, including grant options,
-generated-function grants and generated-function comments are restored.
+Direct relation and column grants issued by the owner to other recipients,
+including grant options, generated-function grants to other recipients and
+generated-function comments are restored. A non-default ACL entry for the
+owner itself on the managed view, one of its columns or a managed generated
+function blocks regeneration with `2BP01` before any object is replaced. The
+regenerator does not guess whether an owner self-grant or self-revoke should be
+recreated; resolve that ACL state explicitly before retrying.
 Delegated grant chains are rejected before replacement because replaying them
 as the owner would change later `REVOKE ... CASCADE` semantics. The metadata comment is
 deliberately replaced with current provenance. A failure rolls back the complete

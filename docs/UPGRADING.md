@@ -55,10 +55,14 @@ is a separate operational action that executes code owned by the managed-view
 owner and must be reviewed accordingly.
 
 For a view generated with provenance metadata, use the transactional
-regenerator. It preserves direct owner-issued view grants, generated-function
-grants and generated-function comments, rejects dependent relations and unmanaged
-triggers or rules, and never uses `CASCADE`. Direct owner-issued relation and
-column grants, including grant options, are preserved. Delegated grant chains
+regenerator. It preserves direct view and generated-function grants issued by
+the owner to other recipients and generated-function comments, rejects
+dependent relations and unmanaged triggers or rules, and never uses `CASCADE`.
+Direct relation and column grants to other recipients, including grant options,
+are preserved. A non-default owner ACL on the managed view, one of its columns
+or a managed generated function blocks regeneration before any DDL. Review and
+resolve that state explicitly; the regenerator does not silently restore default
+owner privileges. Delegated grant chains
 block regeneration before any object is replaced and must be reapplied through
 the reviewed deployment procedure. Application triggers and rules must be removed and
 explicitly recreated as reviewed deployment objects:
