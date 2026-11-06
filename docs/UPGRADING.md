@@ -38,10 +38,12 @@ owner's explicitly qualified `__check()` function under a separately reviewed
 operational procedure.
 
 For a view generated with provenance metadata, use the transactional
-regenerator. It preserves view grants, generated-function grants and
-generated-function comments, rejects dependent relations and unmanaged triggers
-or rules, and never uses `CASCADE`. Relation and column grants, including grant
-options, are preserved. Application triggers and rules must be removed and
+regenerator. It preserves direct owner-issued view grants, generated-function
+grants and generated-function comments, rejects dependent relations and unmanaged
+triggers or rules, and never uses `CASCADE`. Direct owner-issued relation and
+column grants, including grant options, are preserved. Delegated grant chains
+block regeneration before any object is replaced and must be reapplied through
+the reviewed deployment procedure. Application triggers and rules must be removed and
 explicitly recreated as reviewed deployment objects:
 
 ```sql

@@ -114,8 +114,10 @@ is otherwise `OK`.
 normalised specification, rejects dependent relations and unmanaged view
 triggers or rules, generates and validates replacement DDL before dropping
 anything, and replaces the generated objects inside the caller's transaction.
-Relation and column grants, including grant options, generated-function grants
-and generated-function comments are restored. The metadata comment is
+Direct owner-issued relation and column grants, including grant options,
+generated-function grants and generated-function comments are restored.
+Delegated grant chains are rejected before replacement because replaying them
+as the owner would change later `REVOKE ... CASCADE` semantics. The metadata comment is
 deliberately replaced with current provenance. A failure rolls back the complete
 operation. The function never uses `CASCADE`; dependencies on other generated
 objects also cause PostgreSQL to stop and roll back the operation. Remove and

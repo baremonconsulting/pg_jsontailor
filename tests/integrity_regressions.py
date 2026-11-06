@@ -1266,10 +1266,18 @@ INSERT INTO jt_provenance.root VALUES(1,'one');""")
                  "fields": {"label": "label"}, "insert": True,
                  "update": True, "delete": True}}
     create_view(db, "jt_provenance.documents", provenance_spec)
+    provenance_owner = db.value("SELECT current_user;")
     lifecycle_role = "jt_lifecycle_role"
     cleanup_lifecycle_role = role_cleanup(db, lifecycle_role)
+    delegated_grantor = "jt_delegated_grantor"
+    delegated_grantee = "jt_delegated_grantee"
+    cleanup_delegated_grantee = role_cleanup(db, delegated_grantee)
+    cleanup_delegated_grantor = role_cleanup(db, delegated_grantor)
     db.run(f"""CREATE ROLE {lifecycle_role} NOLOGIN;
+CREATE ROLE {delegated_grantor} NOLOGIN;
+CREATE ROLE {delegated_grantee} NOLOGIN;
 GRANT USAGE ON SCHEMA jt_provenance TO {lifecycle_role};
+GRANT USAGE ON SCHEMA jt_provenance TO {delegated_grantor};
 GRANT SELECT, UPDATE(label) ON jt_provenance.root TO {lifecycle_role};
 GRANT SELECT (_id) ON jt_provenance.documents TO {lifecycle_role};
 GRANT SELECT (data) ON jt_provenance.documents TO {lifecycle_role} WITH GRANT OPTION;
@@ -1296,6 +1304,79 @@ FOR EACH ROW EXECUTE FUNCTION jt_provenance.custom_audit();""")
     rule_survived = db.value("""SELECT count(*) FROM pg_rewrite
       WHERE ev_class='jt_provenance.documents'::regclass AND rulename='zz_custom_rule';""")
     db.run("DROP RULE zz_custom_rule ON jt_provenance.documents;")
+
+    view_oid_before_delegated = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    db.run(f"""GRANT SELECT ON jt_provenance.documents TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT SELECT ON jt_provenance.documents TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_table_acl_before = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    delegated_table_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_table_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_table_acl_after = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    delegated_table_access = db.value(
+        f"SELECT has_table_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','SELECT')::text;")
+    db.run(f"REVOKE SELECT ON jt_provenance.documents FROM {delegated_grantor} CASCADE;")
+    delegated_table_revoked = db.value(
+        f"SELECT has_table_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','SELECT')::text;")
+
+    db.run(f"""GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_column_acl_before = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    delegated_column_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_column_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_column_acl_after = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    delegated_column_access = db.value(
+        f"SELECT has_column_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','data','SELECT')::text;")
+    db.run(f"REVOKE SELECT (data) ON jt_provenance.documents FROM {delegated_grantor} CASCADE;")
+    delegated_column_revoked = db.value(
+        f"SELECT has_column_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','data','SELECT')::text;")
+
+    db.run(f"""REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_function_acl_before = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    delegated_function_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_function_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_function_acl_after = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    delegated_function_access = db.value(
+        f"SELECT has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
+    db.run(f"REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {delegated_grantor} CASCADE;")
+    delegated_function_revoked = db.value(
+        f"SELECT has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
+    db.run(f"""ALTER FUNCTION jt_provenance.documents__check() OWNER TO {delegated_grantor};
+REVOKE ALL ON FUNCTION jt_provenance.documents__check() FROM PUBLIC;
+REVOKE ALL ON FUNCTION jt_provenance.documents__check() FROM {delegated_grantor};""")
+    empty_foreign_function_acl = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    foreign_function_owner_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_owner_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    db.run(f"ALTER FUNCTION jt_provenance.documents__check() OWNER TO {provenance_owner};")
     metadata_ok = db.value("""SELECT
       (substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
               length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,version}')='0.2.0'
@@ -1307,6 +1388,7 @@ FOR EACH ROW EXECUTE FUNCTION jt_provenance.custom_audit();""")
       WHERE view_name='jt_provenance.documents';""")
     db.run("""GRANT SELECT ON jt_provenance.documents TO PUBLIC;
 REVOKE EXECUTE ON FUNCTION jt_provenance.documents__delete_document(integer,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO jt_lifecycle_role WITH GRANT OPTION;
 COMMENT ON FUNCTION jt_provenance.documents__check() IS 'preserved health comment';
 CREATE FUNCTION jt_provenance.documents__check(integer) RETURNS integer
 LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
@@ -1325,6 +1407,18 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
     role_write_after = db.run(
         f"SET ROLE {lifecycle_role}; UPDATE jt_provenance.documents "
         "SET data=jsonb_set(data,'{label}','\"role-after\"') WHERE _id=1; RESET ROLE;", False)
+    db.run(f"""SET ROLE {lifecycle_role};
+GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantee};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantee};
+RESET ROLE;
+REVOKE SELECT (data) ON jt_provenance.documents FROM {lifecycle_role} CASCADE;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {lifecycle_role} CASCADE;""")
+    owner_grant_cascade = db.value(
+        f"SELECT EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl)x "
+        "WHERE a.attrelid='jt_provenance.documents'::regclass AND a.attname='data' "
+        f"AND x.grantee=(SELECT oid FROM pg_roles WHERE rolname='{delegated_grantee}'))::text||':'||"
+        f"has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
     db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
     preserved = db.value("""SELECT
       has_table_privilege('public','jt_provenance.documents','SELECT')::text||':'||
@@ -1354,9 +1448,28 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
            and role_read_before == "one" and role_write_before.returncode == 0
            and db.state(custom_trigger_block) == "2BP01" and trigger_survived == "1"
            and db.state(custom_rule_block) == "2BP01" and rule_survived == "1"
+           and db.state(delegated_table_block) == "2BP01"
+           and view_oid_after_table_block == view_oid_before_delegated
+           and delegated_table_acl_after == delegated_table_acl_before
+           and delegated_table_access == "true"
+           and delegated_table_revoked == "false"
+           and db.state(delegated_column_block) == "2BP01"
+           and view_oid_after_column_block == view_oid_before_delegated
+           and delegated_column_acl_after == delegated_column_acl_before
+           and delegated_column_access == "true"
+           and delegated_column_revoked == "false"
+           and db.state(delegated_function_block) == "2BP01"
+           and view_oid_after_function_block == view_oid_before_delegated
+           and delegated_function_acl_after == delegated_function_acl_before
+           and delegated_function_access == "true"
+           and delegated_function_revoked == "false"
+           and empty_foreign_function_acl == "{}"
+           and db.state(foreign_function_owner_block) == "2BP01"
+           and view_oid_after_owner_block == view_oid_before_delegated
            and regenerated.returncode == 0
            and column_acl == "true:true:true:YES"
            and role_read_after == "one" and role_write_after.returncode == 0
+           and owner_grant_cascade == "false:false"
            and preserved == "true:false:preserved health comment:7"
            and db.state(dependency_block) == "2BP01" and still_readable == "one"
            and db.state(drift_check) == "PT422" and inventory_drift == "PT422"
@@ -1365,11 +1478,25 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
            f"metadata={metadata_ok},before={inventory_before},role_before={role_read_before}/"
            f"{role_write_before.returncode},hooks={db.state(custom_trigger_block)}/{trigger_survived}/"
            f"{db.state(custom_rule_block)}/{rule_survived},regen={regenerated.returncode},"
+           f"delegated={db.state(delegated_table_block)}/{view_oid_before_delegated == view_oid_after_table_block}/"
+           f"{delegated_table_acl_before == delegated_table_acl_after}/"
+           f"{delegated_table_access}/{delegated_table_revoked}/"
+           f"{db.state(delegated_column_block)}/{view_oid_before_delegated == view_oid_after_column_block}/"
+           f"{delegated_column_acl_before == delegated_column_acl_after}/"
+           f"{delegated_column_access}/{delegated_column_revoked}/"
+           f"{db.state(delegated_function_block)}/{view_oid_before_delegated == view_oid_after_function_block}/"
+           f"{delegated_function_acl_before == delegated_function_acl_after}/"
+           f"{delegated_function_access}/{delegated_function_revoked}/"
+           f"owner={empty_foreign_function_acl}/{db.state(foreign_function_owner_block)}/"
+           f"{view_oid_before_delegated == view_oid_after_owner_block},"
            f"column_acl={column_acl},role_after={role_read_after}/{role_write_after.returncode},"
+           f"owner_cascade={owner_grant_cascade},"
            f"acl={preserved},dependency={db.state(dependency_block)}/{still_readable},"
            f"drift={db.state(drift_check)}/{inventory_drift},"
            f"legacy={legacy_regenerated.returncode},after={inventory_after}")
     cleanup_lifecycle_role()
+    cleanup_delegated_grantee()
+    cleanup_delegated_grantor()
 
     inventory_attacker = "jt_inventory_attacker"
     cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)

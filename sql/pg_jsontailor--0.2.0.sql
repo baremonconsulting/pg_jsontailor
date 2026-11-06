@@ -735,6 +735,44 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE='2BP01',MESSAGE='unmanaged rules prevent safe regeneration',DETAIL=unmanaged;
   END IF;
 
+  SELECT string_agg(item,', ' ORDER BY item) INTO unmanaged
+  FROM (
+    SELECT DISTINCT format('table %I.%I',vp[1],vp[2]) item
+    FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) x
+    WHERE c.oid=target AND x.grantor<>target_owner
+    UNION ALL
+    SELECT DISTINCT format('column %I.%I.%I',vp[1],vp[2],a.attname)
+    FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x
+    WHERE a.attrelid=target AND a.attnum>0 AND NOT a.attisdropped
+      AND a.attacl IS NOT NULL AND x.grantor<>target_owner
+  ) delegated;
+  IF unmanaged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',
+      MESSAGE='delegated grants prevent safe regeneration',DETAIL=unmanaged;
+  END IF;
+
+  generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
+                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
+  SELECT string_agg(item,', ' ORDER BY item) INTO unmanaged
+  FROM (
+    SELECT DISTINCT format('function %I.%I(%s)',n.nspname,p.proname,
+                           pg_get_function_identity_arguments(p.oid)) item
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    LEFT JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) x ON true
+    WHERE n.nspname=vp[1] AND p.proname=ANY(generated_names)
+      AND ((p.proname=ANY(ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',vp[2]||'__guard'])
+            AND p.pronargs=0 AND p.prorettype='trigger'::regtype)
+        OR (p.proname=vp[2]||'__check' AND p.pronargs=0 AND p.prorettype='jsonb'::regtype)
+        OR (p.proname=vp[2]||'__delete_document' AND p.pronargs=2
+            AND p.proargtypes[0]=root_key_oid AND p.proargtypes[1]='text'::regtype
+            AND p.prorettype='jsonb'::regtype))
+      AND (p.proowner<>target_owner OR x.grantor<>target_owner)
+  ) delegated;
+  IF unmanaged IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE='2BP01',
+      MESSAGE='delegated grants prevent safe regeneration',DETAIL=unmanaged;
+  END IF;
+
   FOR r IN
     SELECT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END principal,
            x.privilege_type,x.is_grantable
@@ -760,8 +798,6 @@ BEGIN
     revoke_principals:=array_append(revoke_principals,r.principal);
   END LOOP;
 
-  generated_names:=ARRAY[vp[2]||'__insert',vp[2]||'__update',vp[2]||'__delete',
-                         vp[2]||'__guard',vp[2]||'__delete_document',vp[2]||'__check'];
   FOR r IN
     SELECT p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,
            p.proowner,obj_description(p.oid,'pg_proc') description
