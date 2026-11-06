@@ -33,6 +33,7 @@ jobs:
 
       - name: Verify repository consistency
         run: |
+          python3 tools/verify_test_coverage.py
           python3 tools/verify_repository_consistency.py
           python3 bench/verify_results.py bench/reference/azure-e5b41a5-pg17
           python3 bench/verify_results.py bench/reference/azure-e5b41a5-pg18
@@ -46,6 +47,10 @@ jobs:
           python3 bench/verify_results.py bench/reference/azure-acecaae
           python3 tests/tooling_regressions.py
           python3 tools/verify_release_candidate.py
+          python3 tools/verify_test_coverage.py \
+            --scope repository \
+            --passed-suite repository \
+            --output "$RUNNER_TEMP/repository-coverage.json"
 
       - name: Check repository hygiene
         shell: bash
@@ -196,6 +201,21 @@ jobs:
             --pg-bin "$PGBIN" \
             --maintenance-database postgres \
             --database-prefix jsontailor_dump_restore
+
+      - name: Verify Jira-keyed runtime coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/verify_test_coverage.py \
+            --scope postgresql \
+            --postgresql "${{ matrix.postgresql }}" \
+            --result "validation=$RUNNER_TEMP/validation-results.jsonl" \
+            --result "integrity=$RUNNER_TEMP/integrity-results.jsonl" \
+            --result "subtransaction=$RUNNER_TEMP/subtransaction-results.jsonl" \
+            --result "merge=$RUNNER_TEMP/merge-results.jsonl" \
+            --passed-suite installcheck \
+            --passed-suite dump_restore \
+            --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"
 
       - name: Show PostgreSQL log on failure
         if: failure()

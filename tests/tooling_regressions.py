@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import importlib.util
 import json
 import os
@@ -52,6 +53,178 @@ def load_dump_restore():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_coverage_verifier():
+    path = ROOT / "tools/verify_test_coverage.py"
+    spec = importlib.util.spec_from_file_location("test_coverage_verifier", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def coverage_manifest_checks() -> None:
+    verifier = load_coverage_verifier()
+    manifest = json.loads((ROOT / "tests/coverage_manifest.json").read_text())
+    verifier.verify(manifest)
+
+    def rejected(change, expected: str) -> None:
+        candidate = copy.deepcopy(manifest)
+        change(candidate)
+        try:
+            verifier.verify(candidate)
+        except RuntimeError as error:
+            if expected not in str(error):
+                raise AssertionError(f"unexpected coverage rejection: {error}") from error
+        else:
+            raise AssertionError(f"invalid coverage manifest accepted: {expected}")
+
+    rejected(lambda value: value["requirements"].__setitem__(
+        1, copy.deepcopy(value["requirements"][0])), "duplicate Jira requirement")
+    rejected(lambda value: value["requirements"][0].__setitem__(
+        "test_id", "PGJT-99/wrong-prefix"), "must use the Jira key")
+    rejected(lambda value: value["requirements"][0].__setitem__(
+        "marker", "marker-that-does-not-exist"), "marker is absent")
+    rejected(lambda value: value["claims"][0].__setitem__(
+        "tests", ["PGJT-99/unknown"]), "unknown evidence tests")
+    rejected(lambda value: value["requirements"][3].pop("gap"),
+             "partial evidence must identify")
+    rejected(lambda value: value["claims"].pop(), "public claim inventory differs")
+    rejected(lambda value: value["claims"][0].__setitem__(
+        "claim_id", "PGJT-999/CLAIM-UNKNOWN"), "public claim inventory differs")
+    rejected(lambda value: value["runtime_evidence"][0].update(
+        {"scope": "postgresql", "suite": "installcheck"}),
+        "runtime_evidence differs from the reviewed PGJT-40 contract")
+    rejected(lambda value: value["claims"][0].__setitem__(
+        "tests", ["PGJT-40/postgrest-manual-scenario"]),
+        "claims differs from the reviewed PGJT-40 contract")
+    rejected(lambda value: value["requirements"][3].__setitem__(
+        "kind", "functional"),
+        "requirements differs from the reviewed PGJT-40 contract")
+    rejected(lambda value: value["supplemental_evidence"][0].update(
+        {"file": "README.md", "marker": "PostgREST scenarios"}),
+        "supplemental_evidence differs from the reviewed PGJT-40 contract")
+
+    repository = verifier.attest(manifest, "repository", None, {}, {"repository"})
+    expected_repository = sum(item["scope"] == "repository"
+                              for item in manifest["runtime_evidence"])
+    if len(repository["tests"]) != expected_repository:
+        raise AssertionError("repository runtime attestation count differs")
+    manual_limitation = next(
+        (item for item in repository["limitations"]
+         if item.get("claim_id") == "PGJT-40/CLAIM-POSTGREST"), None)
+    if not manual_limitation or manual_limitation.get("coverage") != "manual":
+        raise AssertionError("manual claim limitation is absent from attestation")
+
+    with tempfile.TemporaryDirectory(prefix="pgjt-coverage-") as temporary:
+        folder = Path(temporary)
+        rows: dict[str, list[dict]] = {}
+        for item in manifest["runtime_evidence"]:
+            if item["scope"] != "postgresql" or "field" not in item:
+                continue
+            row = {item["field"]: item["value"], "status": "PASS"}
+            if row not in rows.setdefault(item["suite"], []):
+                rows[item["suite"]].append(row)
+        paths = {}
+        for suite, values in rows.items():
+            path = folder / f"{suite}.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in values))
+            paths[suite] = path
+        database = verifier.attest(
+            manifest, "postgresql", "18", paths, {"installcheck", "dump_restore"})
+        expected_database = sum(item["scope"] == "postgresql"
+                                for item in manifest["runtime_evidence"])
+        if len(database["tests"]) != expected_database:
+            raise AssertionError("database runtime attestation count differs")
+        partial = next(row for row in database["tests"]
+                       if row["test_id"] == "PGJT-5/fixture-cleanup")
+        if partial.get("coverage") != "partial" or not partial.get("gap"):
+            raise AssertionError("partial runtime evidence hides its tracked gap")
+
+        validation_selectors = [
+            item["value"] for item in manifest["runtime_evidence"]
+            if item["scope"] == "postgresql"
+            and item["suite"] == "validation"
+            and item.get("field") == "id"
+        ]
+        if not validation_selectors or not all(
+                isinstance(value, str) for value in validation_selectors):
+            raise AssertionError(
+                "validation runtime selectors must match the writer's string IDs")
+
+        def runtime_rejected(change, expected: str) -> None:
+            changed_paths = {}
+            for suite, path in paths.items():
+                changed = folder / f"changed-{suite}.jsonl"
+                changed.write_text(path.read_text())
+                changed_paths[suite] = changed
+            change(changed_paths)
+            try:
+                verifier.attest(manifest, "postgresql", "18", changed_paths,
+                                {"installcheck", "dump_restore"})
+            except RuntimeError as error:
+                if expected not in str(error):
+                    raise AssertionError(
+                        f"unexpected runtime-evidence rejection: {error}") from error
+            else:
+                raise AssertionError(
+                    f"invalid runtime evidence was accepted: {expected}")
+
+        selected = next(item for item in manifest["runtime_evidence"]
+                        if item["scope"] == "postgresql" and "field" in item)
+
+        def remove_selected(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            values = [json.loads(line) for line in path.read_text().splitlines()]
+            values = [row for row in values
+                      if row.get(selected["field"]) != selected["value"]]
+            path.write_text("".join(json.dumps(row) + "\n" for row in values))
+
+        runtime_rejected(remove_selected, "expected one runtime result, found 0")
+
+        def fail_selected(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            values = [json.loads(line) for line in path.read_text().splitlines()]
+            for row in values:
+                if row.get(selected["field"]) == selected["value"]:
+                    row["status"] = "FAIL"
+            path.write_text("".join(json.dumps(row) + "\n" for row in values))
+
+        runtime_rejected(fail_selected, "runtime result did not pass")
+
+        def duplicate_selected(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            values = [json.loads(line) for line in path.read_text().splitlines()]
+            duplicate = next(row for row in values
+                             if row.get(selected["field"]) == selected["value"])
+            values.append(copy.deepcopy(duplicate))
+            path.write_text("".join(json.dumps(row) + "\n" for row in values))
+
+        runtime_rejected(duplicate_selected, "expected one runtime result, found 2")
+
+        def duplicate_status_key(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            lines = path.read_text().splitlines()
+            for index, line in enumerate(lines):
+                row = json.loads(line)
+                if row.get(selected["field"]) == selected["value"]:
+                    lines[index] = line[:-1] + ',"status":"FAIL","status":"PASS"}'
+                    break
+            path.write_text("\n".join(lines) + "\n")
+
+        runtime_rejected(duplicate_status_key, "duplicate JSON key: status")
+
+        first_suite = next(iter(paths))
+        paths[first_suite].write_text("")
+        try:
+            verifier.attest(manifest, "postgresql", "18", paths,
+                            {"installcheck", "dump_restore"})
+        except RuntimeError as error:
+            if "runtime result has no object rows" not in str(error):
+                raise AssertionError(f"unexpected missing-result rejection: {error}") from error
+        else:
+            raise AssertionError("missing runtime results were accepted")
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -355,6 +528,7 @@ def dump_restore_command_checks() -> None:
 
 
 def main() -> int:
+    coverage_manifest_checks()
     benchmark_checks()
     jsonl_checks()
     pilot_check()
