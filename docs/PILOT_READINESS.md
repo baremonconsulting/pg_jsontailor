@@ -67,12 +67,21 @@ PostgreSQL major version, followed by catalogue and application smoke tests.
 
 Provide a pilot only from an immutable release tag. Archive the source, release
 notes and checksums. Do not label historical benchmark numbers as current.
-Measurements may support a tagged release only when their recorded source
-commit exists, is an ancestor of the tag, and `sql/`, `pg_jsontailor.control`
-and `Makefile` are byte-identical between that commit and the tag. The
-independent artifact and release-candidate verifiers must also pass. Preserve
-the actual measurement `source_commit`; never relabel an older run as if it
-were measured from the tag.
+Fingerprint-bearing measurements may support a tagged release when the
+release-candidate verifier confirms that every defined product input under
+`sql/`, `pg_jsontailor.control` and `Makefile` is byte-identical to the measured
+inputs. A reviewed product-equivalent squash therefore remains eligible even
+when the measured feature commit is no longer an ancestor or locally reachable.
+Legacy evidence without product fingerprints retains the stricter requirement
+that its recorded source commit exists, is an ancestor of the tag and contains
+byte-identical product inputs. Any product-input change requires fresh evidence.
+
+Preserve the actual measurement `source_commit`; never relabel an older run as
+if it were measured from the tag. Artifact and release-candidate verification
+checks the stored results, metadata and declared product fingerprints. Native
+execution provenance comes from the original benchmark invocation, environment
+record and run logs; verification of the stored artifact does not independently
+attest where or by whom the measurements executed.
 
 Before go-live, confirm private security reporting through Baremon, named
 operational ownership, backups, monitoring and a tested rollback window.

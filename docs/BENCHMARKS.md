@@ -16,6 +16,11 @@ The current release-candidate measurements used commit `a9a455ee64767d5a0af397fa
 
 Release-candidate verification separately determines whether these measurements are transferable to a later candidate. New evidence records SHA-256 fingerprints for every file under `sql/`, `pg_jsontailor.control` and `Makefile`; the candidate must have the identical fingerprint set. This remains valid after a reviewed squash merge even when the measured feature commit is no longer an ancestor or locally reachable. Older evidence without fingerprints retains the stricter ancestor-and-byte-identity rule. If any defined product input changed, the run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
 
+The artifact verifier validates the stored results, environment metadata and
+declared product fingerprints. The original invocation, environment record and
+run logs provide native execution provenance; validating a stored artifact does
+not independently attest the execution host or actor.
+
 An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). Compared with the completed set-wise build at [`11e6d74`](../bench/reference/azure-11e6d74/), 1,000-child median insert, root-only update, complete replacement, MERGE insert and MERGE update time fell by 69.0%, 67.7%, 58.9%, 69.1% and 59.3%. At zero and one child that optimization adds roughly 8–25% to those paths; it is intentionally targeted at larger arrays. These percentages describe the two named historical builds, not the current reference.
 
 The earlier `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8` run predates strict type conversion, current catalogue guards, `timestamptz` normalization and lifecycle tooling. Its [historical evidence](../bench/reference/azure-04d053e/) remains reproducible but is not semantically equivalent to the current write path.
