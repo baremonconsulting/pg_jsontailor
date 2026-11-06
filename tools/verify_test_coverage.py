@@ -31,13 +31,15 @@ EXPECTED_CLAIMS = {
     "PGJT-44/CLAIM-TYPE-SEMANTICS",
     "PGJT-45/CLAIM-DOCUMENT-SHAPES",
     "PGJT-45/CLAIM-OPERATION-SEMANTICS",
+    "PGJT-46/CLAIM-RUNTIME-PRIVILEGES",
+    "PGJT-46/CLAIM-RLS-SECURITY",
 }
 EXPECTED_SECTION_DIGESTS = {
     "requirements": "d914017acccda38a8b3983648083977b8fc33615152ef2104306bb32b68e179d",
-    "claims": "2f59ce3c204a8f365d5a01694565bb32109440e6c54e90139770a6c4b515e547",
+    "claims": "6f51b64b6b06f86f6023bbb540ba894cacbbe1d407e1c54bf539ee2679faeae7",
     "manual_evidence": "6b9dea547968a760dff9d8c1bce174e7cef7aae3d6bc25e379756cbb756d7d20",
-    "supplemental_evidence": "32321df82ea1a41e62f89dc6661ad5facb57455a454945e3409e5e7d02ffdd65",
-    "runtime_evidence": "ebc47a7063cea42ca25b34e0e986be09c903ecfb75814f55afe861d2d67fce35",
+    "supplemental_evidence": "5db0d5c7c9eae10201839c9408c51b2d94ac35c03cf96733e84f252f78df4665",
+    "runtime_evidence": "ef37825e7772ae5e24ea54d99ddf0c920368e189a0634c10e8fd763b0e00805d",
 }
 
 
