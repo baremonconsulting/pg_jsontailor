@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import re
 import subprocess
@@ -33,6 +34,13 @@ class TestDatabase:
     def state(result: subprocess.CompletedProcess[str]) -> str | None:
         match = re.search(r"ERROR:\s+([0-9A-Z]{5}):", result.stderr)
         return match.group(1) if match else None
+
+
+def role_cleanup(db: TestDatabase, role: str):
+    def cleanup() -> None:
+        db.run(f"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};", False)
+    atexit.register(cleanup)
+    return cleanup
 
 
 def create_view(db: TestDatabase, name: str, specification: dict) -> None:
@@ -156,14 +164,22 @@ VALUES('{"_id":2,"value":"two","reference":{"id":7},"items":[{},{}]}'::jsonb);""
     changed["items"][0]["value"] = "changed"
     numeric = db.run("UPDATE jt_integrity.documents SET data=" + quote(json.dumps(changed)) +
                      "::jsonb WHERE _id=1;", False)
+    lossy = json.loads(numeric_doc)
+    lossy["_id"] = 1.001
+    lossy["value"] = "must-not-change"
+    lossy_update = db.run("UPDATE jt_integrity.documents SET data=" +
+                          quote(json.dumps(lossy)) + "::jsonb WHERE _id=1;", False)
+    lossless_value = db.value("SELECT value FROM jt_integrity.root WHERE id=1;")
     typed_predicates = db.value("SELECT position('to_jsonb(t.' in string_agg(pg_get_functiondef(p.oid),''))=0 "
         "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jt_integrity' "
         "AND p.proname LIKE 'documents__%';")
     db.run("INSERT INTO jt_integrity.root(id,value) SELECT g,'bulk' FROM generate_series(3,5000)g;")
     plan = db.run("EXPLAIN (COSTS OFF,FORMAT JSON) SELECT * FROM jt_integrity.root WHERE id=1;").stdout
-    record("numeric keys use typed indexed identity", numeric.returncode == 0
+    record("numeric keys use lossless typed indexed identity", numeric.returncode == 0
+           and db.state(lossy_update) == "PT422" and lossless_value != "must-not-change"
            and typed_predicates == "t" and "Index" in plan,
-           f"update={numeric.returncode},typed={typed_predicates},indexed={'Index' in plan}")
+           f"update={numeric.returncode},lossy={db.state(lossy_update)},"
+           f"value={lossless_value},typed={typed_predicates},indexed={'Index' in plan}")
 
     immutable = json.loads(json.dumps(spec))
     immutable["root"]["update"] = False
@@ -183,20 +199,672 @@ SET data=jsonb_set(data,'{reference,id}','8'::jsonb) WHERE _id=1;""", False)
     record("root identity cannot also be an object foreign key",
            db.state(rejected) == "22023", f"state={db.state(rejected)}")
 
+    db.run("""DROP SCHEMA IF EXISTS jt_binding CASCADE; CREATE SCHEMA jt_binding;
+CREATE TABLE jt_binding.roots(id integer PRIMARY KEY,value text);
+INSERT INTO jt_binding.roots VALUES(1,'original');""")
+    binding_spec = {
+        "root": {"table": "jt_binding.roots", "key": "id",
+                 "fields": {"value": "value"},
+                 "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_binding.documents", binding_spec)
+    binding_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_binding.documents WHERE _id=1;")
+    db.run("ALTER TABLE jt_binding.roots RENAME COLUMN value TO original_value;"
+           "ALTER TABLE jt_binding.roots ADD COLUMN value text DEFAULT 'replacement';")
+    binding_update = db.run(
+        "UPDATE jt_binding.documents SET data=jsonb_set(data,'{value}','\"wrong\"') "
+        "WHERE _id=1;", False)
+    binding_insert = db.run(
+        "INSERT INTO jt_binding.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"wrong\"}'::jsonb);", False)
+    binding_delete = db.run(
+        "DELETE FROM jt_binding.documents WHERE _id=1;", False)
+    binding_function = db.run(
+        "SELECT jt_binding.documents__delete_document(1," + quote(binding_etag) + ");", False)
+    binding_values = db.value(
+        "SELECT original_value||':'||value FROM jt_binding.roots WHERE id=1;")
+
+    db.run("""CREATE TABLE jt_binding.refs(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_binding.parents(id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding.refs(id),value text);
+INSERT INTO jt_binding.refs VALUES(1,'reference');
+INSERT INTO jt_binding.parents VALUES(1,1,'parent');""")
+    role_spec = {
+        "root": {"table": "jt_binding.parents", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "object": {"name": "reference", "table": "jt_binding.refs", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "value": "value"},
+                   "etag": False}}
+    create_view(db, "jt_binding.role_documents", role_spec)
+    db.run("ALTER TABLE jt_binding.parents RENAME TO swap;"
+           "ALTER TABLE jt_binding.refs RENAME TO parents;"
+           "ALTER TABLE jt_binding.swap RENAME TO refs;")
+    role_update = db.run(
+        "UPDATE jt_binding.role_documents SET data=jsonb_set(data,'{value}','\"wrong\"') "
+        "WHERE _id=1;", False)
+    record("source relation roles and physical columns remain bound",
+           all(db.state(result) == "PT422" for result in
+               (binding_update, binding_insert, binding_delete, binding_function, role_update))
+           and binding_values == "original:replacement",
+           "states=" + str([db.state(result) for result in
+                            (binding_update, binding_insert, binding_delete,
+                             binding_function, role_update)])
+           + f",values={binding_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_binding_unmapped CASCADE;
+CREATE SCHEMA jt_binding_unmapped;
+CREATE TABLE jt_binding_unmapped.source(
+ id integer PRIMARY KEY,
+ legacy_before text,
+ first_value text,
+ legacy_between text,
+ second_value text,
+ legacy_after text);
+INSERT INTO jt_binding_unmapped.source VALUES(1,'a','first','b','second','c');""")
+    unmapped_spec = {
+        "root": {"table": "jt_binding_unmapped.source", "key": "id",
+                 "fields": {"first": "first_value", "second": "second_value"},
+                 "update": True}}
+    create_view(db, "jt_binding_unmapped.documents", unmapped_spec)
+    unmapped_states = []
+    for column, field, value in (
+            ("legacy_before", "first", "one"),
+            ("legacy_between", "second", "two"),
+            ("legacy_after", "first", "three")):
+        db.run(f"ALTER TABLE jt_binding_unmapped.source DROP COLUMN {column};")
+        changed_unmapped = db.run(
+            "UPDATE jt_binding_unmapped.documents SET data=jsonb_set(data," +
+            quote("{" + field + "}") + "," + quote(json.dumps(value)) +
+            "::jsonb) WHERE _id=1;", False)
+        unmapped_states.append((changed_unmapped.returncode, db.state(changed_unmapped)))
+    unmapped_values = db.value(
+        "SELECT first_value||':'||second_value FROM jt_binding_unmapped.source WHERE id=1;")
+    record("binding ordinals ignore dropped unmapped columns",
+           unmapped_states == [(0, None), (0, None), (0, None)]
+           and unmapped_values == "three:two",
+           f"states={unmapped_states},values={unmapped_values}")
+    rename_states = []
+    for suffix, alteration in (
+            ("table", "ALTER TABLE jt_binding_rename_table.source RENAME TO renamed"),
+            ("key", "ALTER TABLE jt_binding_rename_key.source RENAME COLUMN id TO renamed_id")):
+        schema = "jt_binding_rename_" + suffix
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.source(id integer PRIMARY KEY,value text);
+INSERT INTO {schema}.source VALUES(1,'original');""")
+        rename_spec = {
+            "root": {"table": schema + ".source", "key": "id", "fields": {"value": "value"},
+                     "insert": True, "update": True, "delete": True}}
+        create_view(db, schema + ".documents", rename_spec)
+        rename_etag = db.value(
+            f"SELECT data#>>'{{_metadata,etag}}' FROM {schema}.documents WHERE _id=1;")
+        db.run(alteration)
+        rename_results = [
+            db.run(f"INSERT INTO {schema}.documents(data) VALUES"
+                   "('{\"_id\":2,\"value\":\"wrong\"}'::jsonb);", False),
+            db.run(f"UPDATE {schema}.documents SET data=jsonb_set(data,'{{value}}','\"wrong\"') "
+                   "WHERE _id=1;", False),
+            db.run(f"DELETE FROM {schema}.documents WHERE _id=1;", False),
+            db.run(f"SELECT {schema}.documents__delete_document(1,{quote(rename_etag)});", False),
+        ]
+        rename_states.append([db.state(result) for result in rename_results])
+    record("root table and key renames reach binding drift checks",
+           rename_states == [["PT422"] * 4, ["PT422"] * 4],
+           f"states={rename_states}")
+
+    same_layout_states = []
+    same_layout_values = []
+    for suffix, object_etag, root_reference in (
+            ("nocheck", False, "1"), ("default", None, "NULL")):
+        schema = f"jt_role_{suffix}"
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.refs(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE {schema}.roots(id integer PRIMARY KEY,
+ ref_id integer REFERENCES {schema}.refs(id),value text);
+INSERT INTO {schema}.refs VALUES(1,NULL,'reference');
+INSERT INTO {schema}.roots VALUES(1,{root_reference},'root');""")
+        same_layout_spec = {
+            "root": {"table": f"{schema}.roots", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.refs", "key": "id",
+                       "root_fk": "ref_id",
+                       "fields": {"id": "id", "ref": "ref_id", "value": "value"}}}
+        if object_etag is not None:
+            same_layout_spec["object"]["etag"] = object_etag
+        create_view(db, f"{schema}.documents", same_layout_spec)
+        db.run(f"ALTER TABLE {schema}.roots RENAME TO swap;"
+               f"ALTER TABLE {schema}.refs RENAME TO roots;"
+               f"ALTER TABLE {schema}.swap RENAME TO refs;")
+        role_swap = db.run(
+            f"UPDATE {schema}.documents SET data=jsonb_set(data,'{{value}}','\"wrong\"') "
+            "WHERE _id=1;", False)
+        same_layout_states.append(db.state(role_swap))
+        same_layout_values.append(db.value(
+            f"SELECT (SELECT value FROM {schema}.refs WHERE id=1)||':'||"
+            f"(SELECT value FROM {schema}.roots WHERE id=1);"))
+    record("same-layout source role swaps are rejected before DML",
+           same_layout_states == ["PT422", "PT422"]
+           and same_layout_values == ["root:reference", "root:reference"],
+           f"states={same_layout_states},values={same_layout_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_symmetric_api CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_a CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_b CASCADE;
+DROP SCHEMA IF EXISTS jt_symmetric_swap CASCADE;
+CREATE SCHEMA jt_symmetric_api; CREATE SCHEMA jt_symmetric_a;
+CREATE SCHEMA jt_symmetric_b; CREATE SCHEMA jt_symmetric_swap;
+CREATE TABLE jt_symmetric_a.records(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE jt_symmetric_b.records(id integer PRIMARY KEY,ref_id integer,value text);
+ALTER TABLE jt_symmetric_a.records ADD FOREIGN KEY(ref_id) REFERENCES jt_symmetric_b.records(id);
+ALTER TABLE jt_symmetric_b.records ADD FOREIGN KEY(ref_id) REFERENCES jt_symmetric_a.records(id);
+INSERT INTO jt_symmetric_a.records VALUES(1,NULL,'root');
+INSERT INTO jt_symmetric_b.records VALUES(1,NULL,'reference');""")
+    symmetric_spec = {
+        "root": {"table": "jt_symmetric_a.records", "key": "id",
+                 "fields": {"value": "value"},
+                 "insert": True, "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_symmetric_b.records", "key": "id",
+                   "root_fk": "ref_id",
+                   "fields": {"id": "id", "ref": "ref_id", "value": "value"}}}
+    create_view(db, "jt_symmetric_api.documents", symmetric_spec)
+    symmetric_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_symmetric_api.documents WHERE _id=1;")
+    db.run("ALTER TABLE jt_symmetric_a.records SET SCHEMA jt_symmetric_swap;"
+           "ALTER TABLE jt_symmetric_b.records SET SCHEMA jt_symmetric_a;"
+           "ALTER TABLE jt_symmetric_swap.records SET SCHEMA jt_symmetric_b;")
+    symmetric_swap = db.run(
+        "UPDATE jt_symmetric_api.documents "
+        "SET data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+    symmetric_insert = db.run(
+        "INSERT INTO jt_symmetric_api.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"wrong\",\"reference\":null}'::jsonb);", False)
+    symmetric_delete = db.run(
+        "DELETE FROM jt_symmetric_api.documents WHERE _id=1;", False)
+    symmetric_function = db.run(
+        "SELECT jt_symmetric_api.documents__delete_document(1,"
+        + quote(symmetric_etag) + ");", False)
+    symmetric_values = db.value(
+        "SELECT (SELECT value FROM jt_symmetric_b.records WHERE id=1)||':'||"
+        "(SELECT value FROM jt_symmetric_a.records WHERE id=1);")
+    record("per-role dependencies reject symmetric schema swaps before DML",
+           all(db.state(result) == "PT422" for result in
+               (symmetric_swap,symmetric_insert,symmetric_delete,symmetric_function))
+           and symmetric_values == "root:reference",
+           "states=" + str([db.state(result) for result in
+                             (symmetric_swap,symmetric_insert,
+                              symmetric_delete,symmetric_function)])
+           + f",values={symmetric_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_column_permutation CASCADE;
+CREATE SCHEMA jt_column_permutation;
+CREATE TABLE jt_column_permutation.fields(id integer PRIMARY KEY,a text,b text);
+INSERT INTO jt_column_permutation.fields VALUES(1,'A','B');""")
+    permutation_spec = {
+        "root": {"table": "jt_column_permutation.fields", "key": "id",
+                 "fields": {"first": "a", "second": "b"}, "update": True}}
+    create_view(db, "jt_column_permutation.documents", permutation_spec)
+    db.run("ALTER TABLE jt_column_permutation.fields RENAME COLUMN a TO temporary;"
+           "ALTER TABLE jt_column_permutation.fields RENAME COLUMN b TO a;"
+           "ALTER TABLE jt_column_permutation.fields RENAME COLUMN temporary TO b;")
+    field_swap = db.run(
+        "UPDATE jt_column_permutation.documents "
+        "SET data=jsonb_set(data,'{first}','\"wrong\"') WHERE _id=1;", False)
+    field_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_column_permutation.documents';""")
+    field_values = db.value(
+        "SELECT a||':'||b FROM jt_column_permutation.fields WHERE id=1;")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_key_permutation CASCADE;
+CREATE SCHEMA jt_key_permutation;
+CREATE TABLE jt_key_permutation.fields(id integer PRIMARY KEY,value integer NOT NULL);
+INSERT INTO jt_key_permutation.fields VALUES(1,2),(2,1);""")
+    key_permutation_spec = {
+        "root": {"table": "jt_key_permutation.fields", "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_key_permutation.documents", key_permutation_spec)
+    db.run("ALTER TABLE jt_key_permutation.fields RENAME COLUMN id TO temporary;"
+           "ALTER TABLE jt_key_permutation.fields RENAME COLUMN value TO id;"
+           "ALTER TABLE jt_key_permutation.fields RENAME COLUMN temporary TO value;")
+    key_swap = db.run(
+        "UPDATE jt_key_permutation.documents "
+        "SET data=jsonb_set(data,'{value}','3') WHERE _id=1;", False)
+    key_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_key_permutation.documents';""")
+    key_values = db.value(
+        "SELECT string_agg(id::text||':'||value::text,',' ORDER BY value) "
+        "FROM jt_key_permutation.fields;")
+    record("physical column-name permutations are rejected before DML",
+           db.state(field_swap) == "PT422" and field_inventory == "PT422"
+           and field_values == "B:A" and db.state(key_swap) == "PT422"
+           and key_inventory == "PT422" and key_values == "2:1,1:2",
+           f"field={db.state(field_swap)}/{field_inventory}/{field_values},"
+           f"key={db.state(key_swap)}/{key_inventory}/{key_values}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_quoting CASCADE; CREATE SCHEMA jt_quoting;
+CREATE TABLE jt_quoting.roots(id integer PRIMARY KEY,value text);
+INSERT INTO jt_quoting.roots VALUES(1,'original');""")
+    quoting_spec = {
+        "root": {"table": "jt_quoting.roots", "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_quoting.documents", quoting_spec)
+    db.run("ALTER TABLE jt_quoting.roots RENAME CONSTRAINT roots_pkey TO renamed_pkey;")
+    renamed_pk_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_quoting.documents';""")
+    db.run("ALTER TABLE jt_quoting.roots RENAME CONSTRAINT renamed_pkey TO roots_pkey;")
+    restored_pk_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_quoting.documents';""")
+    quoted_update = db.run(
+        "SET quote_all_identifiers=on;"
+        "UPDATE jt_quoting.documents "
+        "SET data=jsonb_set(data,'{value}','\"updated\"') WHERE _id=1;"
+        "RESET quote_all_identifiers;", False)
+    quoted_value = db.value("SELECT value FROM jt_quoting.roots WHERE id=1;")
+    record("binding guards are independent of identifier rendering settings",
+           renamed_pk_inventory == "PT422" and restored_pk_inventory == "OK"
+           and quoted_update.returncode == 0 and quoted_value == "updated",
+           f"pk={renamed_pk_inventory}/{restored_pk_inventory},"
+           f"update={quoted_update.returncode},value={quoted_value}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_nocheck CASCADE; CREATE SCHEMA jt_nocheck;
+CREATE TABLE jt_nocheck.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_nocheck.root(id integer PRIMARY KEY,ref_id integer REFERENCES jt_nocheck.ref(id),value text);
+CREATE TABLE jt_nocheck.child(id integer PRIMARY KEY,parent integer REFERENCES jt_nocheck.root(id),value text);
+INSERT INTO jt_nocheck.ref VALUES(7,'old reference');
+INSERT INTO jt_nocheck.root VALUES(1,7,'immutable');
+INSERT INTO jt_nocheck.child VALUES(10,1,'old child');""")
+    nocheck_spec = {
+        "root": {"table": "jt_nocheck.root", "key": "id",
+                 "fields": {"value": "value"}, "update": False},
+        "object": {"name": "reference", "table": "jt_nocheck.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"},
+                   "etag": False},
+        "array": {"name": "items", "table": "jt_nocheck.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "update": True}}
+    create_view(db, "jt_nocheck.documents", nocheck_spec)
+    old_nocheck = json.loads(db.value("SELECT data::text FROM jt_nocheck.documents WHERE _id=1;"))
+    db.run("UPDATE jt_nocheck.ref SET label='current reference' WHERE id=7;")
+    old_nocheck["items"][0]["value"] = "new child"
+    nocheck_update = db.run(
+        "UPDATE jt_nocheck.documents SET data=" + quote(json.dumps(old_nocheck))
+        + "::jsonb WHERE _id=1;", False)
+    nocheck_state = db.value(
+        "SELECT r.value||':'||r.ref_id||':'||c.value FROM jt_nocheck.root r "
+        "JOIN jt_nocheck.child c ON c.parent=r.id WHERE r.id=1;")
+    record("NOCHECK display drift does not imply a root relationship change",
+           nocheck_update.returncode == 0 and nocheck_state == "immutable:7:new child",
+           f"update={nocheck_update.returncode},state={nocheck_state}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_identity_touch CASCADE; CREATE SCHEMA jt_identity_touch;
+CREATE TABLE jt_identity_touch.ref(id integer PRIMARY KEY);
+CREATE TABLE jt_identity_touch.root(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ ref_id integer REFERENCES jt_identity_touch.ref(id));
+CREATE TABLE jt_identity_touch.child(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ parent bigint REFERENCES jt_identity_touch.root(id),value text);
+INSERT INTO jt_identity_touch.ref VALUES(7);
+INSERT INTO jt_identity_touch.root(ref_id) VALUES(7);
+INSERT INTO jt_identity_touch.child(parent,value) VALUES(1,'old');""")
+    identity_spec = {
+        "root": {"table": "jt_identity_touch.root", "key": "id", "fields": {},
+                 "insert": True, "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_identity_touch.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id"}},
+        "array": {"name": "items", "table": "jt_identity_touch.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_identity_touch.documents", identity_spec)
+    identity_update = db.run(
+        "UPDATE jt_identity_touch.documents SET "
+        "data=jsonb_set(data,'{items,0,value}','\"new\"') WHERE _id=1;", False)
+    identity_value = db.value(
+        "SELECT value FROM jt_identity_touch.child WHERE id=1;")
+    record("child-only updates do not rewrite a GENERATED ALWAYS root key",
+           identity_update.returncode == 0 and identity_value == "new",
+           f"update={identity_update.returncode},value={identity_value}")
+
+    generated_doc = json.loads(db.value("SELECT data::text FROM jt_identity_touch.documents WHERE _id=1;"))
+    generated_doc["items"].append({"id": 99, "value": "explicit"})
+    generated_insert = db.run("UPDATE jt_identity_touch.documents SET data="
+                              + quote(json.dumps(generated_doc)) + "::jsonb WHERE _id=1;", False)
+    record("GENERATED ALWAYS child keys reject explicit new identities",
+           db.state(generated_insert) == "PT422"
+           and db.value("SELECT count(*) FROM jt_identity_touch.child WHERE id=99;") == "0",
+           f"state={db.state(generated_insert)}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_manual_keys CASCADE; CREATE SCHEMA jt_manual_keys;
+CREATE TABLE jt_manual_keys.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_manual_keys.child(id text PRIMARY KEY,parent integer NOT NULL REFERENCES jt_manual_keys.root(id),value text);
+INSERT INTO jt_manual_keys.root VALUES(1,'one'),(2,'two');
+INSERT INTO jt_manual_keys.child VALUES('other',2,'owned elsewhere');""")
+    manual_spec = {
+        "root": {"table": "jt_manual_keys.root", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "array": {"name": "items", "table": "jt_manual_keys.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_manual_keys.documents", manual_spec)
+    initial_manual = json.loads(db.value("SELECT data::text FROM jt_manual_keys.documents WHERE _id=1;"))
+    initial_manual["items"].append({"id": "sku-a", "value": "A"})
+    append_manual = db.run("UPDATE jt_manual_keys.documents SET data="
+                           + quote(json.dumps(initial_manual)) + "::jsonb WHERE _id=1;", False)
+    current_manual = json.loads(db.value("SELECT data::text FROM jt_manual_keys.documents WHERE _id=1;"))
+    current_manual["value"] = "must roll back"
+    current_manual["items"].append({"id": "other", "value": "foreign"})
+    foreign_manual = db.run("UPDATE jt_manual_keys.documents SET data="
+                            + quote(json.dumps(current_manual)) + "::jsonb WHERE _id=1;", False)
+    disabled_spec = json.loads(json.dumps(manual_spec))
+    disabled_spec["array"]["insert"] = False
+    create_view(db, "jt_manual_keys.documents_no_insert", disabled_spec)
+    disabled_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_manual_keys.documents_no_insert WHERE _id=1;"))
+    disabled_doc["items"].append({"id": "sku-disabled", "value": "blocked"})
+    disabled_manual = db.run(
+        "UPDATE jt_manual_keys.documents_no_insert SET data="
+        + quote(json.dumps(disabled_doc)) + "::jsonb WHERE _id=1;", False)
+    manual_state = db.value("SELECT r.value||':'||string_agg(c.id,',' ORDER BY c.id) "
+                            "FROM jt_manual_keys.root r JOIN jt_manual_keys.child c ON c.parent=r.id "
+                            "WHERE r.id=1 GROUP BY r.value;")
+    record("globally unused explicit child keys append as one atomic replacement",
+           append_manual.returncode == 0 and db.state(foreign_manual) == "PT422"
+           and db.state(disabled_manual) == "PT422"
+           and manual_state == "one:sku-a",
+           f"append={append_manual.returncode},foreign={db.state(foreign_manual)},"
+           f"disabled={db.state(disabled_manual)},state={manual_state}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_nullable_owner CASCADE; CREATE SCHEMA jt_nullable_owner;
+CREATE TABLE jt_nullable_owner.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_nullable_owner.child(id text PRIMARY KEY,parent integer REFERENCES jt_nullable_owner.root(id),value text);""")
+    nullable_spec = {
+        "root": {"table": "jt_nullable_owner.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_nullable_owner.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": False}}
+    create_view(db, "jt_nullable_owner.documents", nullable_spec)
+    db.run("""INSERT INTO jt_nullable_owner.documents(data) VALUES
+('{"_id":1,"value":"source","items":[{"id":"orphan","value":"unlinked"}]}'::jsonb),
+('{"_id":2,"value":"target","items":[{"id":"owned","value":"existing"}]}'::jsonb);
+SELECT jt_nullable_owner.documents__delete_document(
+  1,data#>>'{_metadata,etag}') FROM jt_nullable_owner.documents WHERE _id=1;""")
+    nullable_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents WHERE _id=2;"))
+    nullable_doc["value"] = "must roll back"
+    nullable_doc["items"].append({"id": "orphan", "value": "unlinked"})
+    orphan_append = db.run(
+        "UPDATE jt_nullable_owner.documents SET data=" + quote(json.dumps(nullable_doc))
+        + "::jsonb WHERE _id=2;", False)
+    nullable_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL'),',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
+    record("NULL-parent child identities are rejected as foreign atomically",
+           db.state(orphan_append) == "PT422"
+           and nullable_state == "target:orphan=NULL,owned=2",
+           f"append={db.state(orphan_append)},state={nullable_state}")
+
+    nullable_delete_spec = json.loads(json.dumps(nullable_spec))
+    nullable_delete_spec["array"]["delete"] = True
+    create_view(db, "jt_nullable_owner.documents_delete", nullable_delete_spec)
+    destructive_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents_delete WHERE _id=2;"))
+    destructive_doc["value"] = "must still roll back"
+    destructive_doc["items"] = [
+        {"id": "orphan", "value": "unlinked"},
+        {"id": "globally-new", "value": "new"},
+    ]
+    destructive_replace = db.run(
+        "UPDATE jt_nullable_owner.documents_delete SET data="
+        + quote(json.dumps(destructive_doc)) + "::jsonb WHERE _id=2;", False)
+    destructive_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
+
+    nullable_role = f"jt_nullable_writer_{time.time_ns()}"
+    cleanup_nullable_role = role_cleanup(db, nullable_role)
+    db.run(f"""CREATE ROLE {nullable_role} NOLOGIN;
+GRANT USAGE ON SCHEMA jt_nullable_owner TO {nullable_role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_nullable_owner TO {nullable_role};
+ALTER TABLE jt_nullable_owner.child ENABLE ROW LEVEL SECURITY;
+CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
+ USING (parent=2) WITH CHECK (parent=2);""")
+    rls_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_nullable_owner.documents WHERE _id=2;"))
+    rls_doc["items"].append({"id": "orphan", "value": "unlinked"})
+    rls_append = db.run(
+        f"SET ROLE {nullable_role}; UPDATE jt_nullable_owner.documents SET data="
+        + quote(json.dumps(rls_doc)) + "::jsonb WHERE _id=2;", False)
+    db.run(f"DROP OWNED BY {nullable_role}; DROP ROLE {nullable_role};")
+    atexit.unregister(cleanup_nullable_role)
+    rls_state = db.value(
+        "SELECT (SELECT value FROM jt_nullable_owner.root WHERE id=2)||':'||"
+        "string_agg(id||'='||coalesce(parent::text,'NULL')||'='||value,',' ORDER BY id) "
+        "FROM jt_nullable_owner.child;")
+    record("mixed orphan replacements and RLS-hidden orphans fail closed",
+           db.state(destructive_replace) == "PT422"
+           and destructive_state == "target:orphan=NULL=unlinked,owned=2=existing"
+           and db.state(rls_append) == "PT422"
+           and rls_state == "target:orphan=NULL=unlinked,owned=2=existing",
+           f"replace={db.state(destructive_replace)},state={destructive_state},"
+           f"rls={db.state(rls_append)},rls_state={rls_state}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_secondary_audit CASCADE;
+DROP SCHEMA IF EXISTS jt_secondary_unique CASCADE; CREATE SCHEMA jt_secondary_unique;
+CREATE TABLE jt_secondary_unique.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_secondary_unique.child(
+ id text PRIMARY KEY,parent integer REFERENCES jt_secondary_unique.root(id),value text,
+ CONSTRAINT child_value_unique UNIQUE(value));""")
+    secondary_spec = {
+        "root": {"table": "jt_secondary_unique.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_secondary_unique.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_secondary_unique.documents", secondary_spec)
+    db.run("INSERT INTO jt_secondary_unique.documents(data) VALUES"
+           "('{\"_id\":1,\"value\":\"root\",\"items\":[{\"id\":\"sku-a\","
+           "\"value\":\"unique-value\"}]}'::jsonb);")
+    secondary_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_secondary_unique.documents WHERE _id=1;"))
+    secondary_doc["value"] = "must roll back"
+    secondary_doc["items"].append({"id": "sku-b", "value": "unique-value"})
+    secondary_conflict = db.run(
+        "UPDATE jt_secondary_unique.documents SET data=" + quote(json.dumps(secondary_doc))
+        + "::jsonb WHERE _id=1;", False)
+    secondary_state = db.value(
+        "SELECT r.value||':'||count(c.*) FROM jt_secondary_unique.root r "
+        "LEFT JOIN jt_secondary_unique.child c ON c.parent=r.id "
+        "WHERE r.id=1 GROUP BY r.value;")
+    record("secondary child uniqueness diagnostics are preserved",
+           db.state(secondary_conflict) == "23505"
+           and "child_value_unique" in secondary_conflict.stderr
+           and secondary_state == "root:1",
+           f"state={db.state(secondary_conflict)},constraint="
+           f"{'child_value_unique' in secondary_conflict.stderr},source={secondary_state}")
+
+    diagnostic_probes = db.run(r"""DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-secondary","value":"unique-value"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st IS DISTINCT FROM '23505' OR con IS DISTINCT FROM 'child_value_unique'
+     OR tab IS DISTINCT FROM 'child' OR sch IS DISTINCT FROM 'jt_secondary_unique' THEN
+    RAISE EXCEPTION 'secondary diagnostics mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;
+
+CREATE SCHEMA jt_secondary_audit;
+CREATE TABLE jt_secondary_audit.audit(
+ id integer,CONSTRAINT child_pkey PRIMARY KEY(id));
+INSERT INTO jt_secondary_audit.audit VALUES(1);
+CREATE FUNCTION jt_secondary_unique.child_insert_probe() RETURNS trigger
+LANGUAGE plpgsql AS $trigger$
+BEGIN
+  IF NEW.value='trigger-conflict' THEN
+    INSERT INTO jt_secondary_audit.audit VALUES(1);
+  ELSIF NEW.value='claim-key' THEN
+    INSERT INTO jt_secondary_unique.child(id,parent,value)
+    VALUES(NEW.id,NEW.parent,'claimed-by-trigger');
+  END IF;
+  RETURN NEW;
+END $trigger$;
+CREATE TRIGGER child_insert_probe BEFORE INSERT ON jt_secondary_unique.child
+FOR EACH ROW EXECUTE FUNCTION jt_secondary_unique.child_insert_probe();
+
+DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-trigger","value":"trigger-conflict"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st IS DISTINCT FROM '23505' OR con IS DISTINCT FROM 'child_pkey'
+     OR tab IS DISTINCT FROM 'audit' OR sch IS DISTINCT FROM 'jt_secondary_audit' THEN
+    RAISE EXCEPTION 'trigger diagnostics mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;
+
+DO $probe$
+DECLARE st text; con text; tab text; sch text;
+BEGIN
+  BEGIN
+    UPDATE jt_secondary_unique.documents
+    SET data=jsonb_set(data,'{items}',(data->'items')||
+      '[{"id":"sku-claimed","value":"claim-key"}]'::jsonb)
+    WHERE _id=1;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS st=RETURNED_SQLSTATE,con=CONSTRAINT_NAME,
+      tab=TABLE_NAME,sch=SCHEMA_NAME;
+  END;
+  IF st IS DISTINCT FROM 'PT422' OR coalesce(con,'')<>'' THEN
+    RAISE EXCEPTION 'child identity remap mismatch: %/%/%.%',st,con,sch,tab;
+  END IF;
+END $probe$;""", False)
+    diagnostic_state = (db.value(
+        "SELECT r.value||':'||(SELECT count(*) FROM jt_secondary_unique.child)||':'||"
+        "(SELECT count(*) FROM jt_secondary_audit.audit) "
+        "FROM jt_secondary_unique.root r WHERE id=1;")
+        if diagnostic_probes.returncode == 0 else "probe-failed")
+    record("unique-conflict remapping uses exact relation identity",
+           diagnostic_probes.returncode == 0 and diagnostic_state == "root:1:1",
+           f"probes={diagnostic_probes.returncode},state={diagnostic_state},"
+           f"stderr={diagnostic_probes.stderr.strip()}")
+
+    binding_role = f"jt_binding_writer_{time.time_ns()}"
+    cleanup_binding_role = role_cleanup(db, binding_role)
+    db.run(f"""CREATE ROLE {binding_role} NOLOGIN;
+DROP SCHEMA IF EXISTS jt_binding_acl CASCADE; CREATE SCHEMA jt_binding_acl;
+GRANT USAGE ON SCHEMA jt_binding_acl TO {binding_role};
+ALTER DEFAULT PRIVILEGES IN SCHEMA jt_binding_acl GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {binding_role};
+CREATE TABLE jt_binding_acl.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_acl.root(id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding_acl.ref(id),value text);
+CREATE TABLE jt_binding_acl.child(id text PRIMARY KEY,parent integer NOT NULL REFERENCES jt_binding_acl.root(id),value text);
+INSERT INTO jt_binding_acl.ref VALUES(7,'seven');
+INSERT INTO jt_binding_acl.root VALUES(1,7,'one');
+INSERT INTO jt_binding_acl.child VALUES('a',1,'A');""")
+    binding_spec = {
+        "root": {"table": "jt_binding_acl.root", "key": "id",
+                 "fields": {"value": "value"}, "update": True},
+        "object": {"name": "reference", "table": "jt_binding_acl.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"}},
+        "array": {"name": "items", "table": "jt_binding_acl.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_binding_acl.documents", binding_spec)
+    db.run(f"GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_binding_acl TO {binding_role};")
+    helper_writes = [
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__root_binding"
+               "(id,ref_id,value) VALUES(2,7,'bypass');", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__root_binding"
+               "(id,ref_id,value) VALUES(1,7,'bypass') ON CONFLICT(id) DO UPDATE SET value=excluded.value;", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__object_binding"
+               "(id,label) VALUES(8,'bypass');", False),
+        db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__array_binding"
+               "(id,parent,value) VALUES('b',1,'bypass');", False),
+    ]
+    role_update = db.run(f"SET ROLE {binding_role}; UPDATE jt_binding_acl.documents SET "
+                         "data=jsonb_set(data,'{value}','\"normal\"') WHERE _id=1;", False)
+    acl_state = db.value("SELECT value||':'||(SELECT count(*) FROM jt_binding_acl.child) "
+                         "FROM jt_binding_acl.root WHERE id=1;")
+    inherited = db.value(f"SELECT bool_and(has_table_privilege('{binding_role}',c.oid,'INSERT')) "
+                         "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                         "WHERE n.nspname='jt_binding_acl' AND c.relname LIKE 'documents__%_binding';")
+    record("binding views remain non-writable under default and later broad grants",
+           inherited == "t" and all(db.state(result) == "55000" for result in helper_writes)
+           and role_update.returncode == 0 and acl_state == "normal:1",
+           f"grants={inherited},helpers={[db.state(r) for r in helper_writes]},"
+           f"normal={role_update.returncode},state={acl_state}")
+    db.run(f"ALTER DEFAULT PRIVILEGES IN SCHEMA jt_binding_acl REVOKE ALL ON TABLES FROM {binding_role};"
+           f"DROP OWNED BY {binding_role}; DROP ROLE {binding_role};")
+    atexit.unregister(cleanup_binding_role)
+
+    db.run("""DROP SCHEMA IF EXISTS jt_typed_duplicate CASCADE; CREATE SCHEMA jt_typed_duplicate;
+CREATE TABLE jt_typed_duplicate.root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_typed_duplicate.child(id integer PRIMARY KEY,parent integer REFERENCES jt_typed_duplicate.root(id));
+INSERT INTO jt_typed_duplicate.root VALUES(1,'original');
+INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
+    duplicate_spec = {
+        "root": {"table": "jt_typed_duplicate.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_typed_duplicate.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_typed_duplicate.documents", duplicate_spec)
+    duplicate_insert = db.run(
+        "INSERT INTO jt_typed_duplicate.documents(data) VALUES"
+        "('{\"_id\":2,\"value\":\"inserted\",\"items\":[{\"id\":20},{\"id\":\"20\"}]}'::jsonb);",
+        False)
+    duplicate_update = db.run(
+        "UPDATE jt_typed_duplicate.documents SET "
+        "data=jsonb_set(jsonb_set(data,'{value}','\"changed\"'),'{items}',"
+        "'[{\"id\":10},{\"id\":\"10\"}]'::jsonb) WHERE _id=1;", False)
+    duplicate_state = db.value(
+        "SELECT value||':'||(SELECT count(*) FROM jt_typed_duplicate.child WHERE parent=1) "
+        "FROM jt_typed_duplicate.root WHERE id=1;")
+    inserted_rows = db.value(
+        "SELECT count(*) FROM jt_typed_duplicate.root WHERE id=2;")
+    record("array identities are unique after conversion to the SQL key type",
+           db.state(duplicate_insert) == "PT422" and db.state(duplicate_update) == "PT422"
+           and duplicate_state == "original:1" and inserted_rows == "0",
+           f"insert={db.state(duplicate_insert)},update={db.state(duplicate_update)},"
+           f"state={duplicate_state},inserted={inserted_rows}")
+
     db.run("ALTER TABLE jt_integrity.root RENAME TO root_original;"
            "CREATE TABLE jt_integrity.root(LIKE jt_integrity.root_original INCLUDING ALL);")
     swapped_update = db.run("UPDATE jt_integrity.documents SET data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
     current_etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
     swapped_delete = db.run(
         f"SELECT jt_integrity.documents__delete_document(1,{quote(current_etag)});", False)
+    swapped_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_integrity.documents';""")
     original = db.value("SELECT value FROM jt_integrity.root_original WHERE id=1;")
     replacement = db.value("SELECT count(*) FROM jt_integrity.root;")
     db.run("DROP TABLE jt_integrity.root; ALTER TABLE jt_integrity.root_original RENAME TO root;"
+           "DROP VIEW jt_integrity.documents__root_binding;"
+           "DROP VIEW jt_integrity.documents__object_binding;"
+           "DROP VIEW jt_integrity.documents__array_binding;"
            "DROP VIEW jt_integrity.documents CASCADE;"
            "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
            "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
            "WHERE n.nspname='jt_integrity' AND p.proname=ANY(ARRAY['documents__insert',"
-           "'documents__update','documents__delete','documents__delete_document']) LOOP "
+           "'documents__update','documents__delete','documents__guard','documents__delete_document','documents__check']) LOOP "
            "EXECUTE format('DROP FUNCTION %s',item); END LOOP; END$$;")
     create_view(db, "jt_integrity.documents", spec)
     regenerated_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;"))
@@ -205,9 +873,1369 @@ SET data=jsonb_set(data,'{reference,id}','8'::jsonb) WHERE _id=1;""", False)
                          quote(json.dumps(regenerated_doc)) + "::jsonb WHERE _id=1;", False)
     record("source relation replacement requires regeneration",
            db.state(swapped_update) == "PT422" and db.state(swapped_delete) == "PT422"
+           and swapped_inventory == "PT422"
            and original == "one" and replacement == "0" and regenerated.returncode == 0,
            f"update={db.state(swapped_update)},delete={db.state(swapped_delete)},"
+           f"inventory={swapped_inventory},"
            f"original={original},replacement={replacement},regenerated={regenerated.returncode}")
+
+    drift_states = []
+    for role in ("root", "object", "array"):
+        schema = "jt_late_inheritance_" + role
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.root(id integer PRIMARY KEY,object_id integer,value text);
+CREATE TABLE {schema}.object(id integer PRIMARY KEY,label text);
+ALTER TABLE {schema}.root ADD CONSTRAINT root_object_fk
+  FOREIGN KEY(object_id) REFERENCES {schema}.object(id);
+CREATE TABLE {schema}.child(id integer PRIMARY KEY,parent integer NOT NULL
+  REFERENCES {schema}.root(id),value text);
+INSERT INTO {schema}.object VALUES(7,'shared');
+INSERT INTO {schema}.root VALUES(1,7,'one');
+INSERT INTO {schema}.child VALUES(10,1,'item');""")
+        drift_spec = {
+            "root": {"table": f"{schema}.root", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.object", "key": "id",
+                       "root_fk": "object_id", "fields": {"id": "id", "label": "label"}},
+            "array": {"name": "items", "table": f"{schema}.child", "key": "id",
+                      "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                      "insert": True, "update": True, "delete": True}}
+        create_view(db, f"{schema}.documents", drift_spec)
+        source_table = "child" if role == "array" else role
+        db.run(f"CREATE TABLE {schema}.{role}_descendant() INHERITS({schema}.{source_table});")
+        changed = db.run(f"UPDATE {schema}.documents SET "
+                         "data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+        drift_states.append(db.state(changed))
+
+    enforcement_states = []
+    if int(db.value("SHOW server_version_num;")) >= 180000:
+        schema = "jt_enforcement_drift"
+        db.run(f"""DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+CREATE TABLE {schema}.object(id integer PRIMARY KEY,label text);
+CREATE TABLE {schema}.root(id integer PRIMARY KEY,object_id integer,value text,
+  CONSTRAINT root_object_fk FOREIGN KEY(object_id) REFERENCES {schema}.object(id));
+CREATE TABLE {schema}.child(id integer PRIMARY KEY,parent integer NOT NULL,value text,
+  CONSTRAINT child_root_fk FOREIGN KEY(parent) REFERENCES {schema}.root(id));
+INSERT INTO {schema}.object VALUES(7,'shared');
+INSERT INTO {schema}.root VALUES(1,7,'one');
+INSERT INTO {schema}.child VALUES(10,1,'item');""")
+        enforcement_spec = {
+            "root": {"table": f"{schema}.root", "key": "id",
+                     "fields": {"value": "value"}, "update": True},
+            "object": {"name": "reference", "table": f"{schema}.object", "key": "id",
+                       "root_fk": "object_id", "fields": {"id": "id", "label": "label"}},
+            "array": {"name": "items", "table": f"{schema}.child", "key": "id",
+                      "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
+                      "insert": True, "update": True, "delete": True}}
+        create_view(db, f"{schema}.documents", enforcement_spec)
+        for table, constraint in (("root", "root_object_fk"), ("child", "child_root_fk")):
+            db.run(f"ALTER TABLE {schema}.{table} ALTER CONSTRAINT {constraint} NOT ENFORCED;")
+            changed = db.run(f"UPDATE {schema}.documents SET "
+                             "data=jsonb_set(data,'{value}','\"wrong\"') WHERE _id=1;", False)
+            enforcement_states.append(db.state(changed))
+            db.run(f"ALTER TABLE {schema}.{table} ALTER CONSTRAINT {constraint} ENFORCED;")
+    record("runtime guards reject later inheritance and FK enforcement drift",
+           drift_states == ["PT422", "PT422", "PT422"]
+           and enforcement_states in ([], ["PT422", "PT422"]),
+           f"inheritance={drift_states},enforcement={enforcement_states}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_notvalid CASCADE; CREATE SCHEMA jt_notvalid;
+CREATE TABLE jt_notvalid.ref(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_notvalid.root(id integer PRIMARY KEY,ref_id integer,value text);
+CREATE TABLE jt_notvalid.child(id integer PRIMARY KEY,parent_id integer,value text);
+ALTER TABLE jt_notvalid.root ADD CONSTRAINT root_ref_fk
+  FOREIGN KEY(ref_id) REFERENCES jt_notvalid.ref(id) NOT VALID;
+ALTER TABLE jt_notvalid.child ADD CONSTRAINT child_root_fk
+  FOREIGN KEY(parent_id) REFERENCES jt_notvalid.root(id) NOT VALID;""")
+    notvalid_object_spec = {
+        "root": {"table": "jt_notvalid.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "object": {"name": "reference", "table": "jt_notvalid.ref", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"}},
+    }
+    notvalid_array_spec = {
+        "root": {"table": "jt_notvalid.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_notvalid.child", "key": "id",
+                  "parent_fk": "parent_id", "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True},
+    }
+    notvalid_states = []
+    for name, mapping in (("object_documents", notvalid_object_spec),
+                          ("array_documents", notvalid_array_spec)):
+        encoded = quote(json.dumps(mapping)) + "::jsonb"
+        notvalid_states.append(db.state(db.run(
+            f"SELECT jsontailor.duality_view_ddl('jt_notvalid.{name}',{encoded});", False)))
+        notvalid_states.append(db.state(db.run(
+            f"SELECT jsontailor.create_duality_view('jt_notvalid.{name}',{encoded});", False)))
+    rejected_objects = db.value("""SELECT
+      (to_regclass('jt_notvalid.object_documents') IS NULL)::text||':'||
+      (to_regclass('jt_notvalid.array_documents') IS NULL)::text;""")
+    db.run("""ALTER TABLE jt_notvalid.root VALIDATE CONSTRAINT root_ref_fk;
+ALTER TABLE jt_notvalid.child VALIDATE CONSTRAINT child_root_fk;
+INSERT INTO jt_notvalid.ref VALUES(7,'reference');""")
+    validated_spec = json.loads(json.dumps(notvalid_object_spec))
+    validated_spec["array"] = notvalid_array_spec["array"]
+    create_view(db, "jt_notvalid.documents", validated_spec)
+    validated_insert = db.run("""INSERT INTO jt_notvalid.documents(data) VALUES(
+      '{"_id":1,"value":"one","reference":{"id":7},
+        "items":[{"id":10,"value":"item"}]}'::jsonb);""", False)
+    validated_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+
+    db.run("""ALTER TABLE jt_notvalid.root DROP CONSTRAINT root_ref_fk;
+ALTER TABLE jt_notvalid.root ADD CONSTRAINT root_ref_fk
+  FOREIGN KEY(ref_id) REFERENCES jt_notvalid.ref(id) NOT VALID;""")
+    object_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+    object_drift = db.run("""UPDATE jt_notvalid.documents
+      SET data=jsonb_set(data,'{value}','"object-drift"') WHERE _id=1;""", False)
+    object_preserved = db.value("SELECT value FROM jt_notvalid.root WHERE id=1;")
+    db.run("ALTER TABLE jt_notvalid.root VALIDATE CONSTRAINT root_ref_fk;")
+
+    db.run("""ALTER TABLE jt_notvalid.child DROP CONSTRAINT child_root_fk;
+ALTER TABLE jt_notvalid.child ADD CONSTRAINT child_root_fk
+  FOREIGN KEY(parent_id) REFERENCES jt_notvalid.root(id) NOT VALID;""")
+    array_health = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_notvalid.documents';""")
+    array_drift = db.run("""UPDATE jt_notvalid.documents
+      SET data=jsonb_set(data,'{value}','"array-drift"') WHERE _id=1;""", False)
+    array_preserved = db.value("SELECT value FROM jt_notvalid.root WHERE id=1;")
+    record("unvalidated mapping foreign keys are rejected and later drift fails closed",
+           notvalid_states == ["22023", "22023", "22023", "22023"]
+           and rejected_objects == "true:true"
+           and validated_insert.returncode == 0 and validated_health == "OK"
+           and object_health == "PT422" and db.state(object_drift) == "PT422"
+           and object_preserved == "one"
+           and array_health == "PT422" and db.state(array_drift) == "PT422"
+           and array_preserved == "one",
+           f"initial={notvalid_states},objects={rejected_objects},"
+           f"validated={validated_insert.returncode}/{validated_health},"
+           f"object={object_health}/{db.state(object_drift)}/{object_preserved},"
+           f"array={array_health}/{db.state(array_drift)}/{array_preserved}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_unmapped_domain CASCADE;
+CREATE SCHEMA jt_unmapped_domain;
+CREATE DOMAIN jt_unmapped_domain.required_text AS text NOT NULL DEFAULT 'domain-default';
+CREATE TABLE jt_unmapped_domain.object(
+ id integer PRIMARY KEY,label text NOT NULL,hidden jt_unmapped_domain.required_text);
+CREATE TABLE jt_unmapped_domain.root(
+ id integer PRIMARY KEY,object_id integer REFERENCES jt_unmapped_domain.object(id),
+ value text NOT NULL DEFAULT 'root-default',hidden jt_unmapped_domain.required_text);
+CREATE TABLE jt_unmapped_domain.child(
+ id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+ parent integer NOT NULL REFERENCES jt_unmapped_domain.root(id),
+ value text NOT NULL DEFAULT 'child-default',hidden jt_unmapped_domain.required_text);
+INSERT INTO jt_unmapped_domain.object(id,label) VALUES(7,'reference');""")
+    domain_spec = {
+        "root": {"table": "jt_unmapped_domain.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_unmapped_domain.object",
+                   "key": "id", "root_fk": "object_id",
+                   "fields": {"id": "id", "label": "label"}},
+        "array": {"name": "items", "table": "jt_unmapped_domain.child",
+                  "key": "id", "parent_fk": "parent",
+                  "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_unmapped_domain.documents", domain_spec)
+    domain_insert = db.run(
+        "INSERT INTO jt_unmapped_domain.documents(data) VALUES"
+        "('{\"_id\":1,\"reference\":{\"id\":7},"
+        "\"items\":[{\"value\":\"first\"},{\"value\":\"second\"}]}'::jsonb);",
+        False)
+    domain_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_unmapped_domain.documents WHERE _id=1;"))
+    domain_doc["value"] = "changed"
+    domain_doc["items"][0]["value"] = "changed-child"
+    domain_doc["items"].append({"value": "third"})
+    domain_update = db.run(
+        "UPDATE jt_unmapped_domain.documents SET data="
+        + quote(json.dumps(domain_doc)) + "::jsonb WHERE _id=1;", False)
+    domain_defaults = db.value(
+        "SELECT r.hidden||':'||count(*)||':'||min(c.hidden)||':'||r.value "
+        "FROM jt_unmapped_domain.root r JOIN jt_unmapped_domain.child c ON c.parent=r.id "
+        "WHERE r.id=1 GROUP BY r.hidden,r.value;")
+    record("unmapped NOT NULL domains preserve defaults and do not block writes",
+           domain_insert.returncode == 0 and domain_update.returncode == 0
+           and domain_defaults == "domain-default:3:domain-default:changed",
+           f"insert={domain_insert.returncode},update={domain_update.returncode},"
+           f"state={domain_defaults}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_json_contract CASCADE; CREATE SCHEMA jt_json_contract;
+CREATE TABLE jt_json_contract.root(
+ id numeric(12,2) PRIMARY KEY,label text,amount numeric(12,2),flag boolean);
+CREATE TABLE jt_json_contract.child(
+ id numeric(12,2) PRIMARY KEY,parent numeric(12,2) REFERENCES jt_json_contract.root(id),label text);
+INSERT INTO jt_json_contract.root VALUES(9, 'owner', 1, true);
+INSERT INTO jt_json_contract.child VALUES(99, 9, 'foreign');""")
+    contract_spec = {
+        "root": {"table": "jt_json_contract.root", "key": "id",
+                 "fields": {"label": "label", "amount": "amount", "flag": "flag"},
+                 "insert": True, "update": True},
+        "array": {"name": "items", "table": "jt_json_contract.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_json_contract.documents", contract_spec)
+    contract_documents = [
+        '{"_id":"1","label":"x","amount":1,"flag":true,"items":[]}',
+        '{"_id":1,"label":true,"amount":1,"flag":true,"items":[]}',
+        '{"_id":1,"label":"x","amount":"1","flag":true,"items":[]}',
+        '{"_id":1,"label":"x","amount":1,"flag":"true","items":[]}',
+        '{"_id":2.005,"label":"x","amount":1,"flag":true,"items":[]}',
+        '{"_id":2,"label":"x","amount":1.005,"flag":true,"items":[]}',
+        '{"_id":2,"label":"x","amount":1,"flag":true,"items":[{"id":3.005,"label":"x"}]}',
+        '{"_id":2,"label":"x","amount":1,"flag":true,"items":[{"id":99,"label":"foreign"}]}',
+    ]
+    contract_states = [db.state(db.run(
+        "INSERT INTO jt_json_contract.documents(data) VALUES(" + quote(document) + "::jsonb);",
+        False)) for document in contract_documents]
+
+    db.run("""CREATE TABLE jt_json_contract.generated_root(
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,label text);
+CREATE TABLE jt_json_contract.generated_child(
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ parent bigint REFERENCES jt_json_contract.generated_root(id),label text);""")
+    generated_spec = {
+        "root": {"table": "jt_json_contract.generated_root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True},
+        "array": {"name": "items", "table": "jt_json_contract.generated_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True}}
+    create_view(db, "jt_json_contract.generated_documents", generated_spec)
+    generated_root = db.run(
+        "INSERT INTO jt_json_contract.generated_documents(data) VALUES"
+        "('{\"_id\":10,\"label\":\"x\",\"items\":[]}'::jsonb);", False)
+    generated_child = db.run(
+        "INSERT INTO jt_json_contract.generated_documents(data) VALUES"
+        "('{\"label\":\"x\",\"items\":[{\"id\":10,\"label\":\"x\"}]}'::jsonb);",
+        False)
+    db.run("""CREATE TABLE jt_json_contract.partition_root(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_json_contract.partition_child(
+ id integer,parent integer REFERENCES jt_json_contract.partition_root(id),label text,
+ PRIMARY KEY(id)) PARTITION BY RANGE(id);
+CREATE TABLE jt_json_contract.partition_child_low
+ PARTITION OF jt_json_contract.partition_child FOR VALUES FROM (0) TO (10);""")
+    partition_spec = {
+        "root": {"table": "jt_json_contract.partition_root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True},
+        "array": {"name": "items", "table": "jt_json_contract.partition_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "label": "label"},
+                  "insert": True}}
+    create_view(db, "jt_json_contract.partition_documents", partition_spec)
+    missing_partition = db.run(
+        "INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+        "('{\"_id\":1,\"label\":\"x\",\"items\":[{\"id\":99,\"label\":\"x\"}]}'::jsonb);",
+        False)
+    bulk_missing_partition = db.run(
+        "INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+        "('{\"_id\":2,\"label\":\"x\",\"items\":[{\"id\":98,\"label\":\"x\"},"
+        "{\"id\":99,\"label\":\"y\"}]}'::jsonb);", False)
+    db.run("INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+           "('{\"_id\":3,\"label\":\"x\",\"items\":[{\"id\":3,\"label\":\"x\"}]}'::jsonb);")
+    partition_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_json_contract.partition_documents WHERE _id=3;"))
+    partition_doc["items"].append({"id": 99, "label": "append"})
+    append_missing_partition = db.run(
+        "UPDATE jt_json_contract.partition_documents SET data=" +
+        quote(json.dumps(partition_doc)) + "::jsonb WHERE _id=3;", False)
+    partition_doc["items"] = [{"id": 99, "label": "moved"}]
+    moved_missing_partition = db.run(
+        "UPDATE jt_json_contract.partition_documents SET data=" +
+        quote(json.dumps(partition_doc)) + "::jsonb WHERE _id=3;", False)
+    record("JSON types, numeric precision and INSERT identity errors use PT422",
+           contract_states == ["PT422"] * len(contract_documents)
+           and db.state(generated_root) == "PT422" and db.state(generated_child) == "PT422"
+           and [db.state(x) for x in (missing_partition, bulk_missing_partition,
+                                      append_missing_partition, moved_missing_partition)]
+           == ["PT422"] * 4
+           and db.value("SELECT count(*) FROM jt_json_contract.root WHERE id<>9;") == "0",
+           f"documents={contract_states},generated="
+           f"{db.state(generated_root)}/{db.state(generated_child)},"
+           f"partition={[db.state(x) for x in (missing_partition, bulk_missing_partition, append_missing_partition, moved_missing_partition)]}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_timestamptz CASCADE; CREATE SCHEMA jt_timestamptz;
+CREATE TABLE jt_timestamptz.reference(id integer PRIMARY KEY, observed_at timestamptz);
+CREATE TABLE jt_timestamptz.root(
+ id integer PRIMARY KEY, observed_at timestamptz, reference_id integer REFERENCES jt_timestamptz.reference(id));
+CREATE TABLE jt_timestamptz.child(
+ id integer PRIMARY KEY, parent integer REFERENCES jt_timestamptz.root(id), observed_at timestamptz);
+INSERT INTO jt_timestamptz.reference VALUES(7,'2026-06-01 12:34:56.123456+02');
+INSERT INTO jt_timestamptz.root VALUES(1,'2026-06-01 12:34:56.123456+02',7);
+INSERT INTO jt_timestamptz.root VALUES(2,'infinity',NULL);
+INSERT INTO jt_timestamptz.child VALUES(10,1,'2026-06-01 12:34:56.123456+02');
+CREATE TABLE jt_timestamptz.key_root(id timestamptz PRIMARY KEY,label text);""")
+    tz_spec = {
+        "root": {"table": "jt_timestamptz.root", "key": "id",
+                 "fields": {"observedAt": "observed_at"}, "update": True},
+        "object": {"name": "reference", "table": "jt_timestamptz.reference",
+                   "key": "id", "root_fk": "reference_id",
+                   "fields": {"id": "id", "observedAt": "observed_at"}},
+        "array": {"name": "items", "table": "jt_timestamptz.child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "observedAt": "observed_at"}}}
+    create_view(db, "jt_timestamptz.documents", tz_spec)
+    utc_document = db.value(
+        "SET TimeZone='UTC'; SELECT data::text FROM jt_timestamptz.documents WHERE _id=1;")
+    prague_document = db.value(
+        "SET TimeZone='Europe/Prague'; SELECT data::text FROM jt_timestamptz.documents WHERE _id=1;")
+    infinite_values = db.value(
+        "SET TimeZone='Pacific/Auckland'; SELECT data->>'observedAt' FROM jt_timestamptz.documents WHERE _id=2;")
+    tz_update = db.run("""SET TimeZone='Europe/Prague';
+UPDATE jt_timestamptz.documents
+SET data=jsonb_set(data,'{observedAt}','\"2026-06-01T13:34:56.123456+03:00\"')
+WHERE _id=1;""", False)
+    normalized_value = db.value(
+        "SET TimeZone='UTC'; SELECT data->>'observedAt' FROM jt_timestamptz.documents WHERE _id=1;")
+    key_spec = {"root": {"table": "jt_timestamptz.key_root", "key": "id",
+                         "fields": {"label": "label"}, "insert": True, "update": True}}
+    create_view(db, "jt_timestamptz.key_documents", key_spec)
+    key_insert = db.run("""SET TimeZone='Europe/Prague';
+INSERT INTO jt_timestamptz.key_documents(data)
+VALUES('{"_id":"2026-06-01T12:00:00+02:00","label":"first"}'::jsonb);""", False)
+    key_update = db.run("""SET TimeZone='America/New_York';
+UPDATE jt_timestamptz.key_documents SET data=jsonb_set(data,'{label}','"second"')
+WHERE _id='2026-06-01T10:00:00Z'::timestamptz;""", False)
+    normalized_key = db.value(
+        "SET TimeZone='Asia/Tokyo'; SELECT data->>'_id' FROM jt_timestamptz.key_documents;")
+    record("timestamptz documents and ETags are independent of session TimeZone",
+           utc_document == prague_document and infinite_values == "infinity"
+           and tz_update.returncode == 0
+           and normalized_value == "2026-06-01T10:34:56.123456Z"
+           and key_insert.returncode == 0 and key_update.returncode == 0
+           and normalized_key == "2026-06-01T10:00:00.000000Z",
+           f"same_document={utc_document == prague_document},infinity={infinite_values},"
+           f"update={tz_update.returncode},"
+           f"value={normalized_value},key={key_insert.returncode}/{key_update.returncode}/"
+           f"{normalized_key}")
+
+    db.run("""CREATE TABLE jt_timestamptz.bc_reference(
+ id timestamptz PRIMARY KEY, observed_at timestamptz);
+CREATE TABLE jt_timestamptz.bc_root(
+ id timestamptz PRIMARY KEY, observed_at timestamptz,
+ reference_id timestamptz REFERENCES jt_timestamptz.bc_reference(id));
+CREATE TABLE jt_timestamptz.bc_child(
+ id timestamptz PRIMARY KEY,
+ parent timestamptz REFERENCES jt_timestamptz.bc_root(id),
+ observed_at timestamptz);
+INSERT INTO jt_timestamptz.bc_reference VALUES
+ ('0002-02-03 04:05:06.123456+00 BC','0003-03-04 05:06:07.234567+00 BC'),
+ ('0002-02-03 04:05:06.123456+00 AD','0003-03-04 05:06:07.234567+00 AD');
+INSERT INTO jt_timestamptz.bc_root VALUES
+ ('0001-01-01 00:00:00+00 BC','0004-04-05 06:07:08.345678+00 BC','0002-02-03 04:05:06.123456+00 BC'),
+ ('0001-01-01 00:00:00+00 AD','0004-04-05 06:07:08.345678+00 AD','0002-02-03 04:05:06.123456+00 AD');
+INSERT INTO jt_timestamptz.bc_child VALUES
+ ('0005-05-06 07:08:09.456789+00 BC','0001-01-01 00:00:00+00 BC','0006-06-07 08:09:10.567890+00 BC'),
+ ('0005-05-06 07:08:09.456789+00 AD','0001-01-01 00:00:00+00 AD','0006-06-07 08:09:10.567890+00 AD');""")
+    bc_spec = {
+        "root": {"table": "jt_timestamptz.bc_root", "key": "id",
+                 "fields": {"observedAt": "observed_at"}, "update": True},
+        "object": {"name": "reference", "table": "jt_timestamptz.bc_reference",
+                   "key": "id", "root_fk": "reference_id",
+                   "fields": {"id": "id", "observedAt": "observed_at"}},
+        "array": {"name": "items", "table": "jt_timestamptz.bc_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "observedAt": "observed_at"},
+                  "update": True}}
+    create_view(db, "jt_timestamptz.bc_documents", bc_spec)
+    bc_document = json.loads(db.value("""SET TimeZone='Asia/Kathmandu';
+SELECT data::text FROM jt_timestamptz.bc_documents
+WHERE _id='0001-01-01 00:00:00+00 BC'::timestamptz;"""))
+    ad_document = json.loads(db.value("""SET TimeZone='America/New_York';
+SELECT data::text FROM jt_timestamptz.bc_documents
+WHERE _id='0001-01-01 00:00:00+00 AD'::timestamptz;"""))
+    changed_bc_document = json.loads(json.dumps(bc_document))
+    changed_bc_document["observedAt"] = "0007-07-08T09:10:11.123456Z BC"
+    changed_bc_document["items"][0]["observedAt"] = "0008-08-09T10:11:12.234567Z BC"
+    bc_roundtrip = db.run("SET TimeZone='Europe/Prague'; UPDATE jt_timestamptz.bc_documents "
+                          "SET data=" + quote(json.dumps(changed_bc_document)) +
+                          "::jsonb WHERE _id='0001-01-01 00:00:00+00 BC'::timestamptz "
+                          "RETURNING data::text;", False)
+    returned_bc_line = next((line for line in bc_roundtrip.stdout.splitlines()
+                             if line.startswith("{")), "")
+    returned_bc = (json.loads(returned_bc_line)
+                   if bc_roundtrip.returncode == 0 and returned_bc_line else {})
+    stored_bc = db.value("""SELECT
+      (r.observed_at='0007-07-08 09:10:11.123456+00 BC'::timestamptz)::text||':'||
+      (c.observed_at='0008-08-09 10:11:12.234567+00 BC'::timestamptz)::text
+      FROM jt_timestamptz.bc_root r JOIN jt_timestamptz.bc_child c ON c.parent=r.id
+      WHERE r.id='0001-01-01 00:00:00+00 BC'::timestamptz;""")
+    bc_values = [bc_document["_id"], bc_document["observedAt"],
+                 bc_document["reference"]["id"], bc_document["reference"]["observedAt"],
+                 bc_document["items"][0]["id"], bc_document["items"][0]["observedAt"]]
+    ad_values = [ad_document["_id"], ad_document["observedAt"],
+                 ad_document["reference"]["id"], ad_document["reference"]["observedAt"],
+                 ad_document["items"][0]["id"], ad_document["items"][0]["observedAt"]]
+    record("BC and AD timestamptz encoding is injective and reversible across mapped paths",
+           all(value.endswith(" BC") for value in bc_values)
+           and all(not value.endswith(" BC") for value in ad_values)
+           and bc_document["_metadata"]["etag"] != ad_document["_metadata"]["etag"]
+           and bc_roundtrip.returncode == 0 and stored_bc == "true:true"
+           and returned_bc.get("_id", "").endswith(" BC")
+           and returned_bc.get("reference", {}).get("id", "").endswith(" BC")
+           and returned_bc.get("items", [{}])[0].get("id", "").endswith(" BC"),
+           f"bc={bc_values},ad={ad_values},etags_distinct="
+           f"{bc_document['_metadata']['etag'] != ad_document['_metadata']['etag']},"
+           f"roundtrip={bc_roundtrip.returncode}/{db.state(bc_roundtrip)}/{stored_bc}/"
+           f"{bc_roundtrip.stderr[-300:]}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_statement_guard CASCADE;
+CREATE SCHEMA jt_statement_guard;
+CREATE TABLE jt_statement_guard.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_statement_guard.root
+SELECT n,'row-'||n::text FROM generate_series(1,25)n;""")
+    guard_spec = {"root": {"table": "jt_statement_guard.root", "key": "id",
+                           "fields": {"label": "label"}, "update": True}}
+    create_view(db, "jt_statement_guard.documents", guard_spec)
+    guard_plan = json.loads(db.run(
+        "EXPLAIN (ANALYZE,FORMAT JSON) UPDATE jt_statement_guard.documents SET data=data;"
+    ).stdout)[0]
+    guard_triggers = {item["Trigger Name"]: int(item["Calls"])
+                      for item in guard_plan.get("Triggers", [])}
+    fixed_lock_order = db.value("""SELECT position(
+      'LOCK TABLE jt_integrity.root,jt_integrity.ref,jt_integrity.child IN ACCESS SHARE MODE'
+      IN pg_get_functiondef('jt_integrity.documents__guard()'::regprocedure))>0;""")
+    fixed_rpc_lock_order = db.value("""SELECT position(
+      'LOCK TABLE jt_integrity.root,jt_integrity.ref,jt_integrity.child IN ACCESS SHARE MODE'
+      IN pg_get_functiondef(
+        'jt_integrity.documents__delete_document(numeric,text)'::regprocedure))>0;""")
+    db.run("""DROP SCHEMA IF EXISTS jt_guard_source CASCADE;
+DROP SCHEMA IF EXISTS jt_guard_api CASCADE;
+CREATE SCHEMA jt_guard_source; CREATE SCHEMA jt_guard_api;
+CREATE TABLE jt_guard_source.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_guard_source.root VALUES(1,'one');""")
+    schema_guard_spec = {"root": {"table": "jt_guard_source.root", "key": "id",
+                                   "fields": {"label": "label"}, "insert": True}}
+    create_view(db, "jt_guard_api.documents", schema_guard_spec)
+    db.run("ALTER SCHEMA jt_guard_source RENAME TO jt_guard_source_old;")
+    missing_schema_guard = db.run(
+        "INSERT INTO jt_guard_api.documents(data) "
+        "VALUES(jsonb_build_object('_id',2,'label','two'));", False)
+    missing_schema_rpc = db.run(
+        "SELECT jt_guard_api.documents__delete_document(1,'stale');", False)
+    db.run("ALTER SCHEMA jt_guard_source_old RENAME TO jt_guard_source;")
+    record("catalog guards run once per statement rather than once per document",
+           guard_triggers.get("documents__guard_update") == 1
+           and guard_triggers.get("documents__update") == 25
+           and fixed_lock_order == "t" and fixed_rpc_lock_order == "t"
+           and db.state(missing_schema_guard) == "PT422"
+           and db.state(missing_schema_rpc) == "PT422",
+           f"trigger_calls={guard_triggers},fixed_lock_order="
+           f"{fixed_lock_order}/{fixed_rpc_lock_order},missing_schema="
+           f"{db.state(missing_schema_guard)}/{db.state(missing_schema_rpc)}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_rpc_race CASCADE;
+CREATE SCHEMA jt_rpc_race;
+CREATE TABLE jt_rpc_race.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_rpc_race.root VALUES(1,'original');""")
+    rpc_race_spec = {"root": {"table": "jt_rpc_race.root", "key": "id",
+                                "fields": {"label": "label"}, "delete": True}}
+    create_view(db, "jt_rpc_race.documents", rpc_race_spec)
+    rpc_race_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_rpc_race.documents WHERE _id=1;")
+    ddl_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True)
+    assert ddl_writer.stdin
+    ddl_writer.stdin.write("BEGIN;ALTER TABLE jt_rpc_race.root RENAME TO root_old;"
+                           "CREATE TABLE jt_rpc_race.root("
+                           "LIKE jt_rpc_race.root_old INCLUDING ALL);"
+                           "INSERT INTO jt_rpc_race.root VALUES(1,'replacement');"
+                           "SELECT pg_sleep(1);COMMIT;")
+    ddl_writer.stdin.close(); time.sleep(.2)
+    started_rpc_race = time.monotonic()
+    rpc_race = db.run("SELECT jt_rpc_race.documents__delete_document(1,"
+                      + quote(rpc_race_etag) + ");", False)
+    rpc_race_wait = time.monotonic() - started_rpc_race
+    ddl_writer.wait(timeout=10)
+    rpc_race_rows = db.value("""SELECT
+      (SELECT count(*) FROM jt_rpc_race.root_old)::text||':'||
+      (SELECT count(*) FROM jt_rpc_race.root)::text;""")
+    record("delete RPC stabilizes source identity before binding validation",
+           db.state(rpc_race) == "PT422" and rpc_race_wait > .6
+           and rpc_race_rows == "1:1",
+           f"state={db.state(rpc_race)},wait={rpc_race_wait:.3f},"
+           f"rows={rpc_race_rows}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
+CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_provenance.root VALUES(1,'one');""")
+    provenance_spec = {
+        "root": {"table": "jt_provenance.root", "key": "id",
+                 "fields": {"label": "label"}, "insert": True,
+                 "update": True, "delete": True}}
+    create_view(db, "jt_provenance.documents", provenance_spec)
+    provenance_owner = db.value("SELECT current_user;")
+    lifecycle_role = "jt_lifecycle_role"
+    cleanup_lifecycle_role = role_cleanup(db, lifecycle_role)
+    delegated_grantor = "jt_delegated_grantor"
+    delegated_grantee = "jt_delegated_grantee"
+    cleanup_delegated_grantee = role_cleanup(db, delegated_grantee)
+    cleanup_delegated_grantor = role_cleanup(db, delegated_grantor)
+    db.run(f"""CREATE ROLE {lifecycle_role} NOLOGIN;
+CREATE ROLE {delegated_grantor} NOLOGIN;
+CREATE ROLE {delegated_grantee} NOLOGIN;
+GRANT USAGE ON SCHEMA jt_provenance TO {lifecycle_role};
+GRANT USAGE ON SCHEMA jt_provenance TO {delegated_grantor};
+GRANT SELECT, UPDATE(label) ON jt_provenance.root TO {lifecycle_role};
+GRANT SELECT (_id) ON jt_provenance.documents TO {lifecycle_role};
+GRANT SELECT (data) ON jt_provenance.documents TO {lifecycle_role} WITH GRANT OPTION;
+GRANT UPDATE (data) ON jt_provenance.documents TO {lifecycle_role};""")
+    role_read_before = db.value(
+        f"SET ROLE {lifecycle_role}; SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    role_write_before = db.run(
+        f"SET ROLE {lifecycle_role}; UPDATE jt_provenance.documents "
+        "SET data=jsonb_set(data,'{label}','\"role-before\"') WHERE _id=1; RESET ROLE;", False)
+    db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
+    db.run("""CREATE FUNCTION jt_provenance.custom_audit() RETURNS trigger
+LANGUAGE plpgsql AS $audit$ BEGIN RETURN NEW; END $audit$;
+CREATE TRIGGER zz_custom_audit INSTEAD OF UPDATE ON jt_provenance.documents
+FOR EACH ROW EXECUTE FUNCTION jt_provenance.custom_audit();""")
+    custom_trigger_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    trigger_survived = db.value("""SELECT count(*) FROM pg_trigger
+      WHERE tgrelid='jt_provenance.documents'::regclass AND tgname='zz_custom_audit';""")
+    db.run("DROP TRIGGER zz_custom_audit ON jt_provenance.documents; "
+           "DROP FUNCTION jt_provenance.custom_audit();")
+    db.run("CREATE RULE zz_custom_rule AS ON UPDATE TO jt_provenance.documents DO ALSO NOTHING;")
+    custom_rule_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    rule_survived = db.value("""SELECT count(*) FROM pg_rewrite
+      WHERE ev_class='jt_provenance.documents'::regclass AND rulename='zz_custom_rule';""")
+    db.run("DROP RULE zz_custom_rule ON jt_provenance.documents;")
+
+    managed_oid_query = """SELECT string_agg(oid::text,',' ORDER BY oid) FROM (
+      SELECT 'jt_provenance.documents'::regclass::oid oid
+      UNION ALL
+      SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='jt_provenance' AND p.proname LIKE 'documents__%'
+        AND (p.prorettype='trigger'::regtype OR p.proname IN
+          ('documents__check','documents__delete_document'))) managed"""
+    owner_acl_oid_before = db.value(managed_oid_query + ";")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO PUBLIC;
+REVOKE SELECT ON jt_provenance.documents FROM CURRENT_USER;""")
+    owner_view_acl_before = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    owner_view_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_view_acl_after = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    owner_acl_oid_after_view = db.value(managed_oid_query + ";")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO CURRENT_USER;
+REVOKE SELECT ON jt_provenance.documents FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM CURRENT_USER;""")
+    owner_function_acl_before = db.value(
+        "SELECT proacl::text FROM pg_proc WHERE oid="
+        "'jt_provenance.documents__check()'::regprocedure;")
+    owner_function_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_function_acl_after = db.value(
+        "SELECT proacl::text FROM pg_proc WHERE oid="
+        "'jt_provenance.documents__check()'::regprocedure;")
+    owner_acl_oid_after_function = db.value(managed_oid_query + ";")
+    db.run("""GRANT EXECUTE ON FUNCTION jt_provenance.documents__check()
+  TO CURRENT_USER;
+GRANT SELECT (data) ON jt_provenance.documents TO CURRENT_USER WITH GRANT OPTION;""")
+    owner_column_acl_before = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    owner_column_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    owner_column_acl_after = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    owner_acl_oid_after_column = db.value(managed_oid_query + ";")
+    db.run("REVOKE SELECT (data) ON jt_provenance.documents FROM CURRENT_USER;")
+    owner_acl_restored = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    record("regeneration fails closed for non-default owner ACL state",
+           db.state(owner_view_block) == "2BP01"
+           and db.state(owner_function_block) == "2BP01"
+           and db.state(owner_column_block) == "2BP01"
+           and owner_view_acl_before == owner_view_acl_after
+           and owner_function_acl_before == owner_function_acl_after
+           and owner_column_acl_before == owner_column_acl_after
+           and owner_acl_oid_before == owner_acl_oid_after_view
+           and owner_acl_oid_before == owner_acl_oid_after_function
+           and owner_acl_oid_before == owner_acl_oid_after_column
+           and owner_acl_restored.returncode == 0,
+           f"states={db.state(owner_view_block)}/{db.state(owner_function_block)}/"
+           f"{db.state(owner_column_block)},acls="
+           f"{owner_view_acl_before == owner_view_acl_after}/"
+           f"{owner_function_acl_before == owner_function_acl_after}/"
+           f"{owner_column_acl_before == owner_column_acl_after},oids="
+           f"{owner_acl_oid_before == owner_acl_oid_after_view}/"
+           f"{owner_acl_oid_before == owner_acl_oid_after_function}/"
+           f"{owner_acl_oid_before == owner_acl_oid_after_column},"
+           f"restored={owner_acl_restored.returncode}")
+
+    view_oid_before_delegated = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    db.run(f"""GRANT SELECT ON jt_provenance.documents TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT SELECT ON jt_provenance.documents TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_table_acl_before = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    delegated_table_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_table_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_table_acl_after = db.value(
+        "SELECT relacl::text FROM pg_class WHERE oid='jt_provenance.documents'::regclass;")
+    delegated_table_access = db.value(
+        f"SELECT has_table_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','SELECT')::text;")
+    db.run(f"REVOKE SELECT ON jt_provenance.documents FROM {delegated_grantor} CASCADE;")
+    delegated_table_revoked = db.value(
+        f"SELECT has_table_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','SELECT')::text;")
+
+    db.run(f"""GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_column_acl_before = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    delegated_column_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_column_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_column_acl_after = db.value("""SELECT attacl::text FROM pg_attribute
+      WHERE attrelid='jt_provenance.documents'::regclass AND attname='data';""")
+    delegated_column_access = db.value(
+        f"SELECT has_column_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','data','SELECT')::text;")
+    db.run(f"REVOKE SELECT (data) ON jt_provenance.documents FROM {delegated_grantor} CASCADE;")
+    delegated_column_revoked = db.value(
+        f"SELECT has_column_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents','data','SELECT')::text;")
+
+    db.run(f"""REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantor} WITH GRANT OPTION;
+SET ROLE {delegated_grantor};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantee};
+RESET ROLE;""")
+    delegated_function_acl_before = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    delegated_function_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_function_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    delegated_function_acl_after = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    delegated_function_access = db.value(
+        f"SELECT has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
+    db.run(f"REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {delegated_grantor} CASCADE;")
+    delegated_function_revoked = db.value(
+        f"SELECT has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
+    db.run(f"""ALTER FUNCTION jt_provenance.documents__check() OWNER TO {delegated_grantor};
+REVOKE ALL ON FUNCTION jt_provenance.documents__check() FROM PUBLIC;
+REVOKE ALL ON FUNCTION jt_provenance.documents__check() FROM {delegated_grantor};""")
+    empty_foreign_function_acl = db.value("""SELECT proacl::text FROM pg_proc
+      WHERE oid='jt_provenance.documents__check()'::regprocedure;""")
+    foreign_function_owner_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    view_oid_after_owner_block = db.value(
+        "SELECT 'jt_provenance.documents'::regclass::oid::text;")
+    db.run(f"""ALTER FUNCTION jt_provenance.documents__check() OWNER TO {provenance_owner};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check()
+  TO {provenance_owner};""")
+    metadata_ok = db.value("""SELECT
+      (substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
+              length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,version}')='0.2.0'
+      AND length(substr(obj_description('jt_provenance.documents'::regclass,'pg_class'),
+                        length('pg_jsontailor metadata v1: ')+1)::jsonb #>> '{generator,hash}')=64;""")
+    inventory_before = db.value("""SELECT generator_version||':'||health_status||':'||
+      (generator_hash=current_generator_hash)::text
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    db.run("""GRANT SELECT ON jt_provenance.documents TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__delete_document(integer,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO jt_lifecycle_role WITH GRANT OPTION;
+COMMENT ON FUNCTION jt_provenance.documents__check() IS 'preserved health comment';
+CREATE FUNCTION jt_provenance.documents__check(integer) RETURNS integer
+LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
+    regenerated = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    column_acl = db.value(f"""SELECT
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','_id','SELECT')::text||':'||
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','data','SELECT')::text||':'||
+      has_column_privilege('{lifecycle_role}','jt_provenance.documents','data','UPDATE')::text||':'||
+      coalesce((SELECT is_grantable FROM information_schema.column_privileges
+        WHERE table_schema='jt_provenance' AND table_name='documents'
+          AND column_name='data' AND privilege_type='SELECT'
+          AND grantee='{lifecycle_role}'),'NO');""")
+    role_read_after = db.value(
+        f"SET ROLE {lifecycle_role}; SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    role_write_after = db.run(
+        f"SET ROLE {lifecycle_role}; UPDATE jt_provenance.documents "
+        "SET data=jsonb_set(data,'{label}','\"role-after\"') WHERE _id=1; RESET ROLE;", False)
+    db.run(f"""SET ROLE {lifecycle_role};
+GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantee};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantee};
+RESET ROLE;
+REVOKE SELECT (data) ON jt_provenance.documents FROM {lifecycle_role} CASCADE;
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {lifecycle_role} CASCADE;""")
+    owner_grant_cascade = db.value(
+        f"SELECT EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl)x "
+        "WHERE a.attrelid='jt_provenance.documents'::regclass AND a.attname='data' "
+        f"AND x.grantee=(SELECT oid FROM pg_roles WHERE rolname='{delegated_grantee}'))::text||':'||"
+        f"has_function_privilege('{delegated_grantee}',"
+        "'jt_provenance.documents__check()','EXECUTE')::text;")
+    db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
+    preserved = db.value("""SELECT
+      has_table_privilege('public','jt_provenance.documents','SELECT')::text||':'||
+      has_function_privilege('public','jt_provenance.documents__delete_document(integer,text)','EXECUTE')::text||':'||
+      coalesce(obj_description('jt_provenance.documents__check()'::regprocedure,'pg_proc'),'')||':'||
+      jt_provenance.documents__check(7)::text;""")
+    db.run("CREATE VIEW jt_provenance.dependent AS SELECT * FROM jt_provenance.documents;")
+    dependency_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    still_readable = db.value("SELECT data->>'label' FROM jt_provenance.documents WHERE _id=1;")
+    db.run("DROP VIEW jt_provenance.dependent; ALTER TABLE jt_provenance.root RENAME TO root_old;")
+    drift_check = db.run("SELECT jt_provenance.documents__check();", False)
+    inventory_drift = db.value("""SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    db.run("ALTER TABLE jt_provenance.root_old RENAME TO root;")
+    legacy_comment = "pg_jsontailor duality view spec v1: " + json.dumps(
+        provenance_spec, separators=(",", ":"), sort_keys=True)
+    db.run("COMMENT ON VIEW jt_provenance.documents IS " + quote(legacy_comment) + ";")
+    legacy_regenerated = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
+    inventory_after = db.value("""SELECT generator_version||':'||health_status||':'||
+      (generator_hash=current_generator_hash)::text
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_provenance.documents';""")
+    record("generator provenance, inventory, health and regeneration are operational",
+           metadata_ok == "t" and inventory_before == "0.2.0:OK:true"
+           and role_read_before == "one" and role_write_before.returncode == 0
+           and db.state(custom_trigger_block) == "2BP01" and trigger_survived == "1"
+           and db.state(custom_rule_block) == "2BP01" and rule_survived == "1"
+           and db.state(delegated_table_block) == "2BP01"
+           and view_oid_after_table_block == view_oid_before_delegated
+           and delegated_table_acl_after == delegated_table_acl_before
+           and delegated_table_access == "true"
+           and delegated_table_revoked == "false"
+           and db.state(delegated_column_block) == "2BP01"
+           and view_oid_after_column_block == view_oid_before_delegated
+           and delegated_column_acl_after == delegated_column_acl_before
+           and delegated_column_access == "true"
+           and delegated_column_revoked == "false"
+           and db.state(delegated_function_block) == "2BP01"
+           and view_oid_after_function_block == view_oid_before_delegated
+           and delegated_function_acl_after == delegated_function_acl_before
+           and delegated_function_access == "true"
+           and delegated_function_revoked == "false"
+           and empty_foreign_function_acl == "{}"
+           and db.state(foreign_function_owner_block) == "2BP01"
+           and view_oid_after_owner_block == view_oid_before_delegated
+           and regenerated.returncode == 0
+           and column_acl == "true:true:true:YES"
+           and role_read_after == "one" and role_write_after.returncode == 0
+           and owner_grant_cascade == "false:false"
+           and preserved == "true:false:preserved health comment:7"
+           and db.state(dependency_block) == "2BP01" and still_readable == "one"
+           and db.state(drift_check) == "PT422" and inventory_drift == "PT422"
+           and legacy_regenerated.returncode == 0
+           and inventory_after == "0.2.0:OK:true",
+           f"metadata={metadata_ok},before={inventory_before},role_before={role_read_before}/"
+           f"{role_write_before.returncode},hooks={db.state(custom_trigger_block)}/{trigger_survived}/"
+           f"{db.state(custom_rule_block)}/{rule_survived},regen={regenerated.returncode},"
+           f"delegated={db.state(delegated_table_block)}/{view_oid_before_delegated == view_oid_after_table_block}/"
+           f"{delegated_table_acl_before == delegated_table_acl_after}/"
+           f"{delegated_table_access}/{delegated_table_revoked}/"
+           f"{db.state(delegated_column_block)}/{view_oid_before_delegated == view_oid_after_column_block}/"
+           f"{delegated_column_acl_before == delegated_column_acl_after}/"
+           f"{delegated_column_access}/{delegated_column_revoked}/"
+           f"{db.state(delegated_function_block)}/{view_oid_before_delegated == view_oid_after_function_block}/"
+           f"{delegated_function_acl_before == delegated_function_acl_after}/"
+           f"{delegated_function_access}/{delegated_function_revoked}/"
+           f"owner={empty_foreign_function_acl}/{db.state(foreign_function_owner_block)}/"
+           f"{view_oid_before_delegated == view_oid_after_owner_block},"
+           f"column_acl={column_acl},role_after={role_read_after}/{role_write_after.returncode},"
+           f"owner_cascade={owner_grant_cascade},"
+           f"acl={preserved},dependency={db.state(dependency_block)}/{still_readable},"
+           f"drift={db.state(drift_check)}/{inventory_drift},"
+           f"legacy={legacy_regenerated.returncode},after={inventory_after}")
+    cleanup_lifecycle_role()
+    cleanup_delegated_grantee()
+    cleanup_delegated_grantor()
+
+    db.run("""DROP SCHEMA IF EXISTS jt_binding_scope CASCADE;
+CREATE SCHEMA jt_binding_scope;
+CREATE TABLE jt_binding_scope.root_only(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_scope.decoy(id integer PRIMARY KEY,label text);
+INSERT INTO jt_binding_scope.root_only VALUES(1,'root');
+INSERT INTO jt_binding_scope.decoy VALUES(9,'decoy');
+CREATE TABLE jt_binding_scope.object_source(id integer PRIMARY KEY,label text);
+INSERT INTO jt_binding_scope.object_source VALUES(1,'object');
+CREATE TABLE jt_binding_scope.root_object(
+  id integer PRIMARY KEY,ref_id integer REFERENCES jt_binding_scope.object_source(id),label text);
+INSERT INTO jt_binding_scope.root_object VALUES(1,1,'root-object');
+CREATE TABLE jt_binding_scope.root_array(id integer PRIMARY KEY,label text);
+CREATE TABLE jt_binding_scope.array_source(
+  id integer PRIMARY KEY,parent integer REFERENCES jt_binding_scope.root_array(id),
+  position integer,label text);
+INSERT INTO jt_binding_scope.root_array VALUES(1,'root-array');
+INSERT INTO jt_binding_scope.array_source VALUES(1,1,1,'child');""")
+    root_only_spec = {"root": {"table": "jt_binding_scope.root_only", "key": "id",
+                                "fields": {"label": "label"}, "update": True}}
+    root_object_spec = {
+        "root": {"table": "jt_binding_scope.root_object", "key": "id",
+                 "fields": {"label": "label"}},
+        "object": {"name": "reference", "table": "jt_binding_scope.object_source",
+                   "key": "id", "root_fk": "ref_id",
+                   "fields": {"id": "id", "label": "label"}}}
+    root_array_spec = {
+        "root": {"table": "jt_binding_scope.root_array", "key": "id",
+                 "fields": {"label": "label"}},
+        "array": {"name": "items", "table": "jt_binding_scope.array_source",
+                  "key": "id", "parent_fk": "parent", "order_by": "position",
+                  "fields": {"id": "id", "label": "label"}}}
+    create_view(db, "jt_binding_scope.root_documents", root_only_spec)
+    create_view(db, "jt_binding_scope.object_documents", root_object_spec)
+    create_view(db, "jt_binding_scope.array_documents", root_array_spec)
+    db.run("""CREATE VIEW jt_binding_scope.root_documents__object_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.root_documents__array_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.object_documents__array_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;
+CREATE VIEW jt_binding_scope.array_documents__object_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;""")
+    optional_before = db.value("""SELECT string_agg(c.relname||':'||c.oid::text||':'||
+      pg_get_viewdef(c.oid,true),';' ORDER BY c.relname)
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='jt_binding_scope' AND c.relname IN
+        ('root_documents__object_binding','root_documents__array_binding',
+         'object_documents__array_binding','array_documents__object_binding');""")
+    optional_regenerations = [db.run(
+        f"SELECT jsontailor.regenerate_duality_view('jt_binding_scope.{name}');", False)
+        for name in ("root_documents", "object_documents", "array_documents")]
+    optional_after = db.value("""SELECT string_agg(c.relname||':'||c.oid::text||':'||
+      pg_get_viewdef(c.oid,true),';' ORDER BY c.relname)
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='jt_binding_scope' AND c.relname IN
+        ('root_documents__object_binding','root_documents__array_binding',
+         'object_documents__array_binding','array_documents__object_binding');""")
+
+    root_documents_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("""DROP VIEW jt_binding_scope.root_documents__root_binding;
+CREATE VIEW jt_binding_scope.root_documents__root_binding AS
+  SELECT id,label FROM jt_binding_scope.decoy WHERE false;""")
+    wrong_source_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_source_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("""DROP VIEW jt_binding_scope.root_documents__root_binding;
+CREATE TABLE jt_binding_scope.root_documents__root_binding(id integer);""")
+    wrong_kind_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_kind_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("DROP TABLE jt_binding_scope.root_documents__root_binding;")
+    binding_owner_role = "jt_binding_owner_role"
+    cleanup_binding_owner_role = role_cleanup(db, binding_owner_role)
+    db.run(f"""CREATE ROLE {binding_owner_role} NOLOGIN;
+CREATE VIEW jt_binding_scope.root_documents__root_binding AS
+  SELECT id,label FROM jt_binding_scope.root_only WHERE false;
+ALTER VIEW jt_binding_scope.root_documents__root_binding OWNER TO {binding_owner_role};""")
+    wrong_owner_block = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    wrong_owner_oid = db.value(
+        "SELECT 'jt_binding_scope.root_documents'::regclass::oid::text;")
+    db.run("DROP VIEW jt_binding_scope.root_documents__root_binding;")
+    missing_binding_regeneration = db.run(
+        "SELECT jsontailor.regenerate_duality_view('jt_binding_scope.root_documents');", False)
+    restored_binding = db.value(
+        "SELECT to_regclass('jt_binding_scope.root_documents__root_binding') IS NOT NULL;")
+    record("regeneration scopes binding cleanup to configured source roles",
+           all(result.returncode == 0 for result in optional_regenerations)
+           and optional_after == optional_before
+           and db.state(wrong_source_block) == "2BP01"
+           and db.state(wrong_kind_block) == "2BP01"
+           and db.state(wrong_owner_block) == "2BP01"
+           and wrong_source_oid == root_documents_oid
+           and wrong_kind_oid == root_documents_oid
+           and wrong_owner_oid == root_documents_oid
+           and missing_binding_regeneration.returncode == 0
+           and restored_binding == "t",
+           f"optional={[r.returncode for r in optional_regenerations]}/"
+           f"{optional_after == optional_before},collisions="
+           f"{db.state(wrong_source_block)}/{db.state(wrong_kind_block)}/"
+           f"{db.state(wrong_owner_block)},oids="
+           f"{wrong_source_oid == root_documents_oid}/"
+           f"{wrong_kind_oid == root_documents_oid}/"
+           f"{wrong_owner_oid == root_documents_oid},missing="
+           f"{missing_binding_regeneration.returncode}/{restored_binding}")
+    cleanup_binding_owner_role()
+
+    db.run("""DROP SCHEMA IF EXISTS jt_nonfinite CASCADE;
+CREATE SCHEMA jt_nonfinite;
+CREATE TABLE jt_nonfinite.reference(id numeric PRIMARY KEY,label text);
+CREATE TABLE jt_nonfinite.root(
+  id numeric PRIMARY KEY,ref_id numeric REFERENCES jt_nonfinite.reference(id),
+  amount numeric,limited numeric(12,2),int_value integer);
+CREATE TABLE jt_nonfinite.child(
+  id numeric PRIMARY KEY,parent numeric REFERENCES jt_nonfinite.root(id),
+  position integer,amount numeric);
+INSERT INTO jt_nonfinite.reference VALUES('-Infinity','negative infinity'),('NaN','not a number');
+INSERT INTO jt_nonfinite.root VALUES('NaN','-Infinity','Infinity','NaN',1);
+INSERT INTO jt_nonfinite.child VALUES('Infinity','NaN',1,'NaN');""")
+    nonfinite_spec = {
+        "root": {"table": "jt_nonfinite.root", "key": "id",
+                 "fields": {"amount": "amount", "limited": "limited",
+                            "intValue": "int_value"},
+                 "insert": True, "update": True},
+        "object": {"name": "reference", "table": "jt_nonfinite.reference",
+                   "key": "id", "root_fk": "ref_id",
+                   "fields": {"id": "id", "label": "label"}},
+        "array": {"name": "items", "table": "jt_nonfinite.child", "key": "id",
+                  "parent_fk": "parent", "order_by": "position",
+                  "fields": {"id": "id", "amount": "amount"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_nonfinite.documents", nonfinite_spec)
+    direct_document = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='NaN'::numeric;"))
+    direct_etag = direct_document["_metadata"]["etag"]
+    direct_roundtrip = db.run("UPDATE jt_nonfinite.documents SET data=data "
+                              "WHERE _id='NaN'::numeric RETURNING data::text;", False)
+    direct_after = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='NaN'::numeric;"))
+    inserted_document = {
+        "_id": "Infinity", "amount": "-Infinity", "limited": "NaN", "intValue": 2,
+        "reference": {"id": "NaN", "label": "not a number"},
+        "items": [{"id": "-Infinity", "amount": "Infinity"}]}
+    inserted = db.run("INSERT INTO jt_nonfinite.documents(data) VALUES(" +
+                      quote(json.dumps(inserted_document)) + "::jsonb) RETURNING data::text;", False)
+    inserted_after = json.loads(db.value(
+        "SELECT data::text FROM jt_nonfinite.documents WHERE _id='Infinity'::numeric;"))
+    inserted_roundtrip = db.run("UPDATE jt_nonfinite.documents SET data=data "
+                                "WHERE _id='Infinity'::numeric;", False)
+    invalid_states = []
+    for path, value in (("amount", "nan"), ("amount", "1"),
+                        ("limited", "Infinity"), ("intValue", "NaN"),
+                        ("itemAmount", "+Infinity"),
+                        ("_id", "1")):
+        invalid = json.loads(json.dumps(inserted_after))
+        if path == "itemAmount":
+            invalid["items"][0]["amount"] = value
+        else:
+            invalid[path] = value
+        result = db.run("UPDATE jt_nonfinite.documents SET data=" +
+                        quote(json.dumps(invalid)) +
+                        "::jsonb WHERE _id='Infinity'::numeric;", False)
+        invalid_states.append(db.state(result))
+    invalid_insert = json.loads(json.dumps(inserted_document))
+    invalid_insert["_id"] = "inf"
+    invalid_insert_result = db.run(
+        "INSERT INTO jt_nonfinite.documents(data) VALUES(" +
+        quote(json.dumps(invalid_insert)) + "::jsonb);", False)
+    db.run("UPDATE jt_nonfinite.root SET amount='-Infinity' WHERE id='NaN'::numeric;")
+    stale_nonfinite = db.run(
+        "UPDATE jt_nonfinite.documents SET data=" + quote(json.dumps(direct_document)) +
+        "::jsonb WHERE _id='NaN'::numeric;", False)
+    db.run("UPDATE jt_nonfinite.root SET amount='Infinity' WHERE id='NaN'::numeric;")
+    merge_update = db.run(
+        "MERGE INTO jt_nonfinite.documents d USING (VALUES ('NaN'::numeric," +
+        quote(json.dumps(direct_after)) + "::jsonb)) s(id,data) ON d._id=s.id "
+        "WHEN MATCHED THEN UPDATE SET data=s.data;", False)
+    merge_document = {
+        "_id": "-Infinity", "amount": "NaN", "limited": "NaN", "intValue": 3,
+        "reference": {"id": "-Infinity", "label": "negative infinity"},
+        "items": [{"id": "NaN", "amount": "-Infinity"}]}
+    merge_insert = db.run(
+        "MERGE INTO jt_nonfinite.documents d USING (VALUES ('-Infinity'::numeric," +
+        quote(json.dumps(merge_document)) + "::jsonb)) s(id,data) ON d._id=s.id "
+        "WHEN NOT MATCHED THEN INSERT(data) VALUES(s.data);", False)
+    final_nonfinite = db.value("""SELECT count(*)::text||':'||
+      (SELECT amount::text FROM jt_nonfinite.root WHERE id='Infinity'::numeric)||':'||
+      (SELECT int_value::text FROM jt_nonfinite.root WHERE id='Infinity'::numeric)||':'||
+      (SELECT amount::text FROM jt_nonfinite.child WHERE id='-Infinity'::numeric)
+      FROM jt_nonfinite.root;""")
+    record("non-finite numeric values use canonical reversible document strings",
+           direct_document["_id"] == "NaN"
+           and direct_document["amount"] == "Infinity"
+           and direct_document["limited"] == "NaN"
+           and direct_document["reference"]["id"] == "-Infinity"
+           and direct_document["items"][0]["id"] == "Infinity"
+           and direct_document["items"][0]["amount"] == "NaN"
+           and direct_roundtrip.returncode == 0
+           and direct_after["_metadata"]["etag"] == direct_etag
+           and inserted.returncode == 0 and inserted_roundtrip.returncode == 0
+           and inserted_after["_id"] == "Infinity"
+           and inserted_after["amount"] == "-Infinity"
+           and inserted_after["reference"]["id"] == "NaN"
+           and inserted_after["items"][0]["id"] == "-Infinity"
+           and inserted_after["items"][0]["amount"] == "Infinity"
+           and invalid_states == ["PT422"] * 6
+           and db.state(invalid_insert_result) == "PT422"
+           and db.state(stale_nonfinite) == "PT412"
+           and merge_update.returncode == 0 and merge_insert.returncode == 0
+           and final_nonfinite == "3:-Infinity:2:Infinity",
+           f"direct={direct_roundtrip.returncode}/{direct_after},insert="
+           f"{inserted.returncode}/{inserted_roundtrip.returncode}/{inserted_after},"
+           f"invalid={invalid_states}/{db.state(invalid_insert_result)},"
+           f"stale={db.state(stale_nonfinite)},merge="
+           f"{merge_update.returncode}/{merge_insert.returncode},final={final_nonfinite}")
+
+    inventory_attacker = "jt_inventory_attacker"
+    cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)
+    db.run(f"""DROP SCHEMA IF EXISTS jt_inventory_untrusted CASCADE;
+DROP SCHEMA IF EXISTS jt_inventory_managed CASCADE;
+CREATE TABLE jt_provenance.inventory_protected(value text);
+CREATE ROLE {inventory_attacker} NOLOGIN;
+CREATE SCHEMA jt_inventory_untrusted AUTHORIZATION {inventory_attacker};
+CREATE SCHEMA jt_inventory_managed;
+CREATE TABLE jt_inventory_managed.root(id integer PRIMARY KEY,value text);
+INSERT INTO jt_inventory_managed.root VALUES(1,'one');
+GRANT INSERT ON jt_provenance.inventory_protected TO {inventory_attacker};
+SET ROLE {inventory_attacker};
+CREATE VIEW jt_inventory_untrusted.forged AS SELECT 1 AS value;
+COMMENT ON VIEW jt_inventory_untrusted.forged IS
+  'pg_jsontailor metadata v1: {{"generator":{{"version":"0.2.0","hash":"forged"}}}}';
+CREATE FUNCTION jt_inventory_untrusted.forged__check() RETURNS jsonb
+LANGUAGE plpgsql SECURITY INVOKER AS $attack$
+BEGIN
+  INSERT INTO jt_provenance.inventory_protected VALUES('executed');
+  RETURN '{{"status":"OK"}}'::jsonb;
+END
+$attack$;
+RESET ROLE;""")
+    managed_inventory_spec = {
+        "root": {"table": '"jt_inventory_managed"."root"', "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_inventory_managed.documents", managed_inventory_spec)
+    db.run("""CREATE OR REPLACE FUNCTION jt_inventory_managed.documents__check()
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,pg_temp AS $attack$
+BEGIN
+  INSERT INTO jt_provenance.inventory_protected VALUES('managed callback executed');
+  RETURN '{"status":"FORGED"}'::jsonb;
+END
+$attack$;""")
+    managed_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_managed.documents';""")
+    managed_quoted_inventory = db.value("""SET quote_all_identifiers=on;
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE replace(view_name,'"','')='jt_inventory_managed.documents';""")
+    managed_comment = db.value("""SELECT obj_description(
+      'jt_inventory_managed.documents'::regclass,'pg_class');""")
+    metadata_prefix = "pg_jsontailor metadata v1: "
+    managed_metadata = json.loads(managed_comment[len(metadata_prefix):])
+    malformed_provenance_states = []
+    malformed_variants = []
+    empty_bindings = json.loads(json.dumps(managed_metadata))
+    empty_bindings["health"]["bindings"] = {}
+    malformed_variants.append(empty_bindings)
+    extra_role = json.loads(json.dumps(managed_metadata))
+    extra_role["health"]["bindings"]["extra"] = \
+        extra_role["health"]["bindings"]["root"]
+    malformed_variants.append(extra_role)
+    missing_column = json.loads(json.dumps(managed_metadata))
+    missing_column["health"]["bindings"]["root"]["columns"] = ["id"]
+    missing_column["health"]["bindings"]["root"]["ordinals"] = [1]
+    malformed_variants.append(missing_column)
+    wrong_binding = json.loads(json.dumps(managed_metadata))
+    wrong_binding["health"]["bindings"]["root"]["binding_view"] = \
+        "jt_provenance.documents__root_binding"
+    malformed_variants.append(wrong_binding)
+    for malformed_metadata in malformed_variants:
+        db.run("COMMENT ON VIEW jt_inventory_managed.documents IS "
+               + quote(metadata_prefix + json.dumps(malformed_metadata,
+                                                     separators=(",", ":"))) + ";")
+        malformed_provenance_states.append(db.value("""SELECT health_status
+          FROM jsontailor.duality_view_inventory()
+          WHERE view_name='jt_inventory_managed.documents';"""))
+    db.run("COMMENT ON VIEW jt_inventory_managed.documents IS "
+           + quote(managed_comment) + ";")
+    forged_inventory = db.value("""SELECT health_status||':'||health_detail
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_role_inventory = db.value(f"""SET ROLE {inventory_attacker};
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_session_inventory = db.value(f"""SET SESSION AUTHORIZATION {inventory_attacker};
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_effects = db.value("SELECT count(*) FROM jt_provenance.inventory_protected;")
+    record("inventory never executes an untrusted owner-supplied health callback",
+           managed_inventory == "OK" and managed_quoted_inventory == "OK"
+           and forged_inventory.startswith("SKIPPED:")
+           and forged_role_inventory == "SKIPPED"
+           and forged_session_inventory == "SKIPPED"
+           and malformed_provenance_states == ["PT422"] * 4
+           and forged_effects == "0",
+           f"managed={managed_inventory}/{managed_quoted_inventory},inventory={forged_inventory},"
+           f"role={forged_role_inventory},session={forged_session_inventory},"
+           f"provenance={malformed_provenance_states},"
+           f"side_effects={forged_effects}")
+    db.run("DROP SCHEMA jt_inventory_untrusted CASCADE; "
+           "DROP SCHEMA jt_inventory_managed CASCADE;")
+    cleanup_inventory_attacker()
+
+    share_role = "jt_share_lock_client"
+    cleanup_share_role = role_cleanup(db, share_role)
+    nocheck_role = "jt_share_nocheck_client"
+    cleanup_nocheck_role = role_cleanup(db, nocheck_role)
+    db.run(f"""DROP SCHEMA IF EXISTS jt_share_lock CASCADE;
+CREATE SCHEMA jt_share_lock;
+CREATE TABLE jt_share_lock.refs(id integer PRIMARY KEY, label text NOT NULL);
+CREATE TABLE jt_share_lock.roots(
+  id integer PRIMARY KEY,
+  label text NOT NULL,
+  ref_id integer NOT NULL REFERENCES jt_share_lock.refs(id));
+INSERT INTO jt_share_lock.refs VALUES (7,'reference');
+INSERT INTO jt_share_lock.roots VALUES (1,'direct',7),(2,'rpc',7);
+CREATE ROLE {share_role} NOLOGIN;""")
+    db.run(f"CREATE ROLE {nocheck_role} NOLOGIN;")
+    share_spec = {
+        "root": {"table": "jt_share_lock.roots", "key": "id",
+                 "fields": {"label": "label"}, "insert": True,
+                 "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_share_lock.refs", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"},
+                   "etag": True},
+    }
+    create_view(db, "jt_share_lock.documents", share_spec)
+    nocheck_spec = json.loads(json.dumps(share_spec))
+    nocheck_spec["object"]["etag"] = False
+    create_view(db, "jt_share_lock.documents_nocheck", nocheck_spec)
+    db.run(f"""GRANT USAGE ON SCHEMA jt_share_lock TO {share_role};
+GRANT SELECT, UPDATE, DELETE ON jt_share_lock.roots TO {share_role};
+GRANT SELECT ON jt_share_lock.refs TO {share_role};
+GRANT SELECT, UPDATE, DELETE ON jt_share_lock.documents TO {share_role};
+GRANT EXECUTE ON FUNCTION jt_share_lock.documents__delete_document(integer,text)
+  TO {share_role};""")
+    db.run(f"""GRANT USAGE ON SCHEMA jt_share_lock TO {nocheck_role};
+GRANT SELECT, UPDATE ON jt_share_lock.roots TO {nocheck_role};
+GRANT SELECT ON jt_share_lock.refs TO {nocheck_role};
+GRANT SELECT, UPDATE ON jt_share_lock.documents_nocheck TO {nocheck_role};""")
+    direct_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
+    rpc_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=2;")
+    readable = db.value(
+        f"SET ROLE {share_role}; SELECT count(*) FROM jt_share_lock.documents;")
+    nocheck_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents_nocheck WHERE _id=2;"))
+    nocheck_document["label"] = "nocheck-update"
+    nocheck_update = db.run(
+        f"SET ROLE {nocheck_role}; UPDATE jt_share_lock.documents_nocheck SET data="
+        f"{quote(json.dumps(nocheck_document))}::jsonb WHERE _id=2;", False)
+    update_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    update_document["label"] = "updated"
+    denied_update = db.run(
+        f"SET ROLE {share_role}; UPDATE jt_share_lock.documents SET data="
+        f"{quote(json.dumps(update_document))}::jsonb WHERE _id=1;", False)
+    denied_direct = db.run(
+        f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
+        f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)};", False)
+    denied_rpc = db.run(
+        f"SET ROLE {share_role}; SELECT jt_share_lock.documents__delete_document(2,"
+        f"{quote(rpc_etag)});", False)
+    preserved_before_grant = db.value(
+        "SELECT count(*)::text||':'||(SELECT count(*) FROM jt_share_lock.refs)::text "
+        "FROM jt_share_lock.roots;")
+    db.run(f"GRANT UPDATE(label) ON jt_share_lock.refs TO {share_role};")
+    privilege_shape = db.value(f"""SELECT
+      has_table_privilege('{share_role}','jt_share_lock.refs','UPDATE')::text||':'||
+      has_column_privilege('{share_role}','jt_share_lock.refs','id','UPDATE')::text||':'||
+      has_column_privilege('{share_role}','jt_share_lock.refs','label','UPDATE')::text;""")
+    allowed_update = db.run(
+        f"SET ROLE {share_role}; UPDATE jt_share_lock.documents SET data="
+        f"{quote(json.dumps(update_document))}::jsonb WHERE _id=1;", False)
+    lock_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    lock_document["label"] = "lock-current-object"
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
+                       + quote(json.dumps(lock_document))
+                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    started_object_lock = time.monotonic()
+    waited_current_object = db.run(
+        "UPDATE jt_share_lock.refs SET label='waited-current' WHERE id=7;", False)
+    current_object_wait = time.monotonic() - started_object_lock
+    writer.wait(timeout=10)
+    db.run("INSERT INTO jt_share_lock.refs VALUES(8,'new-reference');")
+    switch_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    switch_document["reference"] = {"id": 8, "label": "new-reference"}
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
+                       + quote(json.dumps(switch_document))
+                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    started_switch_lock = time.monotonic()
+    waited_both_objects = db.run(
+        "UPDATE jt_share_lock.refs SET label=label||'-waited' WHERE id=8;", False)
+    switch_object_wait = time.monotonic() - started_switch_lock
+    writer.wait(timeout=10)
+    stale_object_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    stale_object_document["label"] = "must-not-commit"
+    root_blocker = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True)
+    assert root_blocker.stdin
+    root_blocker.stdin.write("BEGIN;UPDATE jt_share_lock.roots SET label=label "
+                             "WHERE id=1;SELECT pg_sleep(1);COMMIT;")
+    root_blocker.stdin.close(); time.sleep(.1)
+    object_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+    assert object_writer.stdin
+    object_writer.stdin.write("SELECT pg_sleep(.2);UPDATE jt_share_lock.refs "
+                              "SET label='changed-before-lock' WHERE id=8;")
+    object_writer.stdin.close()
+    started_stale_race = time.monotonic()
+    stale_object_update = db.run(
+        "UPDATE jt_share_lock.documents SET data="
+        + quote(json.dumps(stale_object_document)) + "::jsonb WHERE _id=1;", False)
+    stale_race_wait = time.monotonic() - started_stale_race
+    root_blocker.wait(timeout=10); object_writer.wait(timeout=10)
+    direct_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
+    allowed_direct = db.run(
+        f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
+        f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)} RETURNING _id;", False)
+    rpc_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=2;")
+    allowed_rpc = db.run(
+        f"SET ROLE {share_role}; SELECT jt_share_lock.documents__delete_document(2,"
+        f"{quote(rpc_etag)})->>'label';", False)
+    final_state = db.value("""SELECT count(*)::text||':'||
+      (SELECT count(*) FROM jt_share_lock.refs)::text||':'||
+      (SELECT label FROM jt_share_lock.refs WHERE id=7)
+      FROM jt_share_lock.roots;""")
+    record("FOR SHARE least privilege is enforced for direct and RPC delete",
+           readable == "2" and nocheck_update.returncode == 0
+           and db.state(denied_update) == "42501"
+           and db.state(denied_direct) == "42501"
+           and db.state(denied_rpc) == "42501" and preserved_before_grant == "2:1"
+           and privilege_shape == "false:false:true"
+           and allowed_update.returncode == 0
+           and waited_current_object.returncode == 0 and current_object_wait > .6
+           and waited_both_objects.returncode == 0 and switch_object_wait > .6
+           and db.state(stale_object_update) == "PT412" and stale_race_wait > .6
+           and allowed_direct.returncode == 0 and "1" in allowed_direct.stdout.splitlines()
+           and allowed_rpc.returncode == 0
+           and "nocheck-update" in allowed_rpc.stdout.splitlines()
+           and final_state == "0:2:waited-current",
+           f"read={readable},nocheck={nocheck_update.returncode},"
+           f"denied={db.state(denied_update)}/"
+           f"{db.state(denied_direct)}/{db.state(denied_rpc)},"
+           f"preserved={preserved_before_grant},grants={privilege_shape},"
+           f"allowed={allowed_update.returncode}/{allowed_direct.returncode}/"
+           f"{allowed_rpc.returncode},waits={current_object_wait:.3f}/"
+           f"{switch_object_wait:.3f}/{stale_race_wait:.3f},"
+           f"stale={db.state(stale_object_update)},"
+           f"final={final_state}")
+    db.run("DROP SCHEMA jt_share_lock CASCADE;")
+    cleanup_share_role()
+    cleanup_nocheck_role()
+
+    db.run("""DROP SCHEMA IF EXISTS jt_deferrable_pk CASCADE;
+CREATE SCHEMA jt_deferrable_pk;
+CREATE TABLE jt_deferrable_pk.root(
+ id integer PRIMARY KEY,
+ value text NOT NULL);
+CREATE TABLE jt_deferrable_pk.child(
+ id integer,
+ parent integer NOT NULL REFERENCES jt_deferrable_pk.root(id),
+ value text NOT NULL DEFAULT 'default',
+ CONSTRAINT child_deferrable_pkey PRIMARY KEY(id) DEFERRABLE INITIALLY IMMEDIATE,
+ CONSTRAINT child_deferrable_value_key UNIQUE(value));""")
+    deferrable_spec = {
+        "root": {"table": "jt_deferrable_pk.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_deferrable_pk.child",
+                  "key": "id", "parent_fk": "parent",
+                  "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_deferrable_pk.documents", deferrable_spec)
+    deferrable_role = f"jt_deferrable_writer_{time.time_ns()}"
+    cleanup_deferrable_role = role_cleanup(db, deferrable_role)
+    db.run(f"""CREATE ROLE {deferrable_role};
+GRANT USAGE ON SCHEMA jt_deferrable_pk TO {deferrable_role};
+GRANT SELECT,INSERT ON jt_deferrable_pk.root,jt_deferrable_pk.child
+  TO {deferrable_role};
+GRANT SELECT,INSERT ON jt_deferrable_pk.documents TO {deferrable_role};""")
+    restricted_deferrable = db.run(
+        f"SET ROLE {deferrable_role}; INSERT INTO jt_deferrable_pk.documents(data) "
+        "VALUES ('{\"_id\":3,\"value\":\"restricted\",\"items\":["
+        "{\"id\":300,\"value\":\"v300\"}]}'::jsonb);", False)
+    deferrable_initial = db.run(
+        "INSERT INTO jt_deferrable_pk.documents(data) VALUES "
+        "('{\"_id\":1,\"value\":\"one\",\"items\":["
+        "{\"id\":10,\"value\":\"v10\"},{\"id\":11,\"value\":\"v11\"}]}'::jsonb),"
+        "('{\"_id\":2,\"value\":\"two\",\"items\":["
+        "{\"id\":100,\"value\":\"v100\"}]}'::jsonb);", False)
+    doc_one = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    doc_one["items"].append({"id": 12, "value": "v12"})
+    deferrable_append = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(doc_one)) + "::jsonb WHERE _id=1;", False)
+    doc_one = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    doc_one["value"] = "must-roll-back"
+    doc_one["items"].append({"id": 100, "value": "foreign"})
+    foreign_key = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(doc_one)) + "::jsonb WHERE _id=1;", False)
+    secondary_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    secondary_doc["items"].append({"id": 13, "value": "v10"})
+    secondary_unique = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(secondary_doc)) + "::jsonb WHERE _id=1;", False)
+    claim = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    assert claim.stdin
+    claim.stdin.write("BEGIN;INSERT INTO jt_deferrable_pk.child VALUES"
+                      "(200,2,'claimed');SELECT pg_sleep(1);COMMIT;")
+    claim.stdin.close(); time.sleep(.2)
+    race_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    race_doc["value"] = "must-also-roll-back"
+    race_doc["items"].append({"id": 200, "value": "candidate"})
+    race_started = time.monotonic()
+    deferrable_race = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(race_doc)) + "::jsonb WHERE _id=1;", False)
+    race_wait = time.monotonic() - race_started
+    claim.wait(timeout=10)
+    deferrable_state = db.value(
+        "SELECT (SELECT value FROM jt_deferrable_pk.root WHERE id=1)||':'||"
+        "(SELECT count(*) FROM jt_deferrable_pk.child WHERE parent=1)||':'||"
+        "(SELECT parent FROM jt_deferrable_pk.child WHERE id=200);")
+    record("DEFERRABLE child primary key uses safe explicit-key fallback",
+           deferrable_initial.returncode == 0
+           and restricted_deferrable.returncode == 0
+           and deferrable_append.returncode == 0
+           and db.state(foreign_key) == "PT422"
+           and db.state(secondary_unique) == "23505"
+           and "child_deferrable_value_key" in secondary_unique.stderr
+           and db.state(deferrable_race) == "PT422" and race_wait > .6
+           and deferrable_state == "one:3:2",
+           f"restricted={restricted_deferrable.returncode},"
+           f"initial={deferrable_initial.returncode},append={deferrable_append.returncode},"
+           f"foreign={db.state(foreign_key)},secondary={db.state(secondary_unique)},"
+           f"race={db.state(deferrable_race)}/{race_wait:.3f}s,state={deferrable_state}")
+    db.run("DROP SCHEMA jt_deferrable_pk CASCADE;")
+    cleanup_deferrable_role()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))

@@ -1,0 +1,14 @@
+PG19_START=2026-11-06T10:46:03Z
+{
+  "run_id": "20261106T104603Z",
+  "output": "/home/azureuser/pgjt-pm45-results/azure-e5b41a5-pg19",
+  "status": "PASS",
+  "measurements": 2640,
+  "groups": 40
+}
+{
+  "status": "PASS",
+  "measurements": 2640,
+  "groups": 40
+}
+PG19_END=2026-11-06T10:46:16Z

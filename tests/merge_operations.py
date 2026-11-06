@@ -27,7 +27,11 @@ class Database:
         return result
 
     def value(self, sql: str) -> str:
-        return self.run(sql).stdout.strip().splitlines()[-1]
+        result = self.run(sql)
+        lines = result.stdout.strip().splitlines()
+        if not lines:
+            raise RuntimeError(f"query returned no scalar value: {sql}\nstderr: {result.stderr}")
+        return lines[-1]
 
     @staticmethod
     def state(result: subprocess.CompletedProcess[str]) -> str | None:
@@ -81,6 +85,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     db = Database(args.psql, args.database)
+    version = int(db.value("SHOW server_version_num;"))
+    if version < 170000:
+        raise RuntimeError(
+            f"MERGE regression suite requires PostgreSQL 17 or newer; server_version_num={version}")
     results: list[dict[str, str]] = []
 
     def record(name: str, passed: bool, observed: str) -> None:

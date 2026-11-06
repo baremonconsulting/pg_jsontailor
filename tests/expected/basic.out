@@ -5,7 +5,7 @@ SELECT extversion = '0.2.0' AS version_ok FROM pg_extension WHERE extname='pg_js
  t
 (1 row)
 
-SELECT count(*) = 2 AS api_ok
+SELECT count(*) = 4 AS api_ok
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
 WHERE n.nspname='jsontailor';
  api_ok 

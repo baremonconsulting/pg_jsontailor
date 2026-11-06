@@ -4,7 +4,7 @@ title: pg_jsontailor
 type: software
 version: 0.2.0
 authors:
-  - name: Baremon Consulting
+  - name: Baremon s.r.o.
 repository-code: https://github.com/baremonconsulting/pg_jsontailor
 url: https://www.baremon.eu/
 license: PostgreSQL

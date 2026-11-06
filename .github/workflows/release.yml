@@ -33,6 +33,7 @@ jobs:
             'PostgreSQL 18'
             'PostgreSQL 19'
             'CodeQL (Python)'
+            'Dependency review'
           )
           check_runs=$(gh api --paginate \
             "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \

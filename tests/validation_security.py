@@ -187,12 +187,31 @@ CREATE TABLE jt_bad.order_bad(id integer PRIMARY KEY,parent integer REFERENCES j
 CREATE TABLE jt_bad.ident_field(id integer PRIMARY KEY,g bigint GENERATED ALWAYS AS IDENTITY);
 CREATE TABLE jt_bad.arr_ident(id integer PRIMARY KEY,parent integer REFERENCES jt_bad.parent(id),g bigint GENERATED ALWAYS AS IDENTITY);
 CREATE TABLE jt_bad.root_fk_ident(id integer PRIMARY KEY,fk bigint GENERATED ALWAYS AS IDENTITY REFERENCES jt_bad.ident(id));
+CREATE TABLE jt_bad.inherited_root(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_bad.inherited_root_child() INHERITS(jt_bad.inherited_root);
+ALTER TABLE jt_bad.inherited_root_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.inherited_array(id integer PRIMARY KEY,parent integer REFERENCES jt_bad.parent(id),value text);
+CREATE TABLE jt_bad.inherited_array_child() INHERITS(jt_bad.inherited_array);
+ALTER TABLE jt_bad.inherited_array_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.inherited_object(id integer PRIMARY KEY,value text);
+CREATE TABLE jt_bad.inherited_object_child() INHERITS(jt_bad.inherited_object);
+ALTER TABLE jt_bad.inherited_object_child ADD PRIMARY KEY(id);
+CREATE TABLE jt_bad.object_owner(id integer PRIMARY KEY,object_id integer REFERENCES jt_bad.inherited_object(id));
+CREATE TABLE jt_bad.partitioned_object(id integer PRIMARY KEY,value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_object_low PARTITION OF jt_bad.partitioned_object FOR VALUES FROM (0) TO (100);
+CREATE TABLE jt_bad.partitioned_root(id integer PRIMARY KEY,object_id integer REFERENCES jt_bad.partitioned_object(id),value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_root_low PARTITION OF jt_bad.partitioned_root FOR VALUES FROM (0) TO (100);
+CREATE TABLE jt_bad.partitioned_array(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_bad.partitioned_root(id),value text) PARTITION BY RANGE(id);
+CREATE TABLE jt_bad.partitioned_array_low PARTITION OF jt_bad.partitioned_array FOR VALUES FROM (0) TO (100);
 CREATE VIEW jt_bad.v AS SELECT 1 id;""")
         base=json.loads(self.spec.read_text()); cases=[]
         cases += [("null_spec","shop.bad",None),("three_part","a.b.c",base),("unknown_top","shop.bad",{"x":1}),("missing_root","shop.bad",{}),("root_wrong_type","shop.bad",{"root":[]})]
         def variant(name,edit):
             x=json.loads(json.dumps(base));edit(x);cases.append((name,"shop.bad_"+str(len(cases)),x))
         variant("table_parts",lambda x:x["root"].update(table="orders"));variant("table_missing",lambda x:x["root"].update(table="shop.nope"));variant("not_table",lambda x:x["root"].update(table="jt_bad.v"))
+        cases.append(("classic_inherited_root","shop.bad_inherited_root",{"root":{"table":"jt_bad.inherited_root","key":"id","fields":{"value":"value"}}}))
+        cases.append(("classic_inherited_array","shop.bad_inherited_array",{"root":{"table":"jt_bad.parent","key":"id","fields":{}},"array":{"name":"items","table":"jt_bad.inherited_array","key":"id","parent_fk":"parent","fields":{"id":"id","value":"value"}}}))
+        cases.append(("classic_inherited_object","shop.bad_inherited_object",{"root":{"table":"jt_bad.object_owner","key":"id","fields":{}},"object":{"name":"object","table":"jt_bad.inherited_object","key":"id","root_fk":"object_id","fields":{"id":"id","value":"value"}}}))
         variant("column_missing",lambda x:x["root"]["fields"].update(status="nope"));variant("unsupported",lambda x:x["root"].update(table="jt_bad.gen",key="id",fields={"u":"u"}))
         variant("generated",lambda x:x["root"].update(table="jt_bad.gen",key="id",fields={"g":"g"}));variant("key_not_pk",lambda x:x["root"].update(key="status"))
         variant("root_key_mapped",lambda x:x["root"]["fields"].update(bad="order_id"));variant("array_parent_mapped",lambda x:x["array"]["fields"].update(bad="order_id"))
@@ -217,24 +236,32 @@ CREATE VIEW jt_bad.v AS SELECT 1 id;""")
             p=self.run("SELECT jsontailor.duality_view_ddl("+lit(view)+","+expr+");",False)
             bad.append(f"{name}:{self.state(p)}")
         passed=all(x.endswith(":22023") for x in bad)
+        partitioned={"root":{"table":"jt_bad.partitioned_root","key":"id","fields":{"value":"value"},"insert":True,"update":True},"object":{"name":"object","table":"jt_bad.partitioned_object","key":"id","root_fk":"object_id","fields":{"id":"id","value":"value"}},"array":{"name":"items","table":"jt_bad.partitioned_array","key":"id","parent_fk":"parent","fields":{"id":"id","value":"value"},"insert":True,"update":True,"delete":True}}
+        partitioned_result=self.run("INSERT INTO jt_bad.partitioned_object VALUES(7,'reference');SELECT jsontailor.create_duality_view('shop.good_partitioned',"+lit(json.dumps(partitioned))+"::jsonb);INSERT INTO shop.good_partitioned(data) VALUES('{\"_id\":1,\"value\":\"root\",\"object\":{\"id\":7},\"items\":[{\"id\":11,\"value\":\"first\"}]}'::jsonb);UPDATE shop.good_partitioned SET data=jsonb_set(data,'{items,0,value}','\"changed\"'::jsonb) WHERE _id=1;",False)
+        partitioned_state=self.scalar("SELECT count(*)::text||':'||max(data#>>'{object,value}')||':'||max(data#>>'{items,0,value}') FROM shop.good_partitioned WHERE _id=1;") if partitioned_result.returncode==0 else "not-created"
+        passed &= partitioned_result.returncode==0 and partitioned_state=="1:reference:changed"
+        bad.append(f"declarative_partition:{partitioned_state if partitioned_result.returncode==0 else self.state(partitioned_result)}")
+        leaf_result=self.run("SELECT jsontailor.duality_view_ddl('shop.good_leaf','{\"root\":{\"table\":\"jt_bad.parent\",\"key\":\"id\",\"fields\":{}}}'::jsonb);",False)
+        passed &= leaf_result.returncode==0
+        bad.append(f"ordinary_leaf:{'accepted' if leaf_result.returncode==0 else self.state(leaf_result)}")
         self.add(12,"validation","PASS" if passed else "FAIL","invalid-specification catalogue returns 22023",";".join(bad),
-                 "Cases directly cover structural, catalogue, mapping, FK enforcement/action, identity and generated-name rules.")
+                 "Cases directly cover structural, catalogue, mapping, FK enforcement/action, identity, inheritance and generated-name rules; declarative partitioning remains supported.")
 
     def test14(self):
         self.run("""DROP SCHEMA IF EXISTS jt_v7 CASCADE; CREATE SCHEMA jt_v7;
-CREATE TABLE jt_v7.root(id integer PRIMARY KEY,t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,u uuid);
-CREATE TABLE jt_v7.child(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_v7.root(id),t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,u uuid);
-INSERT INTO jt_v7.root VALUES(1,'é','v','c',2,3,4,5.20,true,'2026-11-03','2026-11-03 10:00','00000000-0000-0000-0000-000000000001');
-INSERT INTO jt_v7.child VALUES(1,1,'x','y','z',2,3,4,5.20,false,'2026-11-04','2026-11-04 10:00','00000000-0000-0000-0000-000000000002');
-CREATE TABLE jt_v7.excluded(id integer PRIMARY KEY,tz timestamptz,r real,d double precision,iv interval,m money,ba bytea);""")
-        fields={"t":"t","v":"v","c":"c","s":"s","i":"i","b":"b","n":"n","flag":"flag","d":"d","ts":"ts","u":"u"}
+CREATE TABLE jt_v7.root(id integer PRIMARY KEY,t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,tz timestamptz,u uuid);
+CREATE TABLE jt_v7.child(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt_v7.root(id),t text,v varchar(9),c char(2),s smallint,i integer,b bigint,n numeric(12,2),flag boolean,d date,ts timestamp,tz timestamptz,u uuid);
+INSERT INTO jt_v7.root VALUES(1,'é','v','c',2,3,4,5.20,true,'2026-11-03','2026-11-03 10:00','2026-11-03 10:00+01','00000000-0000-0000-0000-000000000001');
+INSERT INTO jt_v7.child VALUES(1,1,'x','y','z',2,3,4,5.20,false,'2026-11-04','2026-11-04 10:00','2026-11-04 10:00+01','00000000-0000-0000-0000-000000000002');
+CREATE TABLE jt_v7.excluded(id integer PRIMARY KEY,r real,d double precision,iv interval,m money,ba bytea);""")
+        fields={"t":"t","v":"v","c":"c","s":"s","i":"i","b":"b","n":"n","flag":"flag","d":"d","ts":"ts","tz":"tz","u":"u"}
         spec={"root":{"table":"jt_v7.root","key":"id","fields":fields,"insert":True,"update":True,"delete":True},"array":{"name":"items","table":"jt_v7.child","key":"id","parent_fk":"parent","fields":{"id":"id",**fields},"insert":True,"update":True,"delete":True}}
         self.run("SELECT jsontailor.create_duality_view('jt_v7.dv',"+lit(json.dumps(spec))+"::jsonb);")
         tags=[]
         for settings in ("SET TimeZone='UTC';SET DateStyle='ISO, MDY';SET extra_float_digits=0;","SET TimeZone='Pacific/Auckland';SET DateStyle='German, DMY';SET extra_float_digits=3;"):
             tags.append(self.scalar(settings+"SELECT data#>>'{_metadata,etag}' FROM jt_v7.dv WHERE _id=1;"))
         excluded=[]
-        for col in ("tz","r","d","iv","m","ba"):
+        for col in ("r","d","iv","m","ba"):
             bad={"root":{"table":"jt_v7.excluded","key":"id","fields":{"bad":col}}}
             excluded.append(self.state(self.run("SELECT jsontailor.duality_view_ddl('jt_v7.bad_"+col+"',"+lit(json.dumps(bad))+"::jsonb);",False)))
         passed=len(set(tags))==1 and all(x=="22023" for x in excluded)
@@ -258,23 +285,26 @@ INSERT INTO jt_v5.root VALUES(1);INSERT INTO jt_v5.child VALUES('a',1,'same','a'
         self.add(16,"V5","PASS" if observed==expected else "FAIL","C collation ordering for order_by and text key",f"observed={observed};expected={expected};source_collation={coll}")
 
     def test17(self):
-        root="root$fn$; ' \" space"; child="child$$; ' \" space"; key="id$fn$; ' \""; parent="parent$$; ' \""; value="value$fn$; ' \""
+        root="root*/$fn$; ' \" space"; child="child*/$$; ' \" space"; key="id$fn$; ' \""; parent="parent$$; ' \""; value="value$fn$; ' \""
         qi=lambda x:'"'+x.replace('"','""')+'"'
         self.run(f"DROP SCHEMA IF EXISTS jt_host CASCADE;CREATE SCHEMA jt_host;CREATE TABLE jt_host.{qi(root)}({qi(key)} integer PRIMARY KEY,{qi(value)} text);CREATE TABLE jt_host.{qi(child)}({qi(key)} integer PRIMARY KEY,{qi(parent)} integer REFERENCES jt_host.{qi(root)}({qi(key)}),{qi(value)} text);INSERT INTO jt_host.{qi(root)} VALUES(1,'r');INSERT INTO jt_host.{qi(child)} VALUES(1,1,'c');CREATE SCHEMA IF NOT EXISTS rusive_schema;")
-        spec={"root":{"table":"jt_host."+qi(root),"key":key,"fields":{"value":value}},"array":{"name":"items","table":"jt_host."+qi(child),"key":key,"parent_fk":parent,"fields":{"id":key,"value":value}}}
+        spec={"root":{"table":"jt_host."+qi(root),"key":key,"fields":{"value":value},"insert":True,"update":True},"array":{"name":"items","table":"jt_host."+qi(child),"key":key,"parent_fk":parent,"fields":{"id":key,"value":value},"insert":True,"update":True,"delete":True}}
         p=self.run("SET search_path=rusive_schema,pg_catalog;SELECT jsontailor.create_duality_view('jt_host.\"odd$fn$; name\"',"+lit(json.dumps(spec))+"::jsonb);",False)
         ddl=self.run("SELECT jsontailor.duality_view_ddl('jt_host.\"odd$$; second\"',"+lit(json.dumps(spec))+"::jsonb);").stdout.strip()
         p2=self.run("SET search_path=rusive_schema,pg_catalog;"+ddl,False)
-        values=self.scalar("SELECT (SELECT data#>>'{value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=1)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$$; second\" WHERE _id=1);") if p.returncode==0 and p2.returncode==0 else "not-created"
-        passed=p.returncode==0 and p2.returncode==0 and values=="r:c"
-        self.add(17,"hostile identifiers","PASS" if passed else "FAIL","hostile search_path and hostile table/column names",f"create={p.returncode};ddl={p2.returncode};values={values}")
+        update=self.run("UPDATE jt_host.\"odd$fn$; name\" SET data=jsonb_set(data,'{value}','\"changed\"') WHERE _id=1;",False) if p.returncode==0 else p
+        inserted={"_id":2,"value":"new","items":[{"id":2,"value":"child"}]}
+        insert=self.run("INSERT INTO jt_host.\"odd$fn$; name\"(data) VALUES("+lit(json.dumps(inserted))+"::jsonb);",False) if p.returncode==0 else p
+        values=self.scalar("SELECT (SELECT data#>>'{value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=1)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$fn$; name\" WHERE _id=2)||':'||(SELECT data#>>'{items,0,value}' FROM jt_host.\"odd$$; second\" WHERE _id=1);") if p.returncode==0 and p2.returncode==0 and update.returncode==0 and insert.returncode==0 else "not-created"
+        passed=p.returncode==0 and p2.returncode==0 and update.returncode==0 and insert.returncode==0 and values=="changed:child:c"
+        self.add(17,"hostile identifiers","PASS" if passed else "FAIL","hostile search_path and hostile table/column names including comment terminators",f"create={p.returncode};ddl={p2.returncode};update={update.returncode};insert={insert.returncode};values={values}")
 
     def test18(self):
         values=self.scalar("""SELECT count(*)::text||':'||string_agg(proname||'/'||provolatile::text||'/'||prosecdef::text||'/'||array_to_string(proconfig,','),';' ORDER BY proname)
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jsontailor';""")
         usage=self.scalar("SELECT has_schema_privilege('public','jsontailor','USAGE');")
-        passed=values.startswith("2:") and "/s/false/search_path=pg_catalog, pg_temp" in values and "/v/false/search_path=pg_catalog, pg_temp" in values and usage=='t'
-        self.add(18,"installation","PASS" if passed else "FAIL","two functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
+        passed=values.startswith("4:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==3 and usage=='t'
+        self.add(18,"installation","PASS" if passed else "FAIL","four functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
 
     def test19(self):
         self.reset()
@@ -301,7 +331,7 @@ CREATE TABLE jt_id.rb(id bigint PRIMARY KEY);CREATE TABLE jt_id.cb(id bigint PRI
         self.run("CREATE TABLE jt_id.ref(id bigint PRIMARY KEY);CREATE TABLE jt_id.rc(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,ref_id bigint REFERENCES jt_id.ref(id));")
         defaults={"root":{"table":"jt_id.rc","key":"id","fields":{},"insert":True},"object":{"name":"ref","table":"jt_id.ref","key":"id","root_fk":"ref_id","fields":{"id":"id"}}}
         self.run("SELECT jsontailor.create_duality_view('jt_id.dvc',"+lit(json.dumps(defaults))+"::jsonb);");default_root=self.run("INSERT INTO jt_id.dvc(data) VALUES ('{}');",False)
-        passed=pa.returncode==0 and pb.returncode==0 and before_a!=after_a and before_b!=after_b and no_key.returncode==0 and self.state(explicit)=="428C9" and default_root.returncode==0
+        passed=pa.returncode==0 and pb.returncode==0 and before_a!=after_a and before_b!=after_b and no_key.returncode==0 and self.state(explicit)=="PT422" and default_root.returncode==0
         self.add(20,"identity variants","PASS" if passed else "FAIL","root and child identity rewrite semantics",f"a={pa.returncode}/{before_a}->{after_a};b={pb.returncode}/{before_b}->{after_b};child_default={no_key.returncode};child_explicit={self.state(explicit)};root_defaults={default_root.returncode}")
 
 

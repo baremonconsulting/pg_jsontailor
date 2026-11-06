@@ -1,5 +1,5 @@
 -- pg_jsontailor example schema with synthetic seed data.
--- Used by docs/reference/orders_dv.spec.json and by the mandatory tests.
+-- Used by examples/orders_dv.spec.json and by the mandatory tests.
 
 DROP SCHEMA IF EXISTS shop CASCADE;
 CREATE SCHEMA shop;

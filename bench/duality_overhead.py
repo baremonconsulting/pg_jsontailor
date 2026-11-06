@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import statistics
 import subprocess
 import time
 import uuid
+
+from verify_results import verify_results
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -28,10 +32,16 @@ parser.add_argument("--output", type=Path)
 parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run" / "socket")))
 parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
 parser.add_argument("--pg-user", default=os.environ.get("PGUSER", os.environ.get("USER", "postgres")))
+parser.add_argument("--source-commit", help="exact source commit when running outside a Git checkout")
+parser.add_argument("--drop-database-after", action="store_true",
+                    help="drop the disposable benchmark database after artifacts are written")
 args = parser.parse_args()
 PG = args.pg_bin
 DB = args.database
-SIZES = tuple(int(value) for value in args.sizes.split(","))
+try:
+    SIZES = tuple(int(value) for value in args.sizes.split(","))
+except ValueError as error:
+    parser.error(f"--sizes must be a comma-separated integer list: {error}")
 WARMUPS = args.warmups
 REPETITIONS = args.repetitions
 OPERATIONS = ("read", "insert", "root_update", "update", "delete",
@@ -39,6 +49,17 @@ OPERATIONS = ("read", "insert", "root_update", "update", "delete",
 RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 OUT = args.output or ROOT / "results" / f"duality-benchmark-{RUN_ID}"
 ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port), "PGUSER": args.pg_user}
+ARTIFACTS = ("measurements.csv", "plans.json", "summary.json", "environment.json")
+PRODUCT_INPUTS = ("sql", "pg_jsontailor.control", "Makefile")
+
+if not SIZES or any(size < 0 for size in SIZES) or len(set(SIZES)) != len(SIZES):
+    parser.error("--sizes must contain distinct non-negative integers")
+if WARMUPS < 0:
+    parser.error("--warmups must be non-negative")
+if REPETITIONS <= 0:
+    parser.error("--repetitions must be positive")
+if not DB or DB in {"postgres", "template0", "template1"}:
+    parser.error("--database must name a dedicated disposable database")
 
 
 def run(args, input_text=None, check=True):
@@ -56,6 +77,18 @@ def sql(text, tuples=False):
 
 def lit(value):
     return "'" + value.replace("'", "''") + "'"
+
+
+def product_hashes():
+    hashes = {}
+    for relative in PRODUCT_INPUTS:
+        source = ROOT / relative
+        files = sorted(path for path in source.rglob("*") if path.is_file()) \
+            if source.is_dir() else [source]
+        for path in files:
+            hashes[path.relative_to(ROOT).as_posix()] = hashlib.sha256(
+                path.read_bytes()).hexdigest()
+    return hashes
 
 
 class PersistentPsql:
@@ -108,7 +141,23 @@ def explain(session, statements):
     }
 
 
-OUT.mkdir(parents=True)
+if OUT.exists() and not OUT.is_dir():
+    parser.error(f"--output exists and is not a directory: {OUT}")
+git_head = run(["git", "-C", ROOT, "rev-parse", "HEAD"], check=False).stdout.strip() or None
+git_status_result = run(["git", "-C", ROOT, "status", "--porcelain"], check=False)
+if args.source_commit and git_head and args.source_commit != git_head:
+    parser.error("--source-commit differs from the current Git checkout")
+source_commit = args.source_commit or git_head
+if not source_commit:
+    parser.error("--source-commit is required when running outside a Git checkout")
+if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+    parser.error("source commit must be a full 40-character lowercase Git SHA-1")
+source_dirty = bool(git_status_result.stdout) if git_head else None
+
+OUT.mkdir(parents=True, exist_ok=True)
+collisions = [name for name in ARTIFACTS if (OUT / name).exists()]
+if collisions:
+    parser.error("--output already contains benchmark artifacts: " + ", ".join(collisions))
 run([PG / "dropdb", "--if-exists", DB])
 run([PG / "createdb", DB])
 sql("""
@@ -253,6 +302,9 @@ for size in SIZES:
         summary.append({"size":size,"operation":operation,**values,
                         "median_ratio":values["duality"]["median_ms"]/values["direct"]["median_ms"]})
 (OUT/"summary.json").write_text(json.dumps(summary,indent=2))
-metadata={"run_id":RUN_ID,"postgresql":sql("SHOW server_version;",tuples=True).strip(),"platform":platform.platform(),"sizes":SIZES,"warmups":WARMUPS,"repetitions":REPETITIONS,"jit":"off","parallel_gather_workers":0,"database":DB,"backend_mode":"one persistent psql backend for all measurements"}
+metadata={"run_id":RUN_ID,"postgresql":sql("SHOW server_version;",tuples=True).strip(),"platform":platform.platform(),"cpu_count":os.cpu_count(),"sizes":SIZES,"operations":OPERATIONS,"warmups":WARMUPS,"repetitions":REPETITIONS,"jit":"off","parallel_gather_workers":0,"database":DB,"pg_host":args.pg_host,"pg_port":str(args.pg_port),"pg_user":args.pg_user,"backend_mode":"one persistent psql backend for all measurements","source_commit":source_commit,"source_dirty":source_dirty,"product_hashes":product_hashes()}
 (OUT/"environment.json").write_text(json.dumps(metadata,indent=2))
-print(json.dumps({"run_id":RUN_ID,"output":str(OUT),"measurements":len(rows),"groups":len(summary)},indent=2))
+verification = verify_results(OUT)
+if args.drop_database_after:
+    run([PG / "dropdb", DB])
+print(json.dumps({"run_id":RUN_ID,"output":str(OUT),**verification},indent=2))

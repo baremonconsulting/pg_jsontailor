@@ -8,7 +8,7 @@ The design follows the same core idea as Oracle JSON Relational Duality Views: o
 
 ## Status
 
-The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier, PostgREST and Oracle ORDS comparison scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
+The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier and PostgREST scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
 
 The current implementation supports:
 
@@ -18,6 +18,7 @@ The current implementation supports:
 - document reads, inserts, full replacements and guarded deletes;
 - optimistic concurrency using SHA-256 ETags;
 - PostgreSQL row-level security and invoker rights;
+- generator provenance, catalogue health checks and transactional regeneration;
 - generated DDL that has no runtime dependency on the extension.
 
 ## Runtime requirements
@@ -80,6 +81,8 @@ make installcheck
 Given ordinary relational tables such as those in [`examples/shop_schema.sql`](examples/shop_schema.sql), generate a writable JSON view from a specification:
 
 ```sql
+CREATE SCHEMA api;
+
 SELECT jsontailor.create_duality_view(
     'api.orders_dv',
     '{
@@ -120,7 +123,7 @@ Read a document:
 ```sql
 SELECT data
 FROM api.orders_dv
-WHERE _id = 1001;
+WHERE _id = 42;
 ```
 
 Updates are complete-document replacements, but the client does not have to retain or transmit the complete JSON value. It can pass the identity, the ETag from an earlier read and the new field value; PostgreSQL can construct complete `NEW.data` inside the statement:
@@ -138,14 +141,14 @@ Here `$1` is the root identity, `$2` is the ETag retained from the client's earl
 Delete through the generated function and pass the identifier and ETag explicitly:
 
 ```sql
-SELECT api.orders_dv__delete_document(1001, 'ETAG_FROM_THE_PRECEDING_READ');
+SELECT api.orders_dv__delete_document(42, 'ETAG_FROM_THE_PRECEDING_READ');
 ```
 
 SQL clients can also include both values in a direct delete:
 
 ```sql
 DELETE FROM api.orders_dv
-WHERE _id = 1001
+WHERE _id = 42
   AND data #>> '{_metadata,etag}' = 'ETAG_FROM_THE_PRECEDING_READ'
 RETURNING _id;
 ```
@@ -155,6 +158,9 @@ The trigger locks the relational state, reads the document again and compares it
 The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). The detailed API and document rules are described in [`docs/API.md`](docs/API.md) and [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
 
 Generated functions contain copied write logic. Follow [`docs/UPGRADING.md`](docs/UPGRADING.md) to regenerate existing mappings transactionally after relevant extension or source-schema changes.
+
+Before a controlled deployment, complete the fit, acceptance, SLO and release
+checks in [`docs/PILOT_READINESS.md`](docs/PILOT_READINESS.md).
 
 PostgreSQL 17, 18 and 19 can also route a documented subset of native SQL `MERGE` through the generated insert, update and delete paths. The source key must be unique, updates remain complete ETag-checked replacements, deletes require an ETag action condition, and the `WHEN NOT MATCHED` branch must be used only when creation is intended. See [`docs/MERGE.md`](docs/MERGE.md) for the supported subset and copyable staging examples.
 
@@ -169,16 +175,25 @@ The repository contains several layers of verification:
 - `tests/merge_operations.py` for native SQL MERGE compatibility and concurrency;
 - `tests/run_postgrest.py` for the optional REST surface;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
+- `tests/dump_restore.py` for custom and plain dump/restore verification;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
 - `bench/duality_overhead.py` for reproducible server-side measurements.
+- `bench/verify_results.py` for independent validation and recomputation of benchmark artifacts.
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push and pull request runs the regression, isolation, functional, security, set-based reconciliation and native MERGE suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. CodeQL and dependency review run separately with read-only default permissions. PostgREST, cross-database fixture comparison, stress, pilot and benchmark tools are explicit integration or measurement scenarios rather than per-commit CI gates.
+Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. Repository checks also enforce the release-candidate version, benchmark and public-source contract. CodeQL and dependency review run separately with read-only default permissions. PostgREST, pilot and benchmark execution are explicit integration or measurement scenarios rather than per-commit CI gates; committed benchmark evidence is independently verified on every run. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
 
 ## Performance
 
-The write path uses set-based array reconciliation. In the current Azure single-session reference, replacing a document with 1,000 child items took 39.613 ms median and 39.773 ms p95, compared with a 42.549 ms median for the published earlier commit on the same VM. Results are host-specific and do not represent a production SLO. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+The write path uses set-based array reconciliation and set-wise validation.
+The current Azure reference at commit `e5b41a5` records a 49.615 ms
+median and 50.436 ms p95 for complete replacement of a document with 1,000
+children. It is current release evidence only when the release-candidate
+verifier proves product equivalence with the candidate. Results are
+host-specific and do not represent a production SLO. See
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full semantic and provenance
+context.
 
 ## Limitations
 
@@ -188,10 +203,13 @@ The write path uses set-based array reconciliation. In the current Azure single-
 - Concurrent throughput, network latency and client-specific access policies must be measured for each deployment.
 - PostgREST configuration, authentication, TLS and operational controls remain deployment responsibilities.
 
+The complete mapped-type, foreign-key, identity and source-shape limits are in
+[`docs/SEMANTICS.md`](docs/SEMANTICS.md).
+
 ## Licence
 
 `pg_jsontailor` is released under the PostgreSQL Licence. See [`LICENSE`](LICENSE).
 
-Copyright © 2026 Baremon Consulting.
+Copyright © 2026 Baremon s.r.o.
 
 For support and contribution guidance, see [`SUPPORT.md`](SUPPORT.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
