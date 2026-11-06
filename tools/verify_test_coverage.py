@@ -39,10 +39,10 @@ EXPECTED_CLAIMS = {
 }
 EXPECTED_SECTION_DIGESTS = {
     "requirements": "d914017acccda38a8b3983648083977b8fc33615152ef2104306bb32b68e179d",
-    "claims": "f6871faf069688ba2550fe002a253d71048868ee591feac1f988e6d2725ed7fe",
-    "manual_evidence": "6b9dea547968a760dff9d8c1bce174e7cef7aae3d6bc25e379756cbb756d7d20",
-    "supplemental_evidence": "84c8771a156ab8ca1ed7d7624c9f5eae921192e4d441366795af958817284930",
-    "runtime_evidence": "1df92e1b7317ee9d4bd55fd95ac88639485e7ae9ef57d63c1ead8bbcc5632fd5",
+    "claims": "1016c956fbf7d072e481a6fe3556fe44963374e2864ee11a30c77f2ea71da454",
+    "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "supplemental_evidence": "739452511c457552c0298eab00b46582446265c44caca5c1f67eee9d72fd5893",
+    "runtime_evidence": "430e7e95294732945dc07ce736d6a381862fd56e5cc1a98745b41b8d21f77b6a",
 }
 
 
@@ -178,7 +178,7 @@ def verify(manifest: dict) -> None:
         require(test_id in runtime_expected, f"unknown runtime test ID: {test_id!r}")
         require(test_id not in runtime_ids, f"duplicate runtime test ID: {test_id}")
         runtime_ids.add(test_id)
-        require(item.get("scope") in {"repository", "postgresql"},
+        require(item.get("scope") in {"repository", "postgresql", "postgrest"},
                 f"{test_id}: invalid runtime scope")
         suite = item.get("suite")
         require(isinstance(suite, str) and suite,
@@ -216,8 +216,9 @@ def result_rows(path: Path) -> list[dict]:
 def attest(manifest: dict, scope: str, postgresql: str | None,
            results: dict[str, Path], passed_suites: set[str]) -> dict:
     verify(manifest)
-    require(scope in {"repository", "postgresql"}, "invalid attestation scope")
-    if scope == "postgresql":
+    require(scope in {"repository", "postgresql", "postgrest"},
+            "invalid attestation scope")
+    if scope in {"postgresql", "postgrest"}:
         require(postgresql in manifest["supported_postgresql"],
                 "PostgreSQL version is required for database attestation")
     else:
@@ -270,7 +271,7 @@ def attest(manifest: dict, scope: str, postgresql: str | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scope", choices=("repository", "postgresql"))
+    parser.add_argument("--scope", choices=("repository", "postgresql", "postgrest"))
     parser.add_argument("--postgresql")
     parser.add_argument("--result", action="append", default=[], metavar="SUITE=PATH")
     parser.add_argument("--passed-suite", action="append", default=[])

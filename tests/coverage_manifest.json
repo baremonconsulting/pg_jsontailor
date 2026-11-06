@@ -51,7 +51,7 @@
     {"claim_id":"PGJT-40/CLAIM-PARTITIONS","file":"docs/SEMANTICS.md","marker":"declaratively partitioned roots are supported","tests":["PGJT-40/partition-runtime","PGJT-4/classic-inheritance"]},
     {"claim_id":"PGJT-40/CLAIM-DUMP-RESTORE","file":"docs/UPGRADING.md","marker":"Dump and restore","tests":["PGJT-18/dump-restore-release-gate"]},
     {"claim_id":"PGJT-40/CLAIM-BENCHMARK","file":"docs/BENCHMARKS.md","marker":"7,200 measured executions and 720 warm-ups","tests":["PGJT-26/cross-version-benchmark","PGJT-36/final-release-evidence"]},
-    {"claim_id":"PGJT-40/CLAIM-POSTGREST","file":"README.md","marker":"PostgREST scenarios","tests":["PGJT-40/postgrest-manual-scenario"],"gap":"Automated CI integration is tracked by PGJT-48."},
+    {"claim_id":"PGJT-40/CLAIM-POSTGREST","file":"README.md","marker":"PostgREST scenarios","tests":["PGJT-48/http-get","PGJT-48/http-complete-patch","PGJT-48/http-stale-etag","PGJT-48/http-missing-etag","PGJT-48/http-incomplete-document","PGJT-48/http-insert","PGJT-48/http-delete-rpc","PGJT-48/http-options","PGJT-48/http-hidden-base-tables"]},
     {"claim_id":"PGJT-44/CLAIM-TYPE-SEMANTICS","file":"docs/SEMANTICS.md","marker":"Mapped JSON values must use the JSON type expected by the target PostgreSQL","tests":["PGJT-44/field-operation-matrix","PGJT-44/invalid-values-atomic","PGJT-44/numeric-timestamptz-boundaries","PGJT-44/key-position-matrix"]},
     {"claim_id":"PGJT-45/CLAIM-DOCUMENT-SHAPES","file":"docs/API.md","marker":"`root` is required. `object` and `array` are optional.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/identity-default-matrix"]},
     {"claim_id":"PGJT-45/CLAIM-OPERATION-SEMANTICS","file":"docs/SEMANTICS.md","marker":"An update is a complete document replacement, not a partial patch.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/object-etag-modes","PGJT-45/failure-atomicity","PGJT-45/deferrable-merge-matrix"]},
@@ -61,9 +61,7 @@
     {"claim_id":"PGJT-47/CLAIM-PARTITION-LIFECYCLE","file":"docs/UPGRADING.md","marker":"Attach or detach declarative partitions","tests":["PGJT-47/partition-role-transitions","PGJT-47/partition-health-regeneration","PGJT-47/concurrent-partition-ddl"]},
     {"claim_id":"PGJT-47/CLAIM-PARTITION-RESTORE","file":"docs/UPGRADING.md","marker":"Dump and restore","tests":["PGJT-47/partition-custom-restore","PGJT-47/partition-plain-restore"]}
   ],
-  "manual_evidence": [
-    {"test_id":"PGJT-40/postgrest-manual-scenario","file":"tests/run_postgrest.py","marker":"Run mandatory PostgREST test 13","status":"manual","tracking_jira":"PGJT-48"}
-  ],
+  "manual_evidence": [],
   "supplemental_evidence": [
     {"test_id":"PGJT-34/new-object-lock","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-34/new-object-lock"},
     {"test_id":"PGJT-34/stale-object-etag","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-34/stale-object-etag"},
@@ -95,7 +93,16 @@
     {"test_id":"PGJT-47/classic-inherits-rejection","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/classic-inherits-rejection"},
     {"test_id":"PGJT-47/concurrent-partition-ddl","file":"tests/specs/pgjt_47_partition.spec","marker":"PGJT-47/concurrent-partition-ddl"},
     {"test_id":"PGJT-47/partition-custom-restore","file":"tests/dump_restore.py","marker":"PGJT-47/partition-{restore_format}-restore"},
-    {"test_id":"PGJT-47/partition-plain-restore","file":"tests/dump_restore.py","marker":"PGJT-47/partition-{restore_format}-restore"}
+    {"test_id":"PGJT-47/partition-plain-restore","file":"tests/dump_restore.py","marker":"PGJT-47/partition-{restore_format}-restore"},
+    {"test_id":"PGJT-48/http-get","file":"tests/run_postgrest.py","marker":"PGJT-48/http-get"},
+    {"test_id":"PGJT-48/http-complete-patch","file":"tests/run_postgrest.py","marker":"PGJT-48/http-complete-patch"},
+    {"test_id":"PGJT-48/http-stale-etag","file":"tests/run_postgrest.py","marker":"PGJT-48/http-stale-etag"},
+    {"test_id":"PGJT-48/http-missing-etag","file":"tests/run_postgrest.py","marker":"PGJT-48/http-missing-etag"},
+    {"test_id":"PGJT-48/http-incomplete-document","file":"tests/run_postgrest.py","marker":"PGJT-48/http-incomplete-document"},
+    {"test_id":"PGJT-48/http-insert","file":"tests/run_postgrest.py","marker":"PGJT-48/http-insert"},
+    {"test_id":"PGJT-48/http-delete-rpc","file":"tests/run_postgrest.py","marker":"PGJT-48/http-delete-rpc"},
+    {"test_id":"PGJT-48/http-options","file":"tests/run_postgrest.py","marker":"PGJT-48/http-options"},
+    {"test_id":"PGJT-48/http-hidden-base-tables","file":"tests/run_postgrest.py","marker":"PGJT-48/http-hidden-base-tables"}
   ],
   "runtime_evidence": [
     {"test_id":"PGJT-2/null-parent-ownership","scope":"postgresql","suite":"integrity","field":"name","value":"NULL-parent child identities are rejected as foreign atomically"},
@@ -165,6 +172,15 @@
     {"test_id":"PGJT-47/classic-inherits-rejection","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/classic-inherits-rejection"},
     {"test_id":"PGJT-47/concurrent-partition-ddl","scope":"postgresql","suite":"installcheck"},
     {"test_id":"PGJT-47/partition-custom-restore","scope":"postgresql","suite":"partition_restore","field":"name","value":"PGJT-47/partition-custom-restore"},
-    {"test_id":"PGJT-47/partition-plain-restore","scope":"postgresql","suite":"partition_restore","field":"name","value":"PGJT-47/partition-plain-restore"}
+    {"test_id":"PGJT-47/partition-plain-restore","scope":"postgresql","suite":"partition_restore","field":"name","value":"PGJT-47/partition-plain-restore"},
+    {"test_id":"PGJT-48/http-get","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-get"},
+    {"test_id":"PGJT-48/http-complete-patch","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-complete-patch"},
+    {"test_id":"PGJT-48/http-stale-etag","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-stale-etag"},
+    {"test_id":"PGJT-48/http-missing-etag","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-missing-etag"},
+    {"test_id":"PGJT-48/http-incomplete-document","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-incomplete-document"},
+    {"test_id":"PGJT-48/http-insert","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-insert"},
+    {"test_id":"PGJT-48/http-delete-rpc","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-delete-rpc"},
+    {"test_id":"PGJT-48/http-options","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-options"},
+    {"test_id":"PGJT-48/http-hidden-base-tables","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-hidden-base-tables"}
   ]
 }

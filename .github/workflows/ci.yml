@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '23 3 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -226,6 +228,75 @@ jobs:
             --output "$RUNNER_TEMP/partition-restore-results.jsonl"
           python3 tools/verify_jsonl_results.py \
             "$RUNNER_TEMP/partition-restore-results.jsonl"
+
+      - name: Install pinned PostgREST 16.5
+        if: matrix.postgresql == '18' || github.event_name == 'schedule'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/postgrest-v16.5-linux-static-x86-64.tar.xz"
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
+            --connect-timeout 20 -fsSL \
+            https://github.com/PostgREST/postgrest/releases/download/v16.5/postgrest-v16.5-linux-static-x86-64.tar.xz \
+            -o "$archive"
+          echo '5099e7ada38f9f6846cd87c14c5f158b7c165f1e9959665ad412e61f4dceba95  '"$archive" \
+            | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/postgrest" --version | grep -Fx 'PostgREST 16.5'
+
+      - name: Run PostgREST HTTP contract
+        if: matrix.postgresql == '18' || github.event_name == 'schedule'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PGBIN/psql" -X -v spec="$(cat examples/orders_dv.spec.json)" \
+            -d jsontailor_ci -f tests/setup_postgrest.sql
+          cat > "$RUNNER_TEMP/postgrest.conf" <<EOF
+          db-uri = "postgresql://jt_postgrest_authenticator@127.0.0.1:${PGPORT}/jsontailor_ci"
+          db-schemas = "api"
+          db-anon-role = "jt_postgrest_anon"
+          server-host = "127.0.0.1"
+          server-port = 3050
+          admin-server-port = 3051
+          log-level = "warn"
+          EOF
+          "$RUNNER_TEMP/postgrest" "$RUNNER_TEMP/postgrest.conf" \
+            > "$RUNNER_TEMP/postgrest.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/postgrest.pid"
+          for attempt in {1..80}; do
+            curl -fsS http://127.0.0.1:3051/ready >/dev/null && break
+            test "$attempt" -lt 80 || { cat "$RUNNER_TEMP/postgrest.log"; exit 1; }
+            sleep 0.25
+          done
+          python3 tests/run_postgrest.py \
+            --transcript "$RUNNER_TEMP/postgrest-transcript.md" \
+            --result "$RUNNER_TEMP/postgrest-results.jsonl"
+          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/postgrest-results.jsonl"
+          python3 tools/verify_test_coverage.py \
+            --scope postgrest \
+            --postgresql "${{ matrix.postgresql }}" \
+            --result "postgrest=$RUNNER_TEMP/postgrest-results.jsonl" \
+            --output "$RUNNER_TEMP/postgrest-coverage.json"
+
+      - name: Stop PostgREST
+        if: always() && (matrix.postgresql == '18' || github.event_name == 'schedule')
+        shell: bash
+        run: |
+          test ! -f "$RUNNER_TEMP/postgrest.pid" \
+            || kill "$(cat "$RUNNER_TEMP/postgrest.pid")" \
+            || true
+
+      - name: Upload PostgREST evidence
+        if: always() && (matrix.postgresql == '18' || github.event_name == 'schedule')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgrest-pg${{ matrix.postgresql }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/postgrest-transcript.md
+            ${{ runner.temp }}/postgrest-results.jsonl
+            ${{ runner.temp }}/postgrest-coverage.json
+            ${{ runner.temp }}/postgrest.log
 
       - name: Verify Jira-keyed runtime coverage
         shell: bash

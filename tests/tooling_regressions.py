@@ -98,7 +98,7 @@ def coverage_manifest_checks() -> None:
         {"scope": "postgresql", "suite": "installcheck"}),
         "runtime_evidence differs from the reviewed PGJT-40 contract")
     rejected(lambda value: value["claims"][0].__setitem__(
-        "tests", ["PGJT-40/postgrest-manual-scenario"]),
+        "tests", ["PGJT-48/http-get"]),
         "claims differs from the reviewed PGJT-40 contract")
     rejected(lambda value: value["requirements"][0].__setitem__(
         "kind", "policy"),
@@ -112,11 +112,9 @@ def coverage_manifest_checks() -> None:
                               for item in manifest["runtime_evidence"])
     if len(repository["tests"]) != expected_repository:
         raise AssertionError("repository runtime attestation count differs")
-    manual_limitation = next(
-        (item for item in repository["limitations"]
-         if item.get("claim_id") == "PGJT-40/CLAIM-POSTGREST"), None)
-    if not manual_limitation or manual_limitation.get("coverage") != "manual":
-        raise AssertionError("manual claim limitation is absent from attestation")
+    if any(item.get("claim_id") == "PGJT-40/CLAIM-POSTGREST"
+           for item in repository["limitations"]):
+        raise AssertionError("automated PostgREST claim remains a limitation")
 
     with tempfile.TemporaryDirectory(prefix="pgjt-coverage-") as temporary:
         folder = Path(temporary)
@@ -138,6 +136,18 @@ def coverage_manifest_checks() -> None:
                                 for item in manifest["runtime_evidence"])
         if len(database["tests"]) != expected_database:
             raise AssertionError("database runtime attestation count differs")
+        postgrest_rows = [
+            {item["field"]: item["value"], "status": "PASS"}
+            for item in manifest["runtime_evidence"]
+            if item["scope"] == "postgrest"
+        ]
+        postgrest_path = folder / "postgrest.jsonl"
+        postgrest_path.write_text(
+            "".join(json.dumps(row) + "\n" for row in postgrest_rows))
+        postgrest = verifier.attest(
+            manifest, "postgrest", "18", {"postgrest": postgrest_path}, set())
+        if len(postgrest["tests"]) != len(postgrest_rows):
+            raise AssertionError("PostgREST runtime attestation count differs")
         partials = [row for row in database["tests"]
                     if row["coverage"] == "partial"]
         if any(not row.get("gap") for row in partials):
