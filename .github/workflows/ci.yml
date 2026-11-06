@@ -167,10 +167,11 @@ jobs:
             --schema examples/shop_schema.sql \
             --spec examples/orders_dv.spec.json \
             --output "$RUNNER_TEMP/validation-results.jsonl"
-          python3 tests/integrity_regressions.py \
+          python3 tests/integrity_repeatability.py \
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
-            --output "$RUNNER_TEMP/integrity-results.jsonl"
+            --output "$RUNNER_TEMP/integrity-results.jsonl" \
+            --repeatability-output "$RUNNER_TEMP/repeatability-results.jsonl"
           python3 tests/subtransaction_regressions.py \
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
@@ -189,6 +190,7 @@ jobs:
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
             "$RUNNER_TEMP/integrity-results.jsonl" \
+            "$RUNNER_TEMP/repeatability-results.jsonl" \
             "$RUNNER_TEMP/subtransaction-results.jsonl" \
             "$RUNNER_TEMP/merge-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
@@ -211,6 +213,7 @@ jobs:
             --postgresql "${{ matrix.postgresql }}" \
             --result "validation=$RUNNER_TEMP/validation-results.jsonl" \
             --result "integrity=$RUNNER_TEMP/integrity-results.jsonl" \
+            --result "repeatability=$RUNNER_TEMP/repeatability-results.jsonl" \
             --result "subtransaction=$RUNNER_TEMP/subtransaction-results.jsonl" \
             --result "merge=$RUNNER_TEMP/merge-results.jsonl" \
             --passed-suite installcheck \

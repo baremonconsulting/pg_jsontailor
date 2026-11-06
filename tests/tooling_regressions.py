@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -68,6 +69,8 @@ def coverage_manifest_checks() -> None:
     verifier = load_coverage_verifier()
     manifest = json.loads((ROOT / "tests/coverage_manifest.json").read_text())
     verifier.verify(manifest)
+    partial_index = next(index for index, item in enumerate(manifest["requirements"])
+                         if item["kind"] == "partial")
 
     def rejected(change, expected: str) -> None:
         candidate = copy.deepcopy(manifest)
@@ -88,7 +91,7 @@ def coverage_manifest_checks() -> None:
         "marker", "marker-that-does-not-exist"), "marker is absent")
     rejected(lambda value: value["claims"][0].__setitem__(
         "tests", ["PGJT-99/unknown"]), "unknown evidence tests")
-    rejected(lambda value: value["requirements"][3].pop("gap"),
+    rejected(lambda value: value["requirements"][partial_index].pop("gap"),
              "partial evidence must identify")
     rejected(lambda value: value["claims"].pop(), "public claim inventory differs")
     rejected(lambda value: value["claims"][0].__setitem__(
@@ -99,7 +102,7 @@ def coverage_manifest_checks() -> None:
     rejected(lambda value: value["claims"][0].__setitem__(
         "tests", ["PGJT-40/postgrest-manual-scenario"]),
         "claims differs from the reviewed PGJT-40 contract")
-    rejected(lambda value: value["requirements"][3].__setitem__(
+    rejected(lambda value: value["requirements"][partial_index].__setitem__(
         "kind", "functional"),
         "requirements differs from the reviewed PGJT-40 contract")
     rejected(lambda value: value["supplemental_evidence"][0].update(
@@ -138,7 +141,7 @@ def coverage_manifest_checks() -> None:
         if len(database["tests"]) != expected_database:
             raise AssertionError("database runtime attestation count differs")
         partial = next(row for row in database["tests"]
-                       if row["test_id"] == "PGJT-5/fixture-cleanup")
+                       if row["coverage"] == "partial")
         if partial.get("coverage") != "partial" or not partial.get("gap"):
             raise AssertionError("partial runtime evidence hides its tracked gap")
 
@@ -225,6 +228,97 @@ def coverage_manifest_checks() -> None:
                 raise AssertionError(f"unexpected missing-result rejection: {error}") from error
         else:
             raise AssertionError("missing runtime results were accepted")
+
+
+def repeatability_harness_checks() -> None:
+    path = ROOT / "tests/integrity_repeatability.py"
+    spec = importlib.util.spec_from_file_location("integrity_repeatability", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory(prefix="pgjt-41-harness-") as temporary:
+        folder = Path(temporary)
+        first = folder / "first.jsonl"
+        second = folder / "second.jsonl"
+        rows = [
+            {"name": "one", "status": "PASS"},
+            {"name": "two", "status": "PASS"},
+        ]
+
+        def write(path: Path, values: list[dict]) -> None:
+            path.write_text("".join(json.dumps(row) + "\n" for row in values))
+
+        write(first, rows)
+        write(second, rows)
+        digest = hashlib.sha256(b"one\ntwo").hexdigest()
+        count, names = module.verify_runs(
+            first, second, expected_count=2, expected_digest=digest)
+        if count != 2 or names != ["one", "two"]:
+            raise AssertionError("repeatability harness changed valid result IDs")
+        for label, changed, expected in (
+                ("stale-extra", rows + [{"name": "stale", "status": "PASS"}],
+                 "result IDs differ"),
+                ("missing", rows[:1], "result IDs differ"),
+                ("failed", [{"name": "one", "status": "FAIL"}, rows[1]],
+                 "non-PASS"),
+                ("duplicate", [rows[0], rows[0]], "duplicate result names")):
+            write(second, changed)
+            try:
+                module.verify_runs(
+                    first, second, expected_count=2, expected_digest=digest)
+            except RuntimeError as error:
+                if expected not in str(error):
+                    raise AssertionError(
+                        f"unexpected repeatability rejection for {label}: {error}")
+            else:
+                raise AssertionError(f"repeatability harness accepted {label}")
+        changed = [{"name": "one", "status": "PASS"},
+                   {"name": "changed", "status": "PASS"}]
+        write(first, changed)
+        write(second, changed)
+        try:
+            module.verify_runs(first, second, expected_count=2,
+                               expected_digest=digest)
+        except RuntimeError as error:
+            if "reviewed PGJT-41 inventory" not in str(error):
+                raise AssertionError(f"unexpected inventory rejection: {error}")
+        else:
+            raise AssertionError("unreviewed integrity inventory was accepted")
+        first.write_text('{"name":"one","status":"FAIL","status":"PASS"}\n')
+        try:
+            module.load_results(first)
+        except RuntimeError as error:
+            if "duplicate JSON key" not in str(error):
+                raise AssertionError(f"unexpected duplicate-key rejection: {error}")
+        else:
+            raise AssertionError("ambiguous integrity result was accepted")
+        same = folder / "same.jsonl"
+        with mock.patch.object(sys, "argv", [
+                "integrity_repeatability.py", "--psql", "psql",
+                "--database", "db", "--output", str(same),
+                "--repeatability-output", str(same)]):
+            try:
+                module.main()
+            except RuntimeError as error:
+                if "distinct paths" not in str(error):
+                    raise AssertionError(f"unexpected output-alias rejection: {error}")
+            else:
+                raise AssertionError("aliased repeatability outputs were accepted")
+        first_link = folder / "integrity-link.jsonl"
+        second_link = folder / "repeatability-link.jsonl"
+        first_link.write_text("existing")
+        os.link(first_link, second_link)
+        with mock.patch.object(sys, "argv", [
+                "integrity_repeatability.py", "--psql", "psql",
+                "--database", "db", "--output", str(first_link),
+                "--repeatability-output", str(second_link)]):
+            try:
+                module.main()
+            except RuntimeError as error:
+                if "distinct paths" not in str(error):
+                    raise AssertionError(f"unexpected hardlink rejection: {error}")
+            else:
+                raise AssertionError("hardlinked repeatability outputs were accepted")
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -529,6 +623,7 @@ def dump_restore_command_checks() -> None:
 
 def main() -> int:
     coverage_manifest_checks()
+    repeatability_harness_checks()
     benchmark_checks()
     jsonl_checks()
     pilot_check()
