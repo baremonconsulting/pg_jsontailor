@@ -34,15 +34,15 @@
     {"jira":"PGJT-31","test_id":"PGJT-31/source-relation-locks","kind":"isolation","file":"tests/specs/concurrency.spec","marker":"guarded_multi_insert","postgresql":["17","18","19"]},
     {"jira":"PGJT-32","test_id":"PGJT-32/bulk-operation-xid","kind":"functional","file":"tests/subtransaction_regressions.py","marker":"PGJT-42 bulk operation matrix uses one top-level XID","postgresql":["17","18","19"]},
     {"jira":"PGJT-33","test_id":"PGJT-33/inventory-callback-provenance","kind":"functional","file":"tests/integrity_regressions.py","marker":"inventory never executes an untrusted owner-supplied health callback","postgresql":["17","18","19"]},
-    {"jira":"PGJT-34","test_id":"PGJT-34/object-update-locks","kind":"partial","file":"tests/integrity_regressions.py","marker":"stale_object_update","postgresql":["17","18","19"],"gap":"Timing-based race migration is tracked by PGJT-43."},
+    {"jira":"PGJT-34","test_id":"PGJT-34/current-object-lock","kind":"isolation","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-34/current-object-lock","postgresql":["17","18","19"]},
     {"jira":"PGJT-35","test_id":"PGJT-35/owner-acl-regeneration","kind":"functional","file":"tests/integrity_regressions.py","marker":"regeneration fails closed for non-default owner ACL state","postgresql":["17","18","19"]},
     {"jira":"PGJT-36","test_id":"PGJT-36/final-release-evidence","kind":"policy","file":"tools/verify_release_candidate.py","marker":"EXACT_SHA_CHECKS","postgresql":["17","18","19"]},
-    {"jira":"PGJT-37","test_id":"PGJT-37/rpc-source-identity","kind":"partial","file":"tests/integrity_regressions.py","marker":"delete RPC stabilizes source identity before binding validation","postgresql":["17","18","19"],"gap":"Timing-based race migration is tracked by PGJT-43."},
-    {"jira":"PGJT-38","test_id":"PGJT-38/deferrable-child-key","kind":"partial","file":"tests/integrity_regressions.py","marker":"DEFERRABLE child primary key uses safe explicit-key fallback","postgresql":["17","18","19"],"gap":"Deterministic isolation and MERGE coverage are tracked by PGJT-43."}
+    {"jira":"PGJT-37","test_id":"PGJT-37/delete-rpc-source-identity","kind":"isolation","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-37/delete-rpc-source-identity","postgresql":["17","18","19"]},
+    {"jira":"PGJT-38","test_id":"PGJT-38/deferrable-child-key-race","kind":"partial","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-38/deferrable-child-key-race","postgresql":["17","18","19"],"gap":"The DEFERRABLE MERGE operation matrix is tracked by PGJT-45."}
   ],
   "claims": [
     {"claim_id":"PGJT-40/CLAIM-SUPPORTED-VERSIONS","file":"README.md","marker":"controlled pilots on PostgreSQL 17, 18 and 19","tests":["PGJT-18/dump-restore-release-gate","PGJT-36/final-release-evidence"]},
-    {"claim_id":"PGJT-40/CLAIM-OPTIMISTIC-CONCURRENCY","file":"README.md","marker":"optimistic concurrency using SHA-256 ETags","tests":["PGJT-34/object-update-locks","PGJT-8/object-delete-lock"]},
+    {"claim_id":"PGJT-40/CLAIM-OPTIMISTIC-CONCURRENCY","file":"README.md","marker":"optimistic concurrency using SHA-256 ETags","tests":["PGJT-34/current-object-lock","PGJT-34/new-object-lock","PGJT-34/stale-object-etag","PGJT-8/object-delete-lock"]},
     {"claim_id":"PGJT-40/CLAIM-RLS-INVOKER","file":"README.md","marker":"PostgreSQL row-level security and invoker rights","tests":["PGJT-40/rls-runtime","PGJT-22/for-share-privileges"]},
     {"claim_id":"PGJT-40/CLAIM-LIFECYCLE","file":"README.md","marker":"generator provenance, catalogue health checks and transactional regeneration","tests":["PGJT-15/lifecycle","PGJT-27/delegated-acl-chains","PGJT-35/owner-acl-regeneration"]},
     {"claim_id":"PGJT-40/CLAIM-TYPES","file":"docs/API.md","marker":"Supported mapped column types","tests":["PGJT-13/json-type-semantics","PGJT-14/timestamptz-normalization","PGJT-21/bc-timestamptz","PGJT-29/non-finite-numeric"]},
@@ -57,6 +57,8 @@
     {"test_id":"PGJT-40/postgrest-manual-scenario","file":"tests/run_postgrest.py","marker":"Run mandatory PostgREST test 13","status":"manual","tracking_jira":"PGJT-48"}
   ],
   "supplemental_evidence": [
+    {"test_id":"PGJT-34/new-object-lock","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-34/new-object-lock"},
+    {"test_id":"PGJT-34/stale-object-etag","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-34/stale-object-etag"},
     {"test_id":"PGJT-40/rls-runtime","file":"tests/validation_security.py","marker":"permissions, hidden rows/object, hostile path and non-lockable rows"},
     {"test_id":"PGJT-40/merge-runtime","file":"tests/merge_operations.py","marker":"mixed actions, defaults and returning"},
     {"test_id":"PGJT-40/partition-runtime","file":"tests/validation_security.py","marker":"declarative_partition"}
@@ -94,11 +96,13 @@
     {"test_id":"PGJT-31/source-relation-locks","scope":"postgresql","suite":"installcheck"},
     {"test_id":"PGJT-32/bulk-operation-xid","scope":"postgresql","suite":"subtransaction","field":"name","value":"PGJT-42 bulk operation matrix uses one top-level XID"},
     {"test_id":"PGJT-33/inventory-callback-provenance","scope":"postgresql","suite":"integrity","field":"name","value":"inventory never executes an untrusted owner-supplied health callback"},
-    {"test_id":"PGJT-34/object-update-locks","scope":"postgresql","suite":"integrity","field":"name","value":"FOR SHARE least privilege is enforced for direct and RPC delete"},
+    {"test_id":"PGJT-34/current-object-lock","scope":"postgresql","suite":"installcheck"},
     {"test_id":"PGJT-35/owner-acl-regeneration","scope":"postgresql","suite":"integrity","field":"name","value":"regeneration fails closed for non-default owner ACL state"},
     {"test_id":"PGJT-36/final-release-evidence","scope":"repository","suite":"repository"},
-    {"test_id":"PGJT-37/rpc-source-identity","scope":"postgresql","suite":"integrity","field":"name","value":"delete RPC stabilizes source identity before binding validation"},
-    {"test_id":"PGJT-38/deferrable-child-key","scope":"postgresql","suite":"integrity","field":"name","value":"DEFERRABLE child primary key uses safe explicit-key fallback"},
+    {"test_id":"PGJT-37/delete-rpc-source-identity","scope":"postgresql","suite":"installcheck"},
+    {"test_id":"PGJT-38/deferrable-child-key-race","scope":"postgresql","suite":"installcheck"},
+    {"test_id":"PGJT-34/new-object-lock","scope":"postgresql","suite":"installcheck"},
+    {"test_id":"PGJT-34/stale-object-etag","scope":"postgresql","suite":"installcheck"},
     {"test_id":"PGJT-40/rls-runtime","scope":"postgresql","suite":"validation","field":"id","value":"10"},
     {"test_id":"PGJT-40/merge-runtime","scope":"postgresql","suite":"merge","field":"name","value":"mixed actions, defaults and returning"},
     {"test_id":"PGJT-40/partition-runtime","scope":"postgresql","suite":"validation","field":"id","value":"12"}

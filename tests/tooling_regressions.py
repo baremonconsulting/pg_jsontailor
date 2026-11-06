@@ -69,8 +69,6 @@ def coverage_manifest_checks() -> None:
     verifier = load_coverage_verifier()
     manifest = json.loads((ROOT / "tests/coverage_manifest.json").read_text())
     verifier.verify(manifest)
-    partial_index = next(index for index, item in enumerate(manifest["requirements"])
-                         if item["kind"] == "partial")
 
     def rejected(change, expected: str) -> None:
         candidate = copy.deepcopy(manifest)
@@ -91,7 +89,7 @@ def coverage_manifest_checks() -> None:
         "marker", "marker-that-does-not-exist"), "marker is absent")
     rejected(lambda value: value["claims"][0].__setitem__(
         "tests", ["PGJT-99/unknown"]), "unknown evidence tests")
-    rejected(lambda value: value["requirements"][partial_index].pop("gap"),
+    rejected(lambda value: value["requirements"][0].__setitem__("kind", "partial"),
              "partial evidence must identify")
     rejected(lambda value: value["claims"].pop(), "public claim inventory differs")
     rejected(lambda value: value["claims"][0].__setitem__(
@@ -102,8 +100,8 @@ def coverage_manifest_checks() -> None:
     rejected(lambda value: value["claims"][0].__setitem__(
         "tests", ["PGJT-40/postgrest-manual-scenario"]),
         "claims differs from the reviewed PGJT-40 contract")
-    rejected(lambda value: value["requirements"][partial_index].__setitem__(
-        "kind", "functional"),
+    rejected(lambda value: value["requirements"][0].__setitem__(
+        "kind", "policy"),
         "requirements differs from the reviewed PGJT-40 contract")
     rejected(lambda value: value["supplemental_evidence"][0].update(
         {"file": "README.md", "marker": "PostgREST scenarios"}),
@@ -140,9 +138,9 @@ def coverage_manifest_checks() -> None:
                                 for item in manifest["runtime_evidence"])
         if len(database["tests"]) != expected_database:
             raise AssertionError("database runtime attestation count differs")
-        partial = next(row for row in database["tests"]
-                       if row["coverage"] == "partial")
-        if partial.get("coverage") != "partial" or not partial.get("gap"):
+        partials = [row for row in database["tests"]
+                    if row["coverage"] == "partial"]
+        if any(not row.get("gap") for row in partials):
             raise AssertionError("partial runtime evidence hides its tracked gap")
 
         validation_selectors = [
@@ -342,6 +340,32 @@ def subtransaction_matrix_checks() -> None:
         raise AssertionError("subtransaction retry hides invalid base-table state")
     if len(module.EXPECTED_WORKLOADS) != 8 or len(set(module.EXPECTED_WORKLOADS)) != 8:
         raise AssertionError("PGJT-42 workload inventory is incomplete or duplicated")
+
+
+def deterministic_isolation_checks() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    spec = (ROOT / "tests/specs/pgjt_43_concurrency.spec").read_text()
+    expected = (ROOT / "tests/expected/pgjt_43_concurrency.out").read_text()
+    test_ids = {
+        "PGJT-34/current-object-lock",
+        "PGJT-34/new-object-lock",
+        "PGJT-34/stale-object-etag",
+        "PGJT-37/delete-rpc-source-identity",
+        "PGJT-38/deferrable-child-key-race",
+    }
+    isolation_line = next(
+        (line for line in makefile.splitlines() if line.startswith("ISOLATION =")), "")
+    if isolation_line.split().count("pgjt_43_concurrency") != 1:
+        raise AssertionError("PGJT-43 isolation schedule is not executed exactly once")
+    if spec.count("permutation ") != 5:
+        raise AssertionError("PGJT-43 isolation permutation inventory differs")
+    for test_id in test_ids:
+        if test_id not in spec or test_id not in expected:
+            raise AssertionError(f"PGJT-43 evidence is missing: {test_id}")
+    if expected.count("<waiting ...>") != 5:
+        raise AssertionError("PGJT-43 expected output does not prove five lock waits")
+    if "PT412" not in expected or expected.count("PT422") < 2:
+        raise AssertionError("PGJT-43 expected SQLSTATE evidence differs")
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -648,6 +672,7 @@ def main() -> int:
     coverage_manifest_checks()
     repeatability_harness_checks()
     subtransaction_matrix_checks()
+    deterministic_isolation_checks()
     benchmark_checks()
     jsonl_checks()
     pilot_check()

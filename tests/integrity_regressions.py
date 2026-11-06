@@ -1334,29 +1334,20 @@ INSERT INTO jt_rpc_race.root VALUES(1,'original');""")
     create_view(db, "jt_rpc_race.documents", rpc_race_spec)
     rpc_race_etag = db.value(
         "SELECT data#>>'{_metadata,etag}' FROM jt_rpc_race.documents WHERE _id=1;")
-    ddl_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True)
-    assert ddl_writer.stdin
-    ddl_writer.stdin.write("BEGIN;ALTER TABLE jt_rpc_race.root RENAME TO root_old;"
-                           "CREATE TABLE jt_rpc_race.root("
-                           "LIKE jt_rpc_race.root_old INCLUDING ALL);"
-                           "INSERT INTO jt_rpc_race.root VALUES(1,'replacement');"
-                           "SELECT pg_sleep(1);COMMIT;")
-    ddl_writer.stdin.close(); time.sleep(.2)
-    started_rpc_race = time.monotonic()
+    db.run("ALTER TABLE jt_rpc_race.root RENAME TO root_old;"
+           "CREATE TABLE jt_rpc_race.root("
+           "LIKE jt_rpc_race.root_old INCLUDING ALL);"
+           "INSERT INTO jt_rpc_race.root VALUES(1,'replacement');")
     rpc_race = db.run("SELECT jt_rpc_race.documents__delete_document(1,"
                       + quote(rpc_race_etag) + ");", False)
-    rpc_race_wait = time.monotonic() - started_rpc_race
-    ddl_writer.wait(timeout=10)
     rpc_race_rows = db.value("""SELECT
       (SELECT count(*) FROM jt_rpc_race.root_old)::text||':'||
       (SELECT count(*) FROM jt_rpc_race.root)::text;""")
     record("delete RPC stabilizes source identity before binding validation",
-           db.state(rpc_race) == "PT422" and rpc_race_wait > .6
+           db.state(rpc_race) == "PT422"
            and rpc_race_rows == "1:1",
-           f"state={db.state(rpc_race)},wait={rpc_race_wait:.3f},"
-           f"rows={rpc_race_rows}")
+           f"state={db.state(rpc_race)},rows={rpc_race_rows},"
+           "race=tests/specs/pgjt_43_concurrency.spec")
 
     db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
 CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);
@@ -2050,60 +2041,7 @@ GRANT SELECT, UPDATE ON jt_share_lock.documents_nocheck TO {nocheck_role};""")
     allowed_update = db.run(
         f"SET ROLE {share_role}; UPDATE jt_share_lock.documents SET data="
         f"{quote(json.dumps(update_document))}::jsonb WHERE _id=1;", False)
-    lock_document = json.loads(db.value(
-        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
-    lock_document["label"] = "lock-current-object"
-    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
-    assert writer.stdin
-    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
-                       + quote(json.dumps(lock_document))
-                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
-    writer.stdin.close(); time.sleep(.2)
-    started_object_lock = time.monotonic()
-    waited_current_object = db.run(
-        "UPDATE jt_share_lock.refs SET label='waited-current' WHERE id=7;", False)
-    current_object_wait = time.monotonic() - started_object_lock
-    writer.wait(timeout=10)
     db.run("INSERT INTO jt_share_lock.refs VALUES(8,'new-reference');")
-    switch_document = json.loads(db.value(
-        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
-    switch_document["reference"] = {"id": 8, "label": "new-reference"}
-    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
-    assert writer.stdin
-    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
-                       + quote(json.dumps(switch_document))
-                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
-    writer.stdin.close(); time.sleep(.2)
-    started_switch_lock = time.monotonic()
-    waited_both_objects = db.run(
-        "UPDATE jt_share_lock.refs SET label=label||'-waited' WHERE id=8;", False)
-    switch_object_wait = time.monotonic() - started_switch_lock
-    writer.wait(timeout=10)
-    stale_object_document = json.loads(db.value(
-        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
-    stale_object_document["label"] = "must-not-commit"
-    root_blocker = subprocess.Popen(db.command, stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True)
-    assert root_blocker.stdin
-    root_blocker.stdin.write("BEGIN;UPDATE jt_share_lock.roots SET label=label "
-                             "WHERE id=1;SELECT pg_sleep(1);COMMIT;")
-    root_blocker.stdin.close(); time.sleep(.1)
-    object_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True)
-    assert object_writer.stdin
-    object_writer.stdin.write("SELECT pg_sleep(.2);UPDATE jt_share_lock.refs "
-                              "SET label='changed-before-lock' WHERE id=8;")
-    object_writer.stdin.close()
-    started_stale_race = time.monotonic()
-    stale_object_update = db.run(
-        "UPDATE jt_share_lock.documents SET data="
-        + quote(json.dumps(stale_object_document)) + "::jsonb WHERE _id=1;", False)
-    stale_race_wait = time.monotonic() - started_stale_race
-    root_blocker.wait(timeout=10); object_writer.wait(timeout=10)
     direct_etag = db.value(
         "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
     allowed_direct = db.run(
@@ -2125,21 +2063,17 @@ GRANT SELECT, UPDATE ON jt_share_lock.documents_nocheck TO {nocheck_role};""")
            and db.state(denied_rpc) == "42501" and preserved_before_grant == "2:1"
            and privilege_shape == "false:false:true"
            and allowed_update.returncode == 0
-           and waited_current_object.returncode == 0 and current_object_wait > .6
-           and waited_both_objects.returncode == 0 and switch_object_wait > .6
-           and db.state(stale_object_update) == "PT412" and stale_race_wait > .6
            and allowed_direct.returncode == 0 and "1" in allowed_direct.stdout.splitlines()
            and allowed_rpc.returncode == 0
            and "nocheck-update" in allowed_rpc.stdout.splitlines()
-           and final_state == "0:2:waited-current",
+           and final_state == "0:2:reference",
            f"read={readable},nocheck={nocheck_update.returncode},"
            f"denied={db.state(denied_update)}/"
            f"{db.state(denied_direct)}/{db.state(denied_rpc)},"
            f"preserved={preserved_before_grant},grants={privilege_shape},"
            f"allowed={allowed_update.returncode}/{allowed_direct.returncode}/"
-           f"{allowed_rpc.returncode},waits={current_object_wait:.3f}/"
-           f"{switch_object_wait:.3f}/{stale_race_wait:.3f},"
-           f"stale={db.state(stale_object_update)},"
+           f"{allowed_rpc.returncode},"
+           "races=tests/specs/pgjt_43_concurrency.spec,"
            f"final={final_state}")
     db.run("DROP SCHEMA jt_share_lock CASCADE;")
     cleanup_share_role()
@@ -2201,22 +2135,14 @@ GRANT SELECT,INSERT ON jt_deferrable_pk.documents TO {deferrable_role};""")
     secondary_unique = db.run(
         "UPDATE jt_deferrable_pk.documents SET data="
         + quote(json.dumps(secondary_doc)) + "::jsonb WHERE _id=1;", False)
-    claim = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True)
-    assert claim.stdin
-    claim.stdin.write("BEGIN;INSERT INTO jt_deferrable_pk.child VALUES"
-                      "(200,2,'claimed');SELECT pg_sleep(1);COMMIT;")
-    claim.stdin.close(); time.sleep(.2)
+    db.run("INSERT INTO jt_deferrable_pk.child VALUES(200,2,'claimed');")
     race_doc = json.loads(db.value(
         "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
     race_doc["value"] = "must-also-roll-back"
     race_doc["items"].append({"id": 200, "value": "candidate"})
-    race_started = time.monotonic()
     deferrable_race = db.run(
         "UPDATE jt_deferrable_pk.documents SET data="
         + quote(json.dumps(race_doc)) + "::jsonb WHERE _id=1;", False)
-    race_wait = time.monotonic() - race_started
-    claim.wait(timeout=10)
     deferrable_state = db.value(
         "SELECT (SELECT value FROM jt_deferrable_pk.root WHERE id=1)||':'||"
         "(SELECT count(*) FROM jt_deferrable_pk.child WHERE parent=1)||':'||"
@@ -2228,12 +2154,13 @@ GRANT SELECT,INSERT ON jt_deferrable_pk.documents TO {deferrable_role};""")
            and db.state(foreign_key) == "PT422"
            and db.state(secondary_unique) == "23505"
            and "child_deferrable_value_key" in secondary_unique.stderr
-           and db.state(deferrable_race) == "PT422" and race_wait > .6
+           and db.state(deferrable_race) == "PT422"
            and deferrable_state == "one:3:2",
            f"restricted={restricted_deferrable.returncode},"
            f"initial={deferrable_initial.returncode},append={deferrable_append.returncode},"
            f"foreign={db.state(foreign_key)},secondary={db.state(secondary_unique)},"
-           f"race={db.state(deferrable_race)}/{race_wait:.3f}s,state={deferrable_state}")
+           f"race={db.state(deferrable_race)},state={deferrable_state},"
+           "isolation=tests/specs/pgjt_43_concurrency.spec")
     db.run("DROP SCHEMA jt_deferrable_pk CASCADE;")
     cleanup_deferrable_role()
 
