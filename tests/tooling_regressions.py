@@ -56,6 +56,17 @@ def load_dump_restore():
     return module
 
 
+def load_dump_restore_matrix():
+    dependency = load_dump_restore()
+    path = ROOT / "tests/dump_restore_matrix.py"
+    spec = importlib.util.spec_from_file_location("dump_restore_matrix_harness", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    with mock.patch.dict(sys.modules, {"dump_restore": dependency}):
+        spec.loader.exec_module(module)
+    return module
+
+
 def load_coverage_verifier():
     path = ROOT / "tools/verify_test_coverage.py"
     spec = importlib.util.spec_from_file_location("test_coverage_verifier", path)
@@ -696,6 +707,40 @@ def dump_restore_command_checks() -> None:
         raise AssertionError(f"failure cleanup lost maintenance database: {cleanup}")
 
 
+def dump_restore_matrix_cleanup_checks() -> None:
+    harness = load_dump_restore_matrix()
+
+    class FailingBootstrap:
+        def __init__(self):
+            self.calls = []
+
+        def drop(self, database):
+            self.calls.append(("drop", database))
+            if database in {"custom", "maintenance"}:
+                raise RuntimeError("injected drop failure")
+
+        def sql(self, database, sql):
+            self.calls.append(("roles", database))
+            raise RuntimeError("injected role failure")
+
+    targets = ("plain", "custom", "source", "maintenance")
+    preserving = FailingBootstrap()
+    harness.cleanup(preserving, targets, "postgres", True)
+    expected = [("drop", value) for value in targets] + [("roles", "postgres")]
+    if preserving.calls != expected:
+        raise AssertionError("PGJT-49 cleanup stopped after an injected failure")
+    reporting = FailingBootstrap()
+    try:
+        harness.cleanup(reporting, targets, "postgres", False)
+    except RuntimeError as error:
+        if "custom" not in str(error) or "maintenance" not in str(error) or "roles" not in str(error):
+            raise AssertionError("PGJT-49 cleanup omitted collected failures") from error
+    else:
+        raise AssertionError("PGJT-49 cleanup accepted injected failures")
+    if reporting.calls != expected:
+        raise AssertionError("PGJT-49 cleanup did not attempt every target")
+
+
 def main() -> int:
     coverage_manifest_checks()
     repeatability_harness_checks()
@@ -706,6 +751,7 @@ def main() -> int:
     pilot_check()
     release_policy_checks()
     dump_restore_command_checks()
+    dump_restore_matrix_cleanup_checks()
     return 0
 
 

@@ -102,7 +102,18 @@
     {"test_id":"PGJT-48/http-insert","file":"tests/run_postgrest.py","marker":"PGJT-48/http-insert"},
     {"test_id":"PGJT-48/http-delete-rpc","file":"tests/run_postgrest.py","marker":"PGJT-48/http-delete-rpc"},
     {"test_id":"PGJT-48/http-options","file":"tests/run_postgrest.py","marker":"PGJT-48/http-options"},
-    {"test_id":"PGJT-48/http-hidden-base-tables","file":"tests/run_postgrest.py","marker":"PGJT-48/http-hidden-base-tables"}
+    {"test_id":"PGJT-48/http-hidden-base-tables","file":"tests/run_postgrest.py","marker":"PGJT-48/http-hidden-base-tables"},
+    {"test_id":"PGJT-49/custom-shape-inventory","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-shape-inventory"},
+    {"test_id":"PGJT-49/custom-optional-bindings","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-optional-bindings"},
+    {"test_id":"PGJT-49/custom-acl-comments","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-acl-comments"},
+    {"test_id":"PGJT-49/custom-regeneration-guards","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-regeneration-guards"},
+    {"test_id":"PGJT-49/custom-post-restore-crud","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-post-restore-crud"},
+    {"test_id":"PGJT-49/plain-shape-inventory","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-shape-inventory"},
+    {"test_id":"PGJT-49/plain-optional-bindings","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-optional-bindings"},
+    {"test_id":"PGJT-49/plain-acl-comments","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-acl-comments"},
+    {"test_id":"PGJT-49/plain-regeneration-guards","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-regeneration-guards"},
+    {"test_id":"PGJT-49/plain-post-restore-crud","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/{restore_format}-post-restore-crud"},
+    {"test_id":"PGJT-49/maintenance-database-integration","file":"tests/dump_restore_matrix.py","marker":"PGJT-49/maintenance-database-integration"}
   ],
   "runtime_evidence": [
     {"test_id":"PGJT-2/null-parent-ownership","scope":"postgresql","suite":"integrity","field":"name","value":"NULL-parent child identities are rejected as foreign atomically"},
@@ -181,6 +192,17 @@
     {"test_id":"PGJT-48/http-insert","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-insert"},
     {"test_id":"PGJT-48/http-delete-rpc","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-delete-rpc"},
     {"test_id":"PGJT-48/http-options","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-options"},
-    {"test_id":"PGJT-48/http-hidden-base-tables","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-hidden-base-tables"}
+    {"test_id":"PGJT-48/http-hidden-base-tables","scope":"postgrest","suite":"postgrest","field":"id","value":"PGJT-48/http-hidden-base-tables"},
+    {"test_id":"PGJT-49/custom-shape-inventory","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/custom-shape-inventory"},
+    {"test_id":"PGJT-49/custom-optional-bindings","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/custom-optional-bindings"},
+    {"test_id":"PGJT-49/custom-acl-comments","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/custom-acl-comments"},
+    {"test_id":"PGJT-49/custom-regeneration-guards","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/custom-regeneration-guards"},
+    {"test_id":"PGJT-49/custom-post-restore-crud","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/custom-post-restore-crud"},
+    {"test_id":"PGJT-49/plain-shape-inventory","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/plain-shape-inventory"},
+    {"test_id":"PGJT-49/plain-optional-bindings","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/plain-optional-bindings"},
+    {"test_id":"PGJT-49/plain-acl-comments","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/plain-acl-comments"},
+    {"test_id":"PGJT-49/plain-regeneration-guards","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/plain-regeneration-guards"},
+    {"test_id":"PGJT-49/plain-post-restore-crud","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/plain-post-restore-crud"},
+    {"test_id":"PGJT-49/maintenance-database-integration","scope":"postgresql","suite":"restore_matrix","field":"name","value":"PGJT-49/maintenance-database-integration"}
   ]
 }

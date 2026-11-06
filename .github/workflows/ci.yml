@@ -226,8 +226,14 @@ jobs:
             --maintenance-database postgres \
             --database-prefix jsontailor_dump_restore \
             --output "$RUNNER_TEMP/partition-restore-results.jsonl"
+          python3 tests/dump_restore_matrix.py \
+            --pg-bin "$PGBIN" \
+            --bootstrap-database postgres \
+            --database-prefix jsontailor_pgjt49 \
+            --output "$RUNNER_TEMP/restore-matrix-results.jsonl"
           python3 tools/verify_jsonl_results.py \
-            "$RUNNER_TEMP/partition-restore-results.jsonl"
+            "$RUNNER_TEMP/partition-restore-results.jsonl" \
+            "$RUNNER_TEMP/restore-matrix-results.jsonl"
 
       - name: Install pinned PostgREST 16.5
         if: matrix.postgresql == '18' || github.event_name == 'schedule'
@@ -315,6 +321,7 @@ jobs:
             --result "security=$RUNNER_TEMP/security-results.jsonl" \
             --result "partitions=$RUNNER_TEMP/partition-results.jsonl" \
             --result "partition_restore=$RUNNER_TEMP/partition-restore-results.jsonl" \
+            --result "restore_matrix=$RUNNER_TEMP/restore-matrix-results.jsonl" \
             --passed-suite installcheck \
             --passed-suite dump_restore \
             --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"
