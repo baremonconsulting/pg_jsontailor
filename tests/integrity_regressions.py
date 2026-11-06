@@ -2080,6 +2080,98 @@ GRANT SELECT, UPDATE ON jt_share_lock.documents_nocheck TO {nocheck_role};""")
     cleanup_share_role()
     cleanup_nocheck_role()
 
+    db.run("""DROP SCHEMA IF EXISTS jt_deferrable_pk CASCADE;
+CREATE SCHEMA jt_deferrable_pk;
+CREATE TABLE jt_deferrable_pk.root(
+ id integer PRIMARY KEY,
+ value text NOT NULL);
+CREATE TABLE jt_deferrable_pk.child(
+ id integer,
+ parent integer NOT NULL REFERENCES jt_deferrable_pk.root(id),
+ value text NOT NULL DEFAULT 'default',
+ CONSTRAINT child_deferrable_pkey PRIMARY KEY(id) DEFERRABLE INITIALLY IMMEDIATE,
+ CONSTRAINT child_deferrable_value_key UNIQUE(value));""")
+    deferrable_spec = {
+        "root": {"table": "jt_deferrable_pk.root", "key": "id",
+                 "fields": {"value": "value"}, "insert": True,
+                 "update": True, "delete": True},
+        "array": {"name": "items", "table": "jt_deferrable_pk.child",
+                  "key": "id", "parent_fk": "parent",
+                  "fields": {"id": "id", "value": "value"},
+                  "insert": True, "update": True, "delete": True}}
+    create_view(db, "jt_deferrable_pk.documents", deferrable_spec)
+    deferrable_role = f"jt_deferrable_writer_{time.time_ns()}"
+    cleanup_deferrable_role = role_cleanup(db, deferrable_role)
+    db.run(f"""CREATE ROLE {deferrable_role};
+GRANT USAGE ON SCHEMA jt_deferrable_pk TO {deferrable_role};
+GRANT SELECT,INSERT ON jt_deferrable_pk.root,jt_deferrable_pk.child
+  TO {deferrable_role};
+GRANT SELECT,INSERT ON jt_deferrable_pk.documents TO {deferrable_role};""")
+    restricted_deferrable = db.run(
+        f"SET ROLE {deferrable_role}; INSERT INTO jt_deferrable_pk.documents(data) "
+        "VALUES ('{\"_id\":3,\"value\":\"restricted\",\"items\":["
+        "{\"id\":300,\"value\":\"v300\"}]}'::jsonb);", False)
+    deferrable_initial = db.run(
+        "INSERT INTO jt_deferrable_pk.documents(data) VALUES "
+        "('{\"_id\":1,\"value\":\"one\",\"items\":["
+        "{\"id\":10,\"value\":\"v10\"},{\"id\":11,\"value\":\"v11\"}]}'::jsonb),"
+        "('{\"_id\":2,\"value\":\"two\",\"items\":["
+        "{\"id\":100,\"value\":\"v100\"}]}'::jsonb);", False)
+    doc_one = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    doc_one["items"].append({"id": 12, "value": "v12"})
+    deferrable_append = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(doc_one)) + "::jsonb WHERE _id=1;", False)
+    doc_one = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    doc_one["value"] = "must-roll-back"
+    doc_one["items"].append({"id": 100, "value": "foreign"})
+    foreign_key = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(doc_one)) + "::jsonb WHERE _id=1;", False)
+    secondary_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    secondary_doc["items"].append({"id": 13, "value": "v10"})
+    secondary_unique = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(secondary_doc)) + "::jsonb WHERE _id=1;", False)
+    claim = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    assert claim.stdin
+    claim.stdin.write("BEGIN;INSERT INTO jt_deferrable_pk.child VALUES"
+                      "(200,2,'claimed');SELECT pg_sleep(1);COMMIT;")
+    claim.stdin.close(); time.sleep(.2)
+    race_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_deferrable_pk.documents WHERE _id=1;"))
+    race_doc["value"] = "must-also-roll-back"
+    race_doc["items"].append({"id": 200, "value": "candidate"})
+    race_started = time.monotonic()
+    deferrable_race = db.run(
+        "UPDATE jt_deferrable_pk.documents SET data="
+        + quote(json.dumps(race_doc)) + "::jsonb WHERE _id=1;", False)
+    race_wait = time.monotonic() - race_started
+    claim.wait(timeout=10)
+    deferrable_state = db.value(
+        "SELECT (SELECT value FROM jt_deferrable_pk.root WHERE id=1)||':'||"
+        "(SELECT count(*) FROM jt_deferrable_pk.child WHERE parent=1)||':'||"
+        "(SELECT parent FROM jt_deferrable_pk.child WHERE id=200);")
+    record("DEFERRABLE child primary key uses safe explicit-key fallback",
+           deferrable_initial.returncode == 0
+           and restricted_deferrable.returncode == 0
+           and deferrable_append.returncode == 0
+           and db.state(foreign_key) == "PT422"
+           and db.state(secondary_unique) == "23505"
+           and "child_deferrable_value_key" in secondary_unique.stderr
+           and db.state(deferrable_race) == "PT422" and race_wait > .6
+           and deferrable_state == "one:3:2",
+           f"restricted={restricted_deferrable.returncode},"
+           f"initial={deferrable_initial.returncode},append={deferrable_append.returncode},"
+           f"foreign={db.state(foreign_key)},secondary={db.state(secondary_unique)},"
+           f"race={db.state(deferrable_race)}/{race_wait:.3f}s,state={deferrable_state}")
+    db.run("DROP SCHEMA jt_deferrable_pk CASCADE;")
+    cleanup_deferrable_role()
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:

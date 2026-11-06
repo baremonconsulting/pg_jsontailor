@@ -158,6 +158,13 @@ document, and an array row for which no target partition exists. SQL/JSON null
 is passed to PostgreSQL so target nullability remains authoritative. Unrelated
 table constraints keep their native SQLSTATE rather than being rewritten.
 
+The mapped child primary key may be `DEFERRABLE INITIALLY IMMEDIATE`. Generated
+writes detect that property after stabilizing source identities and use an
+explicit-key fallback. Visible existing identities and concurrent mapped-key
+claims under immediate checking are reported as `PT422`; secondary uniqueness
+failures retain native `23505` diagnostics. Explicitly deferred transaction
+constraint mode is not changed by the extension.
+
 PostgreSQL can also return `40001` (serialization failure) or `40P01` (deadlock) for concurrent transactions. Retry
 the complete transaction after either error, re-read the document and use its current ETag; do not replay only the
 failed statement with an old token.

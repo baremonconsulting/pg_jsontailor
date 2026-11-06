@@ -41,6 +41,18 @@ Replacement applies the same JSON-type and lossless-conversion rules as insert.
 
 For a non-`GENERATED ALWAYS` child key, a supplied key identifies an existing element when it belongs to the document and creates a new element when it is globally unused and array insertion is enabled. A key owned by another document or an existing orphan key whose parent is `NULL` is rejected with `PT422`. Explicit new values for `GENERATED ALWAYS` child keys are rejected; omit those keys and let PostgreSQL generate them.
 
+A single-column child primary key may be `DEFERRABLE INITIALLY IMMEDIATE`.
+Explicit-key inserts use a compatibility fallback for that mapping;
+non-deferrable keys retain the set-based `ON CONFLICT` path. The extension does
+not issue `SET CONSTRAINTS`. If an
+application explicitly defers the primary key, PostgreSQL may therefore report
+a native uniqueness error at transaction commit rather than `PT422` during the
+view statement.
+
+When the constraint remains immediate, a concurrent direct writer that claims
+a previously unused deferrable child key is normalized to `PT422` and the
+document write remains atomic.
+
 When the client ETag is included in `WHERE`, an initially stale token selects no row and returns `UPDATE 0`. If a change occurs after row selection while the trigger waits for locks, the trigger's post-lock comparison returns `PT412`.
 
 For an ETag-checked referenced object, replacement locks the root first, then

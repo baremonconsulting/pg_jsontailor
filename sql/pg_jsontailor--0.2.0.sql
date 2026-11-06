@@ -212,9 +212,15 @@ BEGIN
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
     body:=format($body$
-DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; violation_schema text; violation_table text; violation_constraint text; idj jsonb; keyj jsonb; sql_kind text; sql_type text; sql_typname text; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; record_def text; n int; expected int; new_explicit int:=0; locked_n int:=0; changed boolean:=false; all_full boolean:=false; root_id %s;
+DECLARE cfg constant jsonb:=%L::jsonb; doc jsonb; cur jsonb; el jsonb; oldel jsonb; bad text; unknown_field text; violation_schema text; violation_table text; violation_constraint text; idj jsonb; keyj jsonb; sql_kind text; sql_type text; sql_typname text; cols text[]; vals text[]; map jsonb; mapped jsonb; sets text; diff text; col_list text; select_list text; record_def text; n int; expected int; new_explicit int:=0; locked_n int:=0; changed boolean:=false; all_full boolean:=false; array_pk_deferrable boolean:=false; root_id %s;
 BEGIN
   %s
+  IF cfg?'array' THEN
+    SELECT c.condeferrable INTO array_pk_deferrable
+    FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
+    WHERE c.conrelid=to_regclass(cfg#>>'{array,table}') AND c.contype='p'
+      AND cardinality(c.conkey)=1 AND a.attname=cfg#>>'{array,key}';
+  END IF;
   IF TG_OP='INSERT' THEN
     IF NOT (cfg#>>'{root,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root insert is disabled'; END IF;
     doc:=NEW.data;
@@ -303,8 +309,13 @@ BEGIN
         SELECT count(*) FILTER(WHERE value?bad),count(*) FILTER(WHERE NOT value?bad) INTO n,expected FROM jsonb_array_elements(coalesce(doc->(cfg#>>'{array,name}'),'[]'));
         IF n>0 THEN
           SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}');
-          diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL ON CONFLICT (%%I) DO NOTHING',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',cfg#>>'{array,key}');
-          IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN BEGIN EXECUTE diff USING mapped;EXCEPTION WHEN check_violation THEN GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;IF coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;END;ELSE EXECUTE diff USING mapped;END IF;
+          IF array_pk_deferrable THEN
+            diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}');
+            BEGIN EXECUTE diff USING mapped;EXCEPTION WHEN unique_violation THEN GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE ns.nspname=violation_schema AND t.relname=violation_table AND c.conname=violation_constraint AND c.contype='p' AND cardinality(c.conkey)=1 AND a.attname=cfg#>>'{array,key}' AND (c.conrelid=to_regclass(cfg#>>'{array,table}') OR c.conrelid IN(SELECT relid FROM pg_partition_tree(to_regclass(cfg#>>'{array,table}'))))) INTO changed;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';ELSE RAISE;END IF;WHEN check_violation THEN GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') AND coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;END;
+          ELSE
+            diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL ON CONFLICT (%%I) DO NOTHING',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',cfg#>>'{array,key}');
+            IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN BEGIN EXECUTE diff USING mapped;EXCEPTION WHEN check_violation THEN GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;IF coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;END;ELSE EXECUTE diff USING mapped;END IF;
+          END IF;
           GET DIAGNOSTICS new_explicit=ROW_COUNT;IF new_explicit<>n THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
         END IF;
         IF expected>0 THEN
@@ -319,17 +330,21 @@ BEGIN
           SELECT key INTO bad FROM jsonb_each_text(cfg#>'{array,fields}') WHERE value=cfg#>>'{array,key}';
           SELECT string_agg(format('%%I %%s',a.attname,format_type(a.atttypid,a.atttypmod)),',' ORDER BY u.ord) INTO record_def FROM unnest(cols) WITH ORDINALITY u(name,ord) JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{array,table}') AND a.attname=u.name AND a.attnum>0 AND NOT a.attisdropped;
           diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_record($1) AS x(%%s) /* source_hex %%s.%%s */',%L,%L,(SELECT string_agg(quote_ident(x),',')FROM unnest(cols)x),(SELECT string_agg('x.'||quote_ident(x),',')FROM unnest(cols)x),record_def,encode(convert_to(%L,'UTF8'),'hex'),encode(convert_to(%L,'UTF8'),'hex'));
-          IF el?bad THEN diff:=diff||format(' ON CONFLICT (%%I) DO NOTHING',cfg#>>'{array,key}');END IF;
-          IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN
-            BEGIN
-              EXECUTE diff USING map;
-            EXCEPTION WHEN check_violation THEN
-              GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
-              IF coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;
-            END;
-          ELSE
-            EXECUTE diff USING map;
+          IF el?bad THEN
+            IF array_pk_deferrable THEN diff:=diff||format(' WHERE NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}');
+            ELSE diff:=diff||format(' ON CONFLICT (%%I) DO NOTHING',cfg#>>'{array,key}');END IF;
           END IF;
+          IF array_pk_deferrable OR EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN BEGIN
+            EXECUTE diff USING map;
+          EXCEPTION
+            WHEN unique_violation THEN
+              GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
+              SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE ns.nspname=violation_schema AND t.relname=violation_table AND c.conname=violation_constraint AND c.contype='p' AND cardinality(c.conkey)=1 AND a.attname=cfg#>>'{array,key}' AND (c.conrelid=to_regclass(cfg#>>'{array,table}') OR c.conrelid IN(SELECT relid FROM pg_partition_tree(to_regclass(cfg#>>'{array,table}'))))) INTO changed;
+              IF array_pk_deferrable AND el?bad AND changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';ELSE RAISE;END IF;
+            WHEN check_violation THEN
+              GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
+              IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') AND coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;
+          END;ELSE EXECUTE diff USING map;END IF;
           IF el?bad THEN GET DIAGNOSTICS n=ROW_COUNT;IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;END IF;
         END LOOP;
       END IF;
@@ -451,8 +466,22 @@ BEGIN
         -- after the ownership check is a concurrent ownership change.
         IF new_explicit>0 THEN
           SELECT format('%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('%%I',value),','),format('x.%%I',cfg#>>'{array,parent_fk}')||','||string_agg(format('x.%%I',value),',') INTO col_list,select_list FROM jsonb_each_text(cfg#>'{array,fields}');
-          diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I) ON CONFLICT (%%I) DO NOTHING',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,key}');
-          IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN BEGIN EXECUTE diff USING mapped;EXCEPTION WHEN check_violation THEN GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;IF coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;END;ELSE EXECUTE diff USING mapped;END IF;
+          IF array_pk_deferrable THEN
+            diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I)',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}');
+          ELSE
+            diff:=format('INSERT INTO %%I.%%I(%%s) SELECT %%s FROM jsonb_to_recordset($1) AS x(%%s) WHERE x.%%I IS NOT NULL AND NOT EXISTS(SELECT 1 FROM %%I.%%I t WHERE t.%%I=x.%%I) ON CONFLICT (%%I) DO NOTHING',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],col_list,select_list,record_def,cfg#>>'{array,key}',(parse_ident(cfg#>>'{array,table}'))[1],(parse_ident(cfg#>>'{array,table}'))[2],cfg#>>'{array,key}',cfg#>>'{array,key}',cfg#>>'{array,key}');
+          END IF;
+          IF array_pk_deferrable OR EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') THEN BEGIN
+            EXECUTE diff USING mapped;
+          EXCEPTION
+            WHEN unique_violation THEN
+              GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
+              SELECT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace ns ON ns.oid=t.relnamespace JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE ns.nspname=violation_schema AND t.relname=violation_table AND c.conname=violation_constraint AND c.contype='p' AND cardinality(c.conkey)=1 AND a.attname=cfg#>>'{array,key}' AND (c.conrelid=to_regclass(cfg#>>'{array,table}') OR c.conrelid IN(SELECT relid FROM pg_partition_tree(to_regclass(cfg#>>'{array,table}'))))) INTO changed;
+              IF array_pk_deferrable AND changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';ELSE RAISE;END IF;
+            WHEN check_violation THEN
+              GET STACKED DIAGNOSTICS violation_schema=SCHEMA_NAME,violation_table=TABLE_NAME,violation_constraint=CONSTRAINT_NAME;
+              IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(cfg#>>'{array,table}') AND relkind='p') AND coalesce(violation_constraint,'')='' AND violation_schema=(parse_ident(cfg#>>'{array,table}'))[1] AND violation_table=(parse_ident(cfg#>>'{array,table}'))[2] THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array element does not match an available partition';ELSE RAISE;END IF;
+          END;ELSE EXECUTE diff USING mapped;END IF;
           GET DIAGNOSTICS n=ROW_COUNT;
           IF n<>new_explicit THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='array key does not belong to document';END IF;
         END IF;

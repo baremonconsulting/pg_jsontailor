@@ -31,6 +31,7 @@ release before it is treated as a pilot deployment.
 | Rename, reuse or permute a mapped column | Writes return `PT422` | Review the mapping and regenerate |
 | Change a mapped column type | PostgreSQL normally blocks the change while binding views depend on it | Regenerate through a reviewed migration using the updated specification |
 | Rename a bound primary-key constraint | Writes return `PT422` | Regenerate |
+| Change child primary-key deferrability | Existing generated code may use the previous explicit-key path | Quiesce writers and regenerate |
 | Change or invalidate a required foreign key | Writes return `PT422`; unsupported actions are rejected | Restore a validated, enforced, non-deferrable supported FK and regenerate |
 | Add classic `INHERITS` descendants | Writes return `PT422` | Remove the unsupported inheritance or redesign the mapping |
 | Attach or detach declarative partitions | Supported when the mapped root contract remains valid | Run health and functional checks |

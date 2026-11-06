@@ -8,6 +8,12 @@ CI regression records elapsed time, time per document and XID consumption for
 exception blocks solely to translate PostgreSQL's missing-partition error to
 the documented `PT422`; measure those workloads separately.
 
+The normal non-deferrable explicit-child path remains set based. A
+`DEFERRABLE INITIALLY IMMEDIATE` child primary key uses a narrow compatibility
+fallback around explicit-key inserts. Its exception/subtransaction cost is
+outside the normal reference workload and should be measured separately when
+that schema design is used.
+
 Any generator change invalidates the previous reference measurement. Publish
 a fresh reference set from the release candidate; do not relabel an older set.
 
