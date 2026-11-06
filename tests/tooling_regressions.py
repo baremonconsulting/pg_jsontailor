@@ -321,6 +321,29 @@ def repeatability_harness_checks() -> None:
                 raise AssertionError("hardlinked repeatability outputs were accepted")
 
 
+def subtransaction_matrix_checks() -> None:
+    path = ROOT / "tests/subtransaction_regressions.py"
+    spec = importlib.util.spec_from_file_location("subtransaction_regressions", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cases = (
+        (2, 1, 100, 100, True),
+        (1, 1, 100, 100, False),
+        (0, 1, 100, 100, False),
+        (2, 1, 99, 100, False),
+        (2, 1, 101, 100, False),
+    )
+    for delta, expected, changed, expected_changed, result in cases:
+        if module.is_positive_xid_noise(
+                delta, expected, changed, expected_changed) is not result:
+            raise AssertionError("subtransaction retry policy is fail-open")
+    if module.is_positive_xid_noise(2, 1, 100, 100, False):
+        raise AssertionError("subtransaction retry hides invalid base-table state")
+    if len(module.EXPECTED_WORKLOADS) != 8 or len(set(module.EXPECTED_WORKLOADS)) != 8:
+        raise AssertionError("PGJT-42 workload inventory is incomplete or duplicated")
+
+
 def expect_rejection(verify, folder: Path, expected: str) -> None:
     try:
         verify(folder)
@@ -624,6 +647,7 @@ def dump_restore_command_checks() -> None:
 def main() -> int:
     coverage_manifest_checks()
     repeatability_harness_checks()
+    subtransaction_matrix_checks()
     benchmark_checks()
     jsonl_checks()
     pilot_check()

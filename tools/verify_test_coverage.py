@@ -30,11 +30,11 @@ EXPECTED_CLAIMS = {
     "PGJT-40/CLAIM-POSTGREST",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "89adaa049565b450b6b91ae485eb765f8410fec20d98b04613787a2fd3750ca1",
+    "requirements": "7b59d293b6ebbbe6e69838715847a9c5b8aaadc4d2415445f4ecccf4aa157724",
     "claims": "63c067e94d6b0e104aeaa4e8a9e4c500a63c5065cc8d8fa7c34963d1b0e1a1ee",
     "manual_evidence": "6b9dea547968a760dff9d8c1bce174e7cef7aae3d6bc25e379756cbb756d7d20",
     "supplemental_evidence": "f30c8d9ad291e85002cd4156dd2ee7a27141e0b917f38d6209fda7ab868385fe",
-    "runtime_evidence": "2fb0b62b219d92c37afecd1d01199c34dab872f243ca0016d0daa1dde74ced4d",
+    "runtime_evidence": "3a14446e836ff93831fe834a4cb41915eab0a49eb087f57b6a41962a54b3bd5f",
 }
 
 
