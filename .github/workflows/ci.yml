@@ -198,6 +198,10 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/security-results.jsonl"
+          python3 tests/partition_lifecycle_matrix.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --output "$RUNNER_TEMP/partition-results.jsonl"
           python3 tools/verify_jsonl_results.py \
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
@@ -207,7 +211,8 @@ jobs:
             "$RUNNER_TEMP/merge-results.jsonl" \
             "$RUNNER_TEMP/type-results.jsonl" \
             "$RUNNER_TEMP/shape-results.jsonl" \
-            "$RUNNER_TEMP/security-results.jsonl"
+            "$RUNNER_TEMP/security-results.jsonl" \
+            "$RUNNER_TEMP/partition-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 
       - name: Verify custom and plain dump restore
@@ -217,7 +222,10 @@ jobs:
           python3 tests/dump_restore.py \
             --pg-bin "$PGBIN" \
             --maintenance-database postgres \
-            --database-prefix jsontailor_dump_restore
+            --database-prefix jsontailor_dump_restore \
+            --output "$RUNNER_TEMP/partition-restore-results.jsonl"
+          python3 tools/verify_jsonl_results.py \
+            "$RUNNER_TEMP/partition-restore-results.jsonl"
 
       - name: Verify Jira-keyed runtime coverage
         shell: bash
@@ -234,6 +242,8 @@ jobs:
             --result "types=$RUNNER_TEMP/type-results.jsonl" \
             --result "shapes=$RUNNER_TEMP/shape-results.jsonl" \
             --result "security=$RUNNER_TEMP/security-results.jsonl" \
+            --result "partitions=$RUNNER_TEMP/partition-results.jsonl" \
+            --result "partition_restore=$RUNNER_TEMP/partition-restore-results.jsonl" \
             --passed-suite installcheck \
             --passed-suite dump_restore \
             --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"

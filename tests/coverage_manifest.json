@@ -56,7 +56,10 @@
     {"claim_id":"PGJT-45/CLAIM-DOCUMENT-SHAPES","file":"docs/API.md","marker":"`root` is required. `object` and `array` are optional.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/identity-default-matrix"]},
     {"claim_id":"PGJT-45/CLAIM-OPERATION-SEMANTICS","file":"docs/SEMANTICS.md","marker":"An update is a complete document replacement, not a partial patch.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/object-etag-modes","PGJT-45/failure-atomicity","PGJT-45/deferrable-merge-matrix"]},
     {"claim_id":"PGJT-46/CLAIM-RUNTIME-PRIVILEGES","file":"docs/API.md","marker":"Runtime users need privileges on the view and source tables for the operations they perform.","tests":["PGJT-46/source-privilege-matrix","PGJT-46/membership-column-grants","PGJT-46/invoker-metadata"]},
-    {"claim_id":"PGJT-46/CLAIM-RLS-SECURITY","file":"docs/SEMANTICS.md","marker":"Row-level security remains effective on source tables.","tests":["PGJT-46/owner-force-rls","PGJT-46/root-rls-matrix","PGJT-46/object-etag-lock-matrix","PGJT-46/array-rls-matrix","PGJT-46/policy-change-atomic-denial"]}
+    {"claim_id":"PGJT-46/CLAIM-RLS-SECURITY","file":"docs/SEMANTICS.md","marker":"Row-level security remains effective on source tables.","tests":["PGJT-46/owner-force-rls","PGJT-46/root-rls-matrix","PGJT-46/object-etag-lock-matrix","PGJT-46/array-rls-matrix","PGJT-46/policy-change-atomic-denial"]},
+    {"claim_id":"PGJT-47/CLAIM-PARTITION-ROLES","file":"docs/API.md","marker":"Source roles may use ordinary leaf tables or declaratively partitioned table roots.","tests":["PGJT-47/partition-role-transitions","PGJT-47/missing-partition-recovery","PGJT-47/post-change-operations","PGJT-47/classic-inherits-rejection"]},
+    {"claim_id":"PGJT-47/CLAIM-PARTITION-LIFECYCLE","file":"docs/UPGRADING.md","marker":"Attach or detach declarative partitions","tests":["PGJT-47/partition-role-transitions","PGJT-47/partition-health-regeneration","PGJT-47/concurrent-partition-ddl"]},
+    {"claim_id":"PGJT-47/CLAIM-PARTITION-RESTORE","file":"docs/UPGRADING.md","marker":"Dump and restore","tests":["PGJT-47/partition-custom-restore","PGJT-47/partition-plain-restore"]}
   ],
   "manual_evidence": [
     {"test_id":"PGJT-40/postgrest-manual-scenario","file":"tests/run_postgrest.py","marker":"Run mandatory PostgREST test 13","status":"manual","tracking_jira":"PGJT-48"}
@@ -84,7 +87,15 @@
     {"test_id":"PGJT-46/object-etag-lock-matrix","file":"tests/security_contract_matrix.py","marker":"PGJT-46/object-etag-lock-matrix"},
     {"test_id":"PGJT-46/array-rls-matrix","file":"tests/security_contract_matrix.py","marker":"PGJT-46/array-rls-matrix"},
     {"test_id":"PGJT-46/policy-change-atomic-denial","file":"tests/security_contract_matrix.py","marker":"PGJT-46/policy-change-atomic-denial"},
-    {"test_id":"PGJT-46/invoker-metadata","file":"tests/security_contract_matrix.py","marker":"PGJT-46/invoker-metadata"}
+    {"test_id":"PGJT-46/invoker-metadata","file":"tests/security_contract_matrix.py","marker":"PGJT-46/invoker-metadata"},
+    {"test_id":"PGJT-47/partition-role-transitions","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/partition-role-transitions"},
+    {"test_id":"PGJT-47/missing-partition-recovery","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/missing-partition-recovery"},
+    {"test_id":"PGJT-47/post-change-operations","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/post-change-operations"},
+    {"test_id":"PGJT-47/partition-health-regeneration","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/partition-health-regeneration"},
+    {"test_id":"PGJT-47/classic-inherits-rejection","file":"tests/partition_lifecycle_matrix.py","marker":"PGJT-47/classic-inherits-rejection"},
+    {"test_id":"PGJT-47/concurrent-partition-ddl","file":"tests/specs/pgjt_47_partition.spec","marker":"PGJT-47/concurrent-partition-ddl"},
+    {"test_id":"PGJT-47/partition-custom-restore","file":"tests/dump_restore.py","marker":"PGJT-47/partition-{restore_format}-restore"},
+    {"test_id":"PGJT-47/partition-plain-restore","file":"tests/dump_restore.py","marker":"PGJT-47/partition-{restore_format}-restore"}
   ],
   "runtime_evidence": [
     {"test_id":"PGJT-2/null-parent-ownership","scope":"postgresql","suite":"integrity","field":"name","value":"NULL-parent child identities are rejected as foreign atomically"},
@@ -146,6 +157,14 @@
     {"test_id":"PGJT-46/object-etag-lock-matrix","scope":"postgresql","suite":"security","field":"name","value":"PGJT-46/object-etag-lock-matrix"},
     {"test_id":"PGJT-46/array-rls-matrix","scope":"postgresql","suite":"security","field":"name","value":"PGJT-46/array-rls-matrix"},
     {"test_id":"PGJT-46/policy-change-atomic-denial","scope":"postgresql","suite":"security","field":"name","value":"PGJT-46/policy-change-atomic-denial"},
-    {"test_id":"PGJT-46/invoker-metadata","scope":"postgresql","suite":"security","field":"name","value":"PGJT-46/invoker-metadata"}
+    {"test_id":"PGJT-46/invoker-metadata","scope":"postgresql","suite":"security","field":"name","value":"PGJT-46/invoker-metadata"},
+    {"test_id":"PGJT-47/partition-role-transitions","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/partition-role-transitions"},
+    {"test_id":"PGJT-47/missing-partition-recovery","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/missing-partition-recovery"},
+    {"test_id":"PGJT-47/post-change-operations","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/post-change-operations"},
+    {"test_id":"PGJT-47/partition-health-regeneration","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/partition-health-regeneration"},
+    {"test_id":"PGJT-47/classic-inherits-rejection","scope":"postgresql","suite":"partitions","field":"name","value":"PGJT-47/classic-inherits-rejection"},
+    {"test_id":"PGJT-47/concurrent-partition-ddl","scope":"postgresql","suite":"installcheck"},
+    {"test_id":"PGJT-47/partition-custom-restore","scope":"postgresql","suite":"partition_restore","field":"name","value":"PGJT-47/partition-custom-restore"},
+    {"test_id":"PGJT-47/partition-plain-restore","scope":"postgresql","suite":"partition_restore","field":"name","value":"PGJT-47/partition-plain-restore"}
   ]
 }

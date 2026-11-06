@@ -3,7 +3,7 @@ DATA = sql/pg_jsontailor--0.2.0.sql
 
 REGRESS = basic
 REGRESS_OPTS = --inputdir=tests --outputdir=tests/output
-ISOLATION = concurrency pgjt_43_concurrency
+ISOLATION = concurrency pgjt_43_concurrency pgjt_47_partition
 ISOLATION_OPTS = --inputdir=tests --outputdir=tests/output_iso
 
 PG_CONFIG ?= pg_config

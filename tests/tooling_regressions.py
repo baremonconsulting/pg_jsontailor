@@ -366,6 +366,17 @@ def deterministic_isolation_checks() -> None:
         raise AssertionError("PGJT-43 expected output does not prove five lock waits")
     if "PT412" not in expected or expected.count("PT422") < 2:
         raise AssertionError("PGJT-43 expected SQLSTATE evidence differs")
+    partition_spec = (ROOT / "tests/specs/pgjt_47_partition.spec").read_text()
+    partition_expected = (ROOT / "tests/expected/pgjt_47_partition.out").read_text()
+    if isolation_line.split().count("pgjt_47_partition") != 1:
+        raise AssertionError("PGJT-47 isolation schedule is not executed exactly once")
+    if partition_spec.count("permutation ") != 2:
+        raise AssertionError("PGJT-47 isolation permutation inventory differs")
+    if partition_expected.count("<waiting ...>") != 2:
+        raise AssertionError("PGJT-47 expected output does not prove both lock waits")
+    if (partition_spec.count("PGJT-47/concurrent-partition-ddl") != 2
+            or partition_expected.count("PGJT-47/concurrent-partition-ddl") != 4):
+        raise AssertionError("PGJT-47 isolation evidence inventory differs")
 
 
 def expect_rejection(verify, folder: Path, expected: str) -> None:
@@ -613,7 +624,14 @@ def dump_restore_command_checks() -> None:
                 raise RuntimeError("injected restore setup failure")
             stdout = ""
             if name == "psql" and input_text and "SELECT extversion" in input_text:
-                stdout = "0.2.0\n1:1\ntrue:false:dump restore health\nUPDATE 1\nt\n"
+                stdout = ("0.2.0\n2:2\ntrue:false:dump restore health\nUPDATE 1\nt\n"
+                          "part_detail:3,part_item:3,part_root:3\n"
+                          "partition-root:partition-detail:partition-item\nt\n"
+                          "UPDATE 1\npre-regen-write:partition_restore.part_root_high\n"
+                          "UPDATE 1\nMERGE 1\nMERGE 1\n"
+                          "restored-update:merge-update:partition_restore.part_root_high:"
+                          "partition_restore.part_item_high\n"
+                          "DELETE 1\nMERGE 1\nINSERT 0 1\nt\n0:0\n\nOK:true\n")
             return subprocess.CompletedProcess([name, *args], 0, stdout, "")
 
         argv = ["dump_restore.py", "--pg-bin", "/unused",

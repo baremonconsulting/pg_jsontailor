@@ -1,0 +1,63 @@
+Parsed test spec with 3 sessions
+
+starting permutation: begin_writer write_document begin_ddl detach_high commit_writer commit_detach verify_detached
+create_duality_view
+-------------------
+                   
+(1 row)
+
+step begin_writer: BEGIN;
+step write_document: 
+  UPDATE jt_iso47.documents
+  SET data=jsonb_set(data,ARRAY['label'],to_jsonb('written'::text))
+  WHERE _id=150;
+
+step begin_ddl: BEGIN;
+step detach_high: 
+  ALTER TABLE jt_iso47.root DETACH PARTITION jt_iso47.root_high;
+ <waiting ...>
+step commit_writer: COMMIT;
+step detach_high: <... completed>
+step commit_detach: COMMIT;
+step verify_detached: 
+  SELECT 'PGJT-47/concurrent-partition-ddl' test_id,
+    NOT EXISTS(SELECT 1 FROM pg_inherits
+      WHERE inhrelid='jt_iso47.root_high'::regclass) detached,
+    (SELECT label FROM jt_iso47.root_high WHERE id=150) label;
+
+test_id                         |detached|label  
+--------------------------------+--------+-------
+PGJT-47/concurrent-partition-ddl|t       |written
+(1 row)
+
+
+starting permutation: begin_ddl detach_high begin_writer write_document rollback_detach commit_writer verify_attached
+create_duality_view
+-------------------
+                   
+(1 row)
+
+step begin_ddl: BEGIN;
+step detach_high: 
+  ALTER TABLE jt_iso47.root DETACH PARTITION jt_iso47.root_high;
+
+step begin_writer: BEGIN;
+step write_document: 
+  UPDATE jt_iso47.documents
+  SET data=jsonb_set(data,ARRAY['label'],to_jsonb('written'::text))
+  WHERE _id=150;
+ <waiting ...>
+step rollback_detach: ROLLBACK;
+step write_document: <... completed>
+step commit_writer: COMMIT;
+step verify_attached: 
+  SELECT 'PGJT-47/concurrent-partition-ddl' test_id,
+    EXISTS(SELECT 1 FROM pg_inherits
+      WHERE inhrelid='jt_iso47.root_high'::regclass) attached,
+    (SELECT label FROM jt_iso47.root WHERE id=150) label;
+
+test_id                         |attached|label  
+--------------------------------+--------+-------
+PGJT-47/concurrent-partition-ddl|t       |written
+(1 row)
+
