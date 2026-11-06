@@ -46,6 +46,19 @@ setup {
   );
   CREATE TABLE jt_iso.object_etags AS
     SELECT _id,data#>>ARRAY['_metadata','etag'] AS etag FROM jt_iso.object_documents;
+  CREATE TABLE jt_iso.swap_root(id integer PRIMARY KEY,value text NOT NULL);
+  SELECT jsontailor.create_duality_view(
+    'jt_iso.swap_documents',
+    jsonb_build_object('root',jsonb_build_object(
+      'table','jt_iso.swap_root','key','id','fields',jsonb_build_object('value','value'),
+      'insert',true))
+  );
+  CREATE FUNCTION jt_iso.pause_insert(value integer) RETURNS integer
+  LANGUAGE plpgsql AS $$
+  BEGIN
+    PERFORM pg_advisory_xact_lock(8675310);
+    RETURN value;
+  END$$;
 }
 teardown { DROP SCHEMA jt_iso CASCADE; DROP EXTENSION pg_jsontailor; }
 
@@ -86,7 +99,34 @@ step "begin_object_writer" { BEGIN; }
 step "update_shared_object" { UPDATE jt_iso.reference SET label='changed' WHERE id=7; }
 step "rollback_object_writer" { ROLLBACK; }
 
+session "insert_blocker"
+step "begin_insert_blocker" { BEGIN; }
+step "hold_insert" { SELECT pg_advisory_xact_lock(8675310); }
+step "release_insert" { COMMIT; }
+
+session "guarded_inserter"
+step "guarded_multi_insert" {
+  INSERT INTO jt_iso.swap_documents(data)
+  SELECT jsonb_build_object('_id',jt_iso.pause_insert(g),'value','value-'||g::text)
+  FROM generate_series(1,2)g
+  RETURNING _id,data->>'value';
+}
+step "verify_guarded_insert" {
+  SELECT string_agg(id::text||':'||value,',' ORDER BY id) FROM jt_iso.swap_root_old;
+}
+step "reject_replacement_write" {
+  INSERT INTO jt_iso.swap_documents(data)
+  VALUES(jsonb_build_object('_id',3,'value','value-3'));
+}
+
+session "source_ddl"
+step "replace_source" {
+  ALTER TABLE jt_iso.swap_root RENAME TO swap_root_old;
+  CREATE TABLE jt_iso.swap_root(LIKE jt_iso.swap_root_old INCLUDING ALL);
+}
+
 permutation "begin_writer" "write_root" "begin_waiter" "write_stale_document" "commit_writer" "rollback_waiter"
 permutation "begin_owner" "lock_owner" "begin_array_waiter" "write_raced_array" "claim_child" "commit_owner" "rollback_array_waiter"
 permutation "begin_helper_delete" "helper_delete" "begin_fk_writer" "insert_same_reference" "rollback_fk_writer" "begin_object_writer" "update_shared_object" "rollback_delete" "rollback_object_writer"
+permutation "begin_insert_blocker" "hold_insert" "guarded_multi_insert" "replace_source" "release_insert" "verify_guarded_insert" "reject_replacement_write"
 permutation "begin_direct_delete" "direct_delete" "begin_fk_writer" "insert_same_reference" "rollback_fk_writer" "begin_object_writer" "update_shared_object" "rollback_delete" "rollback_object_writer"

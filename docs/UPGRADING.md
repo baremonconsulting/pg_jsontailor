@@ -106,4 +106,12 @@ Pass `orders_dv_spec` as a `psql` variable or application parameter; do not inte
 
 Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement, primary-key constraint rename or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the binding check because it is resolved from restored per-role binding-view dependencies, constraint names and catalogue structure rather than stored numeric OIDs. Binding views for roles present in the reviewed mapping are generated implementation objects and must be dropped and recreated with the main view as shown above. Objects at optional binding names for absent roles are outside that mapping and must not be removed.
 
+Generated write statements acquire `ACCESS SHARE` locks on configured root,
+object and array source relations in that fixed order before validating their
+catalogue bindings. Source DDL requiring `ACCESS EXCLUSIVE`, including relation
+renames and replacements, therefore waits for active writers. Schedule source
+schema changes in a write-free maintenance window;
+set a deployment-appropriate `lock_timeout` so an accidental overlap fails
+instead of waiting indefinitely.
+
 If validation fails before `COMMIT`, issue `ROLLBACK`. Regeneration replaces database objects and therefore requires a planned write window; it is not an online schema migration mechanism.

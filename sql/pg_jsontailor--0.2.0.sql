@@ -18,7 +18,7 @@ DECLARE
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
+    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; guard_lock_targets text[]; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -197,7 +197,10 @@ BEGIN
     metadata:=jsonb_build_object('format',1,'spec',cfg,'generator',jsonb_build_object('version','0.2.0','hash',generator_hash));
     guard_checks:=relation_checks;
     check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,guard_checks,generator_hash);
-    guard_body:=format('BEGIN %s RETURN NULL; END',guard_checks);
+    guard_lock_targets:=ARRAY[format('%I.%I',root_schema,root_table)];
+    IF cfg?'object' THEN guard_lock_targets:=array_append(guard_lock_targets,format('%I.%I',object_schema,object_table));END IF;
+    IF cfg?'array' THEN guard_lock_targets:=array_append(guard_lock_targets,format('%I.%I',array_schema,array_table));END IF;
+    guard_body:=format('BEGIN BEGIN LOCK TABLE %s IN ACCESS SHARE MODE; EXCEPTION WHEN undefined_table OR invalid_schema_name THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END; %s RETURN NULL; END',array_to_string(guard_lock_targets,','),guard_checks);
     relation_checks:='';
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 

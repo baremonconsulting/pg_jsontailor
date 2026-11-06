@@ -1253,10 +1253,28 @@ SELECT n,'row-'||n::text FROM generate_series(1,25)n;""")
     ).stdout)[0]
     guard_triggers = {item["Trigger Name"]: int(item["Calls"])
                       for item in guard_plan.get("Triggers", [])}
+    fixed_lock_order = db.value("""SELECT position(
+      'LOCK TABLE jt_integrity.root,jt_integrity.ref,jt_integrity.child IN ACCESS SHARE MODE'
+      IN pg_get_functiondef('jt_integrity.documents__guard()'::regprocedure))>0;""")
+    db.run("""DROP SCHEMA IF EXISTS jt_guard_source CASCADE;
+DROP SCHEMA IF EXISTS jt_guard_api CASCADE;
+CREATE SCHEMA jt_guard_source; CREATE SCHEMA jt_guard_api;
+CREATE TABLE jt_guard_source.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_guard_source.root VALUES(1,'one');""")
+    schema_guard_spec = {"root": {"table": "jt_guard_source.root", "key": "id",
+                                   "fields": {"label": "label"}, "insert": True}}
+    create_view(db, "jt_guard_api.documents", schema_guard_spec)
+    db.run("ALTER SCHEMA jt_guard_source RENAME TO jt_guard_source_old;")
+    missing_schema_guard = db.run(
+        "INSERT INTO jt_guard_api.documents(data) "
+        "VALUES(jsonb_build_object('_id',2,'label','two'));", False)
+    db.run("ALTER SCHEMA jt_guard_source_old RENAME TO jt_guard_source;")
     record("catalog guards run once per statement rather than once per document",
            guard_triggers.get("documents__guard_update") == 1
-           and guard_triggers.get("documents__update") == 25,
-           f"trigger_calls={guard_triggers}")
+           and guard_triggers.get("documents__update") == 25
+           and fixed_lock_order == "t" and db.state(missing_schema_guard) == "PT422",
+           f"trigger_calls={guard_triggers},fixed_lock_order={fixed_lock_order},"
+           f"missing_schema={db.state(missing_schema_guard)}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
 CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);

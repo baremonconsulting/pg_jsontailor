@@ -1,4 +1,4 @@
-Parsed test spec with 6 sessions
+Parsed test spec with 9 sessions
 
 starting permutation: begin_writer write_root begin_waiter write_stale_document commit_writer rollback_waiter
 step begin_writer: BEGIN;
@@ -32,6 +32,47 @@ step update_shared_object: UPDATE jt_iso.reference SET label='changed' WHERE id=
 step rollback_delete: ROLLBACK;
 step update_shared_object: <... completed>
 step rollback_object_writer: ROLLBACK;
+
+starting permutation: begin_insert_blocker hold_insert guarded_multi_insert replace_source release_insert verify_guarded_insert reject_replacement_write
+step begin_insert_blocker: BEGIN;
+step hold_insert: SELECT pg_advisory_xact_lock(8675310);
+pg_advisory_xact_lock
+---------------------
+                     
+(1 row)
+
+step guarded_multi_insert: 
+  INSERT INTO jt_iso.swap_documents(data)
+  SELECT jsonb_build_object('_id',jt_iso.pause_insert(g),'value','value-'||g::text)
+  FROM generate_series(1,2)g
+  RETURNING _id,data->>'value';
+ <waiting ...>
+step replace_source: 
+  ALTER TABLE jt_iso.swap_root RENAME TO swap_root_old;
+  CREATE TABLE jt_iso.swap_root(LIKE jt_iso.swap_root_old INCLUDING ALL);
+ <waiting ...>
+step release_insert: COMMIT;
+step guarded_multi_insert: <... completed>
+_id|?column?
+---+--------
+  1|value-1 
+  2|value-2 
+(2 rows)
+
+step replace_source: <... completed>
+step verify_guarded_insert: 
+  SELECT string_agg(id::text||':'||value,',' ORDER BY id) FROM jt_iso.swap_root_old;
+
+string_agg         
+-------------------
+1:value-1,2:value-2
+(1 row)
+
+step reject_replacement_write: 
+  INSERT INTO jt_iso.swap_documents(data)
+  VALUES(jsonb_build_object('_id',3,'value','value-3'));
+
+ERROR:  source relation role changed; regenerate the duality view
 
 starting permutation: begin_direct_delete direct_delete begin_fk_writer insert_same_reference rollback_fk_writer begin_object_writer update_shared_object rollback_delete rollback_object_writer
 step begin_direct_delete: BEGIN;
