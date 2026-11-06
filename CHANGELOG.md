@@ -4,6 +4,11 @@ All notable changes to `pg_jsontailor` are documented in this file.
 
 ## 0.2.0 — unreleased
 
+- Removed the function-wide write exception block that allocated a
+  subtransaction per document, while preserving native unrelated constraint
+  diagnostics and documented validation errors.
+- Added 100- and 1,000-document transaction/XID regression measurements.
+
 `0.2.0` remains unreleased until an immutable `v0.2.0` tag and checksummed
 archive are published. Earlier repository snapshots are development builds,
 regardless of commit-message wording.

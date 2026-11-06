@@ -163,6 +163,10 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/integrity-results.jsonl"
+          python3 tests/subtransaction_regressions.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --output "$RUNNER_TEMP/subtransaction-results.jsonl"
           python3 tests/setbased_reconciliation.py \
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
@@ -177,6 +181,7 @@ jobs:
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
             "$RUNNER_TEMP/integrity-results.jsonl" \
+            "$RUNNER_TEMP/subtransaction-results.jsonl" \
             "$RUNNER_TEMP/merge-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 

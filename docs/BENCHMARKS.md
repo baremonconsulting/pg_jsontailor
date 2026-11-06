@@ -1,5 +1,16 @@
 # Reference benchmark
 
+Generated row triggers no longer place the complete write path inside a
+PL/pgSQL exception block. Bulk root-only replacement therefore uses one
+top-level transaction ID rather than one subtransaction ID per document. The
+CI regression records elapsed time, time per document and XID consumption for
+100- and 1,000-document transactions. Partitioned child writes retain narrow
+exception blocks solely to translate PostgreSQL's missing-partition error to
+the documented `PT422`; measure those workloads separately.
+
+Any generator change invalidates the previous reference measurement. Publish
+a fresh reference set from the release candidate; do not relabel an older set.
+
 The included benchmark compares generated document views with direct relational SQL in the same PostgreSQL instance. It measures server execution time with prebuilt JSON payloads and rolls back every mutation.
 
 ## Last published reference environment

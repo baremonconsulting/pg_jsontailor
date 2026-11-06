@@ -1,5 +1,10 @@
 # Upgrading generated views
 
+The 0.2.0 generated write functions remove per-document subtransactions from
+ordinary bulk writes. Regenerate existing duality views after installing this
+version; upgrading the extension alone does not replace SQL already copied
+into generated objects.
+
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
 Any view generated from an untagged 0.2.0 development snapshot, including an

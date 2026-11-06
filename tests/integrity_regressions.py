@@ -1108,14 +1108,32 @@ CREATE TABLE jt_json_contract.partition_child_low
         "INSERT INTO jt_json_contract.partition_documents(data) VALUES"
         "('{\"_id\":1,\"label\":\"x\",\"items\":[{\"id\":99,\"label\":\"x\"}]}'::jsonb);",
         False)
+    bulk_missing_partition = db.run(
+        "INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+        "('{\"_id\":2,\"label\":\"x\",\"items\":[{\"id\":98,\"label\":\"x\"},"
+        "{\"id\":99,\"label\":\"y\"}]}'::jsonb);", False)
+    db.run("INSERT INTO jt_json_contract.partition_documents(data) VALUES"
+           "('{\"_id\":3,\"label\":\"x\",\"items\":[{\"id\":3,\"label\":\"x\"}]}'::jsonb);")
+    partition_doc = json.loads(db.value(
+        "SELECT data::text FROM jt_json_contract.partition_documents WHERE _id=3;"))
+    partition_doc["items"].append({"id": 99, "label": "append"})
+    append_missing_partition = db.run(
+        "UPDATE jt_json_contract.partition_documents SET data=" +
+        quote(json.dumps(partition_doc)) + "::jsonb WHERE _id=3;", False)
+    partition_doc["items"] = [{"id": 99, "label": "moved"}]
+    moved_missing_partition = db.run(
+        "UPDATE jt_json_contract.partition_documents SET data=" +
+        quote(json.dumps(partition_doc)) + "::jsonb WHERE _id=3;", False)
     record("JSON types, numeric precision and INSERT identity errors use PT422",
            contract_states == ["PT422"] * len(contract_documents)
            and db.state(generated_root) == "PT422" and db.state(generated_child) == "PT422"
-           and db.state(missing_partition) == "PT422"
+           and [db.state(x) for x in (missing_partition, bulk_missing_partition,
+                                      append_missing_partition, moved_missing_partition)]
+           == ["PT422"] * 4
            and db.value("SELECT count(*) FROM jt_json_contract.root WHERE id<>9;") == "0",
            f"documents={contract_states},generated="
            f"{db.state(generated_root)}/{db.state(generated_child)},"
-           f"partition={db.state(missing_partition)}")
+           f"partition={[db.state(x) for x in (missing_partition, bulk_missing_partition, append_missing_partition, moved_missing_partition)]}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_timestamptz CASCADE; CREATE SCHEMA jt_timestamptz;
 CREATE TABLE jt_timestamptz.reference(id integer PRIMARY KEY, observed_at timestamptz);
