@@ -248,8 +248,31 @@ BEGIN
         IF jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',bad]) IS DISTINCT FROM sql_kind AND NOT (sql_typname='numeric' AND jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',bad])='string' AND doc#>>ARRAY[cfg#>>'{object,name}',bad]=ANY(ARRAY['NaN','Infinity','-Infinity'])) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key has wrong JSON type';END IF;
         IF NOT pg_input_is_valid(doc#>>ARRAY[cfg#>>'{object,name}',bad],sql_type) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc#>ARRAY[cfg#>>'{object,name}',bad];IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object key loses precision in the mapped SQL type';END IF;END IF;
+        IF EXISTS(
+          SELECT 1 FROM jsonb_each(cfg#>'{object,fields}') f
+          JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{object,table}')
+           AND a.attname=f.value#>>'{}' AND a.attnum>0 AND NOT a.attisdropped
+          JOIN pg_type t ON t.oid=a.atttypid
+          WHERE doc#>ARRAY[cfg#>>'{object,name}',f.key]<>'null'::jsonb
+            AND jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',f.key]) IS DISTINCT FROM CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END
+            AND NOT (t.typname='numeric' AND jsonb_typeof(doc#>ARRAY[cfg#>>'{object,name}',f.key])='string' AND doc#>>ARRAY[cfg#>>'{object,name}',f.key]=ANY(ARRAY['NaN','Infinity','-Infinity']))
+        ) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='object field has wrong JSON type';END IF;
+        IF EXISTS(
+          SELECT 1 FROM jsonb_each(cfg#>'{object,fields}') f
+          JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{object,table}')
+           AND a.attname=f.value#>>'{}' AND a.attnum>0 AND NOT a.attisdropped
+          WHERE doc#>ARRAY[cfg#>>'{object,name}',f.key]<>'null'::jsonb
+            AND NOT pg_input_is_valid(doc#>>ARRAY[cfg#>>'{object,name}',f.key],format_type(a.atttypid,a.atttypmod))
+        ) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
       END IF;
     END IF;
+    IF EXISTS(
+      SELECT 1 FROM jsonb_each(cfg#>'{root,fields}') f
+      JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{root,table}')
+       AND a.attname=f.value#>>'{}' AND a.attnum>0 AND NOT a.attisdropped
+      WHERE doc?f.key AND doc->f.key<>'null'::jsonb
+        AND NOT pg_input_is_valid(doc->>f.key,format_type(a.atttypid,a.atttypmod))
+    ) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
     FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP
       IF doc?bad AND doc->bad<>'null'::jsonb THEN
         SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod),t.typname INTO sql_kind,sql_type,sql_typname FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
@@ -362,6 +385,13 @@ BEGIN
     IF bad IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('unknown field %%s',bad);END IF;
     SELECT x INTO bad FROM jsonb_object_keys(cfg#>'{root,fields}')x WHERE NOT doc?x LIMIT 1;
     IF bad IS NOT NULL OR (cfg?'object' AND NOT doc?(cfg#>>'{object,name}')) OR (cfg?'array' AND NOT doc?(cfg#>>'{array,name}')) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document is incomplete';END IF;
+    IF EXISTS(
+      SELECT 1 FROM jsonb_each(cfg#>'{root,fields}') f
+      JOIN pg_attribute a ON a.attrelid=to_regclass(cfg#>>'{root,table}')
+       AND a.attname=f.value#>>'{}' AND a.attnum>0 AND NOT a.attisdropped
+      WHERE doc->f.key<>'null'::jsonb
+        AND NOT pg_input_is_valid(doc->>f.key,format_type(a.atttypid,a.atttypmod))
+    ) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
     FOR bad,keyj IN SELECT key,value FROM jsonb_each(cfg#>'{root,fields}') LOOP
       IF doc->bad<>'null'::jsonb THEN
         SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod),t.typname INTO sql_kind,sql_type,sql_typname FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;

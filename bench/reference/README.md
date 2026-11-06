@@ -2,7 +2,8 @@
 
 This directory contains the raw evidence behind [`docs/BENCHMARKS.md`](../../docs/BENCHMARKS.md).
 
-- `azure-e5b41a5-pg17/`, `azure-e5b41a5-pg18/` and `azure-e5b41a5-pg19/` are the complete cross-version release-candidate measurements from commit `e5b41a5a04b175d43e0deae3fb3a5681d96496ca`. PostgreSQL 18 is the published performance reference; PostgreSQL 17 and 19 are compatibility evidence from the same VM and workload.
+- `azure-039a555-pg17/`, `azure-039a555-pg18/` and `azure-039a555-pg19/` are the complete cross-version release-candidate measurements from commit `039a555b55f89b849c98ab918ba279889fbf38bf`. PostgreSQL 18 is the published performance reference; PostgreSQL 17 and 19 are compatibility evidence from the same VM and workload.
+- `azure-e5b41a5-pg17/`, `azure-e5b41a5-pg18/` and `azure-e5b41a5-pg19/` are the preceding complete cross-version release-candidate measurements.
 - `azure-a9a455e-pg17/`, `azure-a9a455e-pg18/` and `azure-a9a455e-pg19/` are the preceding cross-version release-candidate measurements.
 - `azure-11e6d74/` is the preceding PostgreSQL 18 reference after set-wise validation was implemented.
 - `azure-afa643c/` is the intermediate PostgreSQL 18 optimization run before set-wise validation.

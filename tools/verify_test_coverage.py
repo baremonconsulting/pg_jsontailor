@@ -28,13 +28,14 @@ EXPECTED_CLAIMS = {
     "PGJT-40/CLAIM-DUMP-RESTORE",
     "PGJT-40/CLAIM-BENCHMARK",
     "PGJT-40/CLAIM-POSTGREST",
+    "PGJT-44/CLAIM-TYPE-SEMANTICS",
 }
 EXPECTED_SECTION_DIGESTS = {
     "requirements": "65809ebeb6bbb175d5d773a3a03c27c80c7c059e8ddf46c53cf32804ccef1178",
-    "claims": "22ec606699725f54b9a68d2d05bcc9f2d7b17d6dcf20a35c380c5667612eef03",
+    "claims": "ae06b747068764096a48a6eb53d3da2e37df0b7fe5aa372d64531293937af35e",
     "manual_evidence": "6b9dea547968a760dff9d8c1bce174e7cef7aae3d6bc25e379756cbb756d7d20",
-    "supplemental_evidence": "b6043c0c4c46e5a6ca96d47885d6b0816978fbc15350e61f96c84c99b37f198e",
-    "runtime_evidence": "56ed96b520c388b62fd8f98559de2550c81f0ec450581308ee4e9477b434a1e1",
+    "supplemental_evidence": "e0c31de5f6046e4c9e48a7b859aa9d9b2616d76d766dbbfde74a2ffa496d7a86",
+    "runtime_evidence": "65efc6029f5b76202ebca8746185a9458da6ac06a1d0f6cae5b4e058336d31a4",
 }
 
 
