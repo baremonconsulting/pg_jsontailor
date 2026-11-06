@@ -23,8 +23,8 @@ identities when key existence is sensitive, and do not expose catalogue access
 or arbitrary write errors more broadly than the application requires.
 
 Lifecycle inventory treats catalogue comments as untrusted discovery metadata.
-It executes a generated health function only when the inventory caller owns the
-managed view and the health function has the same owner and expected signature.
-Views owned by another role are reported as `SKIPPED`; administrators must not
-execute similarly named callbacks merely because a comment marks an object as
-managed.
+It validates normalized specifications against trusted catalogue queries and
+does not execute discovered health functions. Views owned by another role are
+reported as `SKIPPED`; administrators must not execute similarly named callbacks
+merely because a comment marks an object as managed. Changing role or session
+authorization is not an isolation boundary for owner-supplied code.

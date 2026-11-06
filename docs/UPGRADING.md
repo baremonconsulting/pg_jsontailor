@@ -36,11 +36,11 @@ SELECT * FROM jsontailor.duality_view_inventory();
 SELECT api.orders_dv__check();
 ```
 
-Run inventory as the owner of the managed views when health execution is
-required. Inventory reports views owned by other roles as `SKIPPED` and does not
-execute their health functions. Connect as each view owner, or invoke that
-owner's explicitly qualified `__check()` function under a separately reviewed
-operational procedure.
+Run inventory as the owner of the managed views when catalogue health is
+required. Inventory reports views owned by other roles as `SKIPPED` and never
+executes their health functions. An explicitly qualified `__check()` invocation
+is a separate operational action that executes code owned by the managed-view
+owner and must be reviewed accordingly.
 
 For a view generated with provenance metadata, use the transactional
 regenerator. It preserves direct owner-issued view grants, generated-function

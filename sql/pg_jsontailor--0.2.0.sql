@@ -18,7 +18,7 @@ DECLARE
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; guard_lock_targets text[]; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb;
+    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; guard_lock_targets text[]; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb; health_bindings jsonb := '{}'::jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -181,6 +181,10 @@ BEGIN
                                AND a.attname=c.name AND a.attnum>0 AND NOT a.attisdropped
         )x;
         binding_columns:=ARRAY(SELECT x FROM unnest(binding_columns)x ORDER BY x);
+        health_bindings:=health_bindings||jsonb_build_object(s,jsonb_build_object(
+          'table',qrel,'binding_view',qbinding,'primary_key',binding_pk_name,
+          'key',cfg#>>ARRAY[s,'key'],'columns',to_jsonb(binding_columns),
+          'ordinals',to_jsonb(binding_ordinals)));
         binding_ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT %s FROM %s binding_source WHERE false OFFSET 0;',qbinding,(SELECT string_agg(format('binding_source.%I',x),',') FROM unnest(binding_columns)x),qrel)||E'\n';
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1] WHERE c.conrelid=to_regclass(%L) AND c.contype=''p'' AND cardinality(c.conkey)=1 AND c.conname=%L AND a.attname=%L) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',qrel,binding_pk_name,cfg#>>ARRAY[s,'key']);
         relation_checks:=relation_checks||format('IF (SELECT count(*) FROM unnest(%L::text[],%L::integer[]) expected(attname,ordinal) JOIN LATERAL (SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal FROM pg_attribute a WHERE a.attrelid=to_regclass(%L) AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_rewrite rw JOIN pg_depend d ON d.classid=''pg_rewrite''::regclass AND d.objid=rw.oid AND d.refclassid=''pg_class''::regclass WHERE rw.ev_class=to_regclass(%L) AND d.refobjid=to_regclass(%L) AND d.refobjsubid=a.attnum)) current USING(attname,ordinal))<>%s THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation or column binding changed; regenerate the duality view'';END IF;',binding_columns::text,binding_ordinals::text,qrel,qbinding,qrel,cardinality(binding_columns));
@@ -194,7 +198,9 @@ BEGIN
         relation_checks:=relation_checks||format('IF NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_attribute fk ON fk.attrelid=c.conrelid AND fk.attnum=c.conkey[1] JOIN pg_attribute pk ON pk.attrelid=c.confrelid AND pk.attnum=c.confkey[1] WHERE c.conrelid=to_regclass(%L) AND c.confrelid=to_regclass(%L) AND c.contype=''f'' AND c.conkey=ARRAY[fk.attnum]::smallint[] AND c.confkey=ARRAY[pk.attnum]::smallint[] AND fk.attname=%L AND pk.attname=%L AND NOT c.condeferrable AND c.convalidated AND c.confdeltype IN (''a'',''r'') AND %s) THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END IF;',format('%I.%I',array_schema,array_table),format('%I.%I',root_schema,root_table),cfg#>>'{array,parent_fk}',cfg#>>'{root,key}',runtime_enforced_clause);
     END IF;
     SELECT encode(sha256(convert_to(pg_get_functiondef('jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex') INTO generator_hash;
-    metadata:=jsonb_build_object('format',1,'spec',cfg,'generator',jsonb_build_object('version','0.2.0','hash',generator_hash));
+    metadata:=jsonb_build_object('format',1,'spec',cfg,
+      'generator',jsonb_build_object('version','0.2.0','hash',generator_hash),
+      'health',jsonb_build_object('bindings',health_bindings));
     guard_checks:=relation_checks;
     check_body:=format('DECLARE cfg constant jsonb:=%L::jsonb; BEGIN %s RETURN jsonb_build_object(''status'',''OK'',''generator_version'',''0.2.0'',''generator_hash'',%L); END',cfg,guard_checks,generator_hash);
     guard_lock_targets:=ARRAY[format('%I.%I',root_schema,root_table)];
@@ -610,7 +616,11 @@ RETURNS TABLE(
 LANGUAGE plpgsql VOLATILE SECURITY INVOKER
 SET search_path=pg_catalog,pg_temp
 AS $inventory$
-DECLARE r record; metadata jsonb; health jsonb; check_owner oid; check_function oid;
+DECLARE
+  r record; b record; metadata jsonb; check_owner oid; check_function oid;
+  validated_ddl text; expected_columns text[]; expected_ordinals integer[];
+  derived_columns text[]; expected_roles text[];
+  expected_relation oid; binding_relation oid; matching_columns integer;
 BEGIN
   SELECT encode(sha256(convert_to(pg_get_functiondef(
     'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),'UTF8')),'hex')
@@ -623,9 +633,9 @@ BEGIN
       AND obj_description(c.oid,'pg_class') LIKE 'pg_jsontailor metadata v1: %%'
     ORDER BY n.nspname,c.relname
   LOOP
-    view_name:=format('%I.%I',r.nspname,r.relname);
+    view_name:=quote_ident(r.nspname)||'.'||quote_ident(r.relname);
     generator_version:=NULL;generator_hash:=NULL;health_status:=NULL;health_detail:=NULL;
-    metadata:=NULL;health:=NULL;
+    metadata:=NULL;validated_ddl:=NULL;
     BEGIN
       metadata:=substr(r.description,length('pg_jsontailor metadata v1: ')+1)::jsonb;
       generator_version:=metadata#>>'{generator,version}';
@@ -646,12 +656,82 @@ BEGIN
         RETURN NEXT;
         CONTINUE;
       END IF;
-      EXECUTE format('SELECT %I.%I()',r.nspname,r.relname||'__check') INTO health;
-      health_status:=coalesce(health->>'status','ERROR');
+      IF jsonb_typeof(metadata#>'{health,bindings}') IS DISTINCT FROM 'object' THEN
+        health_status:='SKIPPED';
+        health_detail:='binding provenance is unavailable; regenerate the managed view';
+        RETURN NEXT;
+        CONTINUE;
+      END IF;
+      expected_roles:=ARRAY['root']::text[];
+      IF metadata->'spec'?'object' THEN expected_roles:=array_append(expected_roles,'object'); END IF;
+      IF metadata->'spec'?'array' THEN expected_roles:=array_append(expected_roles,'array'); END IF;
+      IF (SELECT count(*) FROM jsonb_object_keys(metadata#>'{health,bindings}'))
+           <>cardinality(expected_roles)
+         OR EXISTS(SELECT 1 FROM jsonb_object_keys(metadata#>'{health,bindings}') role_name
+                   WHERE role_name<>ALL(expected_roles)) THEN
+        RAISE EXCEPTION USING ERRCODE='PT422',
+          MESSAGE='binding provenance does not match the stored specification';
+      END IF;
+      validated_ddl:=jsontailor.duality_view_ddl(view_name,metadata->'spec');
+      FOR b IN SELECT key,value FROM jsonb_each(metadata#>'{health,bindings}') LOOP
+        derived_columns:=ARRAY[metadata#>>ARRAY['spec',b.key,'key']]
+          ||ARRAY(SELECT value FROM jsonb_each_text(metadata#>ARRAY['spec',b.key,'fields']));
+        IF b.key='root' AND metadata->'spec'?'object' THEN
+          derived_columns:=array_append(derived_columns,metadata#>>'{spec,object,root_fk}');
+        END IF;
+        IF b.key='array' THEN
+          derived_columns:=derived_columns||ARRAY[
+            metadata#>>'{spec,array,parent_fk}',metadata#>>'{spec,array,order_by}'];
+        END IF;
+        derived_columns:=ARRAY(SELECT DISTINCT x FROM unnest(derived_columns)x ORDER BY x);
+        expected_relation:=to_regclass(b.value->>'table');
+        binding_relation:=to_regclass(b.value->>'binding_view');
+        SELECT array_agg(value ORDER BY ordinality) INTO expected_columns
+        FROM jsonb_array_elements_text(b.value->'columns') WITH ORDINALITY;
+        SELECT array_agg(value::integer ORDER BY ordinality) INTO expected_ordinals
+        FROM jsonb_array_elements_text(b.value->'ordinals') WITH ORDINALITY;
+        IF parse_ident(b.value->>'table',true)
+             IS DISTINCT FROM parse_ident(metadata#>>ARRAY['spec',b.key,'table'],true)
+           OR parse_ident(b.value->>'binding_view',true)
+             IS DISTINCT FROM ARRAY[r.nspname::text,r.relname::text||'__'||b.key||'_binding']
+           OR b.value->>'key' IS DISTINCT FROM metadata#>>ARRAY['spec',b.key,'key']
+           OR expected_columns IS DISTINCT FROM derived_columns
+           OR expected_relation IS NULL OR binding_relation IS NULL
+           OR cardinality(expected_columns) IS NULL
+           OR cardinality(expected_columns)<>cardinality(expected_ordinals)
+           OR NOT EXISTS(
+             SELECT 1 FROM pg_constraint c
+             JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=c.conkey[1]
+             WHERE c.conrelid=expected_relation AND c.contype='p'
+               AND cardinality(c.conkey)=1
+               AND c.conname=b.value->>'primary_key'
+               AND a.attname=b.value->>'key') THEN
+          RAISE EXCEPTION USING ERRCODE='PT422',
+            MESSAGE='source relation role changed; regenerate the duality view';
+        END IF;
+        SELECT count(*) INTO matching_columns
+        FROM unnest(expected_columns,expected_ordinals) expected(attname,ordinal)
+        JOIN LATERAL (
+          SELECT a.attname,row_number() OVER (ORDER BY a.attnum)::integer ordinal
+          FROM pg_attribute a
+          WHERE a.attrelid=expected_relation AND a.attnum>0 AND NOT a.attisdropped
+            AND EXISTS(
+              SELECT 1 FROM pg_rewrite rw
+              JOIN pg_depend d ON d.classid='pg_rewrite'::regclass
+                AND d.objid=rw.oid AND d.refclassid='pg_class'::regclass
+              WHERE rw.ev_class=binding_relation
+                AND d.refobjid=expected_relation AND d.refobjsubid=a.attnum)) current
+          USING(attname,ordinal);
+        IF matching_columns<>cardinality(expected_columns) THEN
+          RAISE EXCEPTION USING ERRCODE='PT422',
+            MESSAGE='source relation or column binding changed; regenerate the duality view';
+        END IF;
+      END LOOP;
+      health_status:='OK';
       health_detail:=CASE WHEN generator_hash=current_generator_hash
         THEN NULL ELSE 'generated objects use a different generator build' END;
     EXCEPTION WHEN OTHERS THEN
-      health_status:=SQLSTATE;
+      health_status:=CASE WHEN SQLSTATE='22023' THEN 'PT422' ELSE SQLSTATE END;
       health_detail:=SQLERRM;
     END;
     RETURN NEXT;

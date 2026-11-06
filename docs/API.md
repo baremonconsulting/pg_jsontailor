@@ -11,7 +11,7 @@ jsontailor.duality_view_inventory() RETURNS TABLE (...)
 jsontailor.regenerate_duality_view(view_name text) RETURNS void
 ```
 
-`duality_view_ddl` validates the specification against PostgreSQL catalogues and returns a complete DDL script. `create_duality_view` executes the same script in the caller's transaction. `duality_view_inventory` reports generator provenance and executes each generated non-mutating health check. `regenerate_duality_view` transactionally replaces a managed view from its stored specification. None of these functions is a security definer.
+`duality_view_ddl` validates the specification against PostgreSQL catalogues and returns a complete DDL script. `create_duality_view` executes the same script in the caller's transaction. `duality_view_inventory` reports generator provenance and evaluates catalogue health without executing discovered callbacks. `regenerate_duality_view` transactionally replaces a managed view from its stored specification. None of these functions is a security definer.
 
 Both the view name and source table names must contain exactly two identifier parts, for example `api.orders_dv` and `shop.orders`.
 
@@ -102,12 +102,13 @@ The generated SQL is copied into each generated object. Regenerate a view after 
 ## Inventory, health and regeneration
 
 `duality_view_inventory()` returns every managed view and its recorded and
-installed generator provenance. It executes a generated `__check()` function
-only when the inventory caller owns both the managed view and the correctly
-typed health function. Rows owned by another role, or rows whose health function
-has an unexpected owner or signature, are reported as `SKIPPED`; inventory never
-executes their callback with the caller's privileges. `OK` means the stored
-catalogue bindings still satisfy the generated guards. A different recorded and
+installed generator provenance. It validates the stored specification and its
+structured binding provenance against the current catalogues and never executes the discovered `__check()` function.
+Rows owned by another role, or rows whose health function has an unexpected
+owner or signature, or legacy metadata without binding provenance, are reported
+as `SKIPPED`. `OK` means the stored catalogue bindings still satisfy the generated
+guards. Explicitly invoking a `__check()`
+function remains a separate privileged operational action. A different recorded and
 current hash means regeneration is available even when the schema health check
 is otherwise `OK`.
 

@@ -407,6 +407,9 @@ INSERT INTO jt_column_permutation.fields VALUES(1,'A','B');""")
     field_swap = db.run(
         "UPDATE jt_column_permutation.documents "
         "SET data=jsonb_set(data,'{first}','\"wrong\"') WHERE _id=1;", False)
+    field_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_column_permutation.documents';""")
     field_values = db.value(
         "SELECT a||':'||b FROM jt_column_permutation.fields WHERE id=1;")
 
@@ -424,14 +427,18 @@ INSERT INTO jt_key_permutation.fields VALUES(1,2),(2,1);""")
     key_swap = db.run(
         "UPDATE jt_key_permutation.documents "
         "SET data=jsonb_set(data,'{value}','3') WHERE _id=1;", False)
+    key_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_key_permutation.documents';""")
     key_values = db.value(
         "SELECT string_agg(id::text||':'||value::text,',' ORDER BY value) "
         "FROM jt_key_permutation.fields;")
     record("physical column-name permutations are rejected before DML",
-           db.state(field_swap) == "PT422" and field_values == "B:A"
-           and db.state(key_swap) == "PT422" and key_values == "2:1,1:2",
-           f"field={db.state(field_swap)}/{field_values},"
-           f"key={db.state(key_swap)}/{key_values}")
+           db.state(field_swap) == "PT422" and field_inventory == "PT422"
+           and field_values == "B:A" and db.state(key_swap) == "PT422"
+           and key_inventory == "PT422" and key_values == "2:1,1:2",
+           f"field={db.state(field_swap)}/{field_inventory}/{field_values},"
+           f"key={db.state(key_swap)}/{key_inventory}/{key_values}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_quoting CASCADE; CREATE SCHEMA jt_quoting;
 CREATE TABLE jt_quoting.roots(id integer PRIMARY KEY,value text);
@@ -440,6 +447,14 @@ INSERT INTO jt_quoting.roots VALUES(1,'original');""")
         "root": {"table": "jt_quoting.roots", "key": "id",
                  "fields": {"value": "value"}, "update": True}}
     create_view(db, "jt_quoting.documents", quoting_spec)
+    db.run("ALTER TABLE jt_quoting.roots RENAME CONSTRAINT roots_pkey TO renamed_pkey;")
+    renamed_pk_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_quoting.documents';""")
+    db.run("ALTER TABLE jt_quoting.roots RENAME CONSTRAINT renamed_pkey TO roots_pkey;")
+    restored_pk_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_quoting.documents';""")
     quoted_update = db.run(
         "SET quote_all_identifiers=on;"
         "UPDATE jt_quoting.documents "
@@ -447,7 +462,9 @@ INSERT INTO jt_quoting.roots VALUES(1,'original');""")
         "RESET quote_all_identifiers;", False)
     quoted_value = db.value("SELECT value FROM jt_quoting.roots WHERE id=1;")
     record("binding guards are independent of identifier rendering settings",
-           quoted_update.returncode == 0 and quoted_value == "updated",
+           renamed_pk_inventory == "PT422" and restored_pk_inventory == "OK"
+           and quoted_update.returncode == 0 and quoted_value == "updated",
+           f"pk={renamed_pk_inventory}/{restored_pk_inventory},"
            f"update={quoted_update.returncode},value={quoted_value}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_nocheck CASCADE; CREATE SCHEMA jt_nocheck;
@@ -834,6 +851,9 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
     current_etag = db.value("SELECT data#>>'{_metadata,etag}' FROM jt_integrity.documents WHERE _id=1;")
     swapped_delete = db.run(
         f"SELECT jt_integrity.documents__delete_document(1,{quote(current_etag)});", False)
+    swapped_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_integrity.documents';""")
     original = db.value("SELECT value FROM jt_integrity.root_original WHERE id=1;")
     replacement = db.value("SELECT count(*) FROM jt_integrity.root;")
     db.run("DROP TABLE jt_integrity.root; ALTER TABLE jt_integrity.root_original RENAME TO root;"
@@ -853,8 +873,10 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
                          quote(json.dumps(regenerated_doc)) + "::jsonb WHERE _id=1;", False)
     record("source relation replacement requires regeneration",
            db.state(swapped_update) == "PT422" and db.state(swapped_delete) == "PT422"
+           and swapped_inventory == "PT422"
            and original == "one" and replacement == "0" and regenerated.returncode == 0,
            f"update={db.state(swapped_update)},delete={db.state(swapped_delete)},"
+           f"inventory={swapped_inventory},"
            f"original={original},replacement={replacement},regenerated={regenerated.returncode}")
 
     drift_states = []
@@ -1756,9 +1778,14 @@ INSERT INTO jt_nonfinite.child VALUES('Infinity','NaN',1,'NaN');""")
     inventory_attacker = "jt_inventory_attacker"
     cleanup_inventory_attacker = role_cleanup(db, inventory_attacker)
     db.run(f"""DROP SCHEMA IF EXISTS jt_inventory_untrusted CASCADE;
+DROP SCHEMA IF EXISTS jt_inventory_managed CASCADE;
 CREATE TABLE jt_provenance.inventory_protected(value text);
 CREATE ROLE {inventory_attacker} NOLOGIN;
 CREATE SCHEMA jt_inventory_untrusted AUTHORIZATION {inventory_attacker};
+CREATE SCHEMA jt_inventory_managed;
+CREATE TABLE jt_inventory_managed.root(id integer PRIMARY KEY,value text);
+INSERT INTO jt_inventory_managed.root VALUES(1,'one');
+GRANT INSERT ON jt_provenance.inventory_protected TO {inventory_attacker};
 SET ROLE {inventory_attacker};
 CREATE VIEW jt_inventory_untrusted.forged AS SELECT 1 AS value;
 COMMENT ON VIEW jt_inventory_untrusted.forged IS
@@ -1771,14 +1798,77 @@ BEGIN
 END
 $attack$;
 RESET ROLE;""")
+    managed_inventory_spec = {
+        "root": {"table": '"jt_inventory_managed"."root"', "key": "id",
+                 "fields": {"value": "value"}, "update": True}}
+    create_view(db, "jt_inventory_managed.documents", managed_inventory_spec)
+    db.run("""CREATE OR REPLACE FUNCTION jt_inventory_managed.documents__check()
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,pg_temp AS $attack$
+BEGIN
+  INSERT INTO jt_provenance.inventory_protected VALUES('managed callback executed');
+  RETURN '{"status":"FORGED"}'::jsonb;
+END
+$attack$;""")
+    managed_inventory = db.value("""SELECT health_status
+      FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_managed.documents';""")
+    managed_quoted_inventory = db.value("""SET quote_all_identifiers=on;
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE replace(view_name,'"','')='jt_inventory_managed.documents';""")
+    managed_comment = db.value("""SELECT obj_description(
+      'jt_inventory_managed.documents'::regclass,'pg_class');""")
+    metadata_prefix = "pg_jsontailor metadata v1: "
+    managed_metadata = json.loads(managed_comment[len(metadata_prefix):])
+    malformed_provenance_states = []
+    malformed_variants = []
+    empty_bindings = json.loads(json.dumps(managed_metadata))
+    empty_bindings["health"]["bindings"] = {}
+    malformed_variants.append(empty_bindings)
+    extra_role = json.loads(json.dumps(managed_metadata))
+    extra_role["health"]["bindings"]["extra"] = \
+        extra_role["health"]["bindings"]["root"]
+    malformed_variants.append(extra_role)
+    missing_column = json.loads(json.dumps(managed_metadata))
+    missing_column["health"]["bindings"]["root"]["columns"] = ["id"]
+    missing_column["health"]["bindings"]["root"]["ordinals"] = [1]
+    malformed_variants.append(missing_column)
+    wrong_binding = json.loads(json.dumps(managed_metadata))
+    wrong_binding["health"]["bindings"]["root"]["binding_view"] = \
+        "jt_provenance.documents__root_binding"
+    malformed_variants.append(wrong_binding)
+    for malformed_metadata in malformed_variants:
+        db.run("COMMENT ON VIEW jt_inventory_managed.documents IS "
+               + quote(metadata_prefix + json.dumps(malformed_metadata,
+                                                     separators=(",", ":"))) + ";")
+        malformed_provenance_states.append(db.value("""SELECT health_status
+          FROM jsontailor.duality_view_inventory()
+          WHERE view_name='jt_inventory_managed.documents';"""))
+    db.run("COMMENT ON VIEW jt_inventory_managed.documents IS "
+           + quote(managed_comment) + ";")
     forged_inventory = db.value("""SELECT health_status||':'||health_detail
       FROM jsontailor.duality_view_inventory()
       WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_role_inventory = db.value(f"""SET ROLE {inventory_attacker};
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
+    forged_session_inventory = db.value(f"""SET SESSION AUTHORIZATION {inventory_attacker};
+      SELECT health_status FROM jsontailor.duality_view_inventory()
+      WHERE view_name='jt_inventory_untrusted.forged';""")
     forged_effects = db.value("SELECT count(*) FROM jt_provenance.inventory_protected;")
     record("inventory never executes an untrusted owner-supplied health callback",
-           forged_inventory.startswith("SKIPPED:") and forged_effects == "0",
-           f"inventory={forged_inventory},side_effects={forged_effects}")
-    db.run("DROP SCHEMA jt_inventory_untrusted CASCADE;")
+           managed_inventory == "OK" and managed_quoted_inventory == "OK"
+           and forged_inventory.startswith("SKIPPED:")
+           and forged_role_inventory == "SKIPPED"
+           and forged_session_inventory == "SKIPPED"
+           and malformed_provenance_states == ["PT422"] * 4
+           and forged_effects == "0",
+           f"managed={managed_inventory}/{managed_quoted_inventory},inventory={forged_inventory},"
+           f"role={forged_role_inventory},session={forged_session_inventory},"
+           f"provenance={malformed_provenance_states},"
+           f"side_effects={forged_effects}")
+    db.run("DROP SCHEMA jt_inventory_untrusted CASCADE; "
+           "DROP SCHEMA jt_inventory_managed CASCADE;")
     cleanup_inventory_attacker()
 
     share_role = "jt_share_lock_client"
