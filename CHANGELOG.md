@@ -45,5 +45,6 @@ regardless of commit-message wording.
 - Prevented lifecycle inventory from executing health callbacks owned by another role with the inventory caller's privileges.
 - Preserved column ACLs during regeneration and rejected unmanaged view triggers or rules instead of silently dropping them.
 - Made UTC `timestamptz` JSON and ETag encoding injective and reversible across BC and AD eras.
+- Corrected and tested the least-privilege contract for locking ETag-included referenced objects.
 
 This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.

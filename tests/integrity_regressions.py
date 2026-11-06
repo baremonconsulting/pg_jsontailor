@@ -1313,6 +1313,76 @@ RESET ROLE;""")
     db.run("DROP SCHEMA jt_inventory_untrusted CASCADE;")
     cleanup_inventory_attacker()
 
+    share_role = "jt_share_lock_client"
+    cleanup_share_role = role_cleanup(db, share_role)
+    db.run(f"""DROP SCHEMA IF EXISTS jt_share_lock CASCADE;
+CREATE SCHEMA jt_share_lock;
+CREATE TABLE jt_share_lock.refs(id integer PRIMARY KEY, label text NOT NULL);
+CREATE TABLE jt_share_lock.roots(
+  id integer PRIMARY KEY,
+  label text NOT NULL,
+  ref_id integer NOT NULL REFERENCES jt_share_lock.refs(id));
+INSERT INTO jt_share_lock.refs VALUES (7,'reference');
+INSERT INTO jt_share_lock.roots VALUES (1,'direct',7),(2,'rpc',7);
+CREATE ROLE {share_role} NOLOGIN;""")
+    share_spec = {
+        "root": {"table": "jt_share_lock.roots", "key": "id",
+                 "fields": {"label": "label"}, "insert": True,
+                 "update": True, "delete": True},
+        "object": {"name": "reference", "table": "jt_share_lock.refs", "key": "id",
+                   "root_fk": "ref_id", "fields": {"id": "id", "label": "label"},
+                   "etag": True},
+    }
+    create_view(db, "jt_share_lock.documents", share_spec)
+    db.run(f"""GRANT USAGE ON SCHEMA jt_share_lock TO {share_role};
+GRANT SELECT, UPDATE, DELETE ON jt_share_lock.roots TO {share_role};
+GRANT SELECT ON jt_share_lock.refs TO {share_role};
+GRANT SELECT, DELETE ON jt_share_lock.documents TO {share_role};
+GRANT EXECUTE ON FUNCTION jt_share_lock.documents__delete_document(integer,text)
+  TO {share_role};""")
+    direct_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
+    rpc_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=2;")
+    readable = db.value(
+        f"SET ROLE {share_role}; SELECT count(*) FROM jt_share_lock.documents;")
+    denied_direct = db.run(
+        f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
+        f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)};", False)
+    denied_rpc = db.run(
+        f"SET ROLE {share_role}; SELECT jt_share_lock.documents__delete_document(2,"
+        f"{quote(rpc_etag)});", False)
+    preserved_before_grant = db.value(
+        "SELECT count(*)::text||':'||(SELECT count(*) FROM jt_share_lock.refs)::text "
+        "FROM jt_share_lock.roots;")
+    db.run(f"GRANT UPDATE(label) ON jt_share_lock.refs TO {share_role};")
+    privilege_shape = db.value(f"""SELECT
+      has_table_privilege('{share_role}','jt_share_lock.refs','UPDATE')::text||':'||
+      has_column_privilege('{share_role}','jt_share_lock.refs','id','UPDATE')::text||':'||
+      has_column_privilege('{share_role}','jt_share_lock.refs','label','UPDATE')::text;""")
+    allowed_direct = db.run(
+        f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
+        f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)} RETURNING _id;", False)
+    allowed_rpc = db.run(
+        f"SET ROLE {share_role}; SELECT jt_share_lock.documents__delete_document(2,"
+        f"{quote(rpc_etag)})->>'label';", False)
+    final_state = db.value("""SELECT count(*)::text||':'||
+      (SELECT count(*) FROM jt_share_lock.refs)::text||':'||
+      (SELECT label FROM jt_share_lock.refs WHERE id=7)
+      FROM jt_share_lock.roots;""")
+    record("FOR SHARE least privilege is enforced for direct and RPC delete",
+           readable == "2" and db.state(denied_direct) == "42501"
+           and db.state(denied_rpc) == "42501" and preserved_before_grant == "2:1"
+           and privilege_shape == "false:false:true"
+           and allowed_direct.returncode == 0 and "1" in allowed_direct.stdout.splitlines()
+           and allowed_rpc.returncode == 0 and "rpc" in allowed_rpc.stdout.splitlines()
+           and final_state == "0:1:reference",
+           f"read={readable},denied={db.state(denied_direct)}/{db.state(denied_rpc)},"
+           f"preserved={preserved_before_grant},grants={privilege_shape},"
+           f"allowed={allowed_direct.returncode}/{allowed_rpc.returncode},final={final_state}")
+    db.run("DROP SCHEMA jt_share_lock CASCADE;")
+    cleanup_share_role()
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     for row in results:
