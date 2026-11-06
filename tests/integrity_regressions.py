@@ -1296,6 +1296,10 @@ SELECT n,'row-'||n::text FROM generate_series(1,25)n;""")
     fixed_lock_order = db.value("""SELECT position(
       'LOCK TABLE jt_integrity.root,jt_integrity.ref,jt_integrity.child IN ACCESS SHARE MODE'
       IN pg_get_functiondef('jt_integrity.documents__guard()'::regprocedure))>0;""")
+    fixed_rpc_lock_order = db.value("""SELECT position(
+      'LOCK TABLE jt_integrity.root,jt_integrity.ref,jt_integrity.child IN ACCESS SHARE MODE'
+      IN pg_get_functiondef(
+        'jt_integrity.documents__delete_document(numeric,text)'::regprocedure))>0;""")
     db.run("""DROP SCHEMA IF EXISTS jt_guard_source CASCADE;
 DROP SCHEMA IF EXISTS jt_guard_api CASCADE;
 CREATE SCHEMA jt_guard_source; CREATE SCHEMA jt_guard_api;
@@ -1308,13 +1312,51 @@ INSERT INTO jt_guard_source.root VALUES(1,'one');""")
     missing_schema_guard = db.run(
         "INSERT INTO jt_guard_api.documents(data) "
         "VALUES(jsonb_build_object('_id',2,'label','two'));", False)
+    missing_schema_rpc = db.run(
+        "SELECT jt_guard_api.documents__delete_document(1,'stale');", False)
     db.run("ALTER SCHEMA jt_guard_source_old RENAME TO jt_guard_source;")
     record("catalog guards run once per statement rather than once per document",
            guard_triggers.get("documents__guard_update") == 1
            and guard_triggers.get("documents__update") == 25
-           and fixed_lock_order == "t" and db.state(missing_schema_guard) == "PT422",
-           f"trigger_calls={guard_triggers},fixed_lock_order={fixed_lock_order},"
-           f"missing_schema={db.state(missing_schema_guard)}")
+           and fixed_lock_order == "t" and fixed_rpc_lock_order == "t"
+           and db.state(missing_schema_guard) == "PT422"
+           and db.state(missing_schema_rpc) == "PT422",
+           f"trigger_calls={guard_triggers},fixed_lock_order="
+           f"{fixed_lock_order}/{fixed_rpc_lock_order},missing_schema="
+           f"{db.state(missing_schema_guard)}/{db.state(missing_schema_rpc)}")
+
+    db.run("""DROP SCHEMA IF EXISTS jt_rpc_race CASCADE;
+CREATE SCHEMA jt_rpc_race;
+CREATE TABLE jt_rpc_race.root(id integer PRIMARY KEY,label text);
+INSERT INTO jt_rpc_race.root VALUES(1,'original');""")
+    rpc_race_spec = {"root": {"table": "jt_rpc_race.root", "key": "id",
+                                "fields": {"label": "label"}, "delete": True}}
+    create_view(db, "jt_rpc_race.documents", rpc_race_spec)
+    rpc_race_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_rpc_race.documents WHERE _id=1;")
+    ddl_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True)
+    assert ddl_writer.stdin
+    ddl_writer.stdin.write("BEGIN;ALTER TABLE jt_rpc_race.root RENAME TO root_old;"
+                           "CREATE TABLE jt_rpc_race.root("
+                           "LIKE jt_rpc_race.root_old INCLUDING ALL);"
+                           "INSERT INTO jt_rpc_race.root VALUES(1,'replacement');"
+                           "SELECT pg_sleep(1);COMMIT;")
+    ddl_writer.stdin.close(); time.sleep(.2)
+    started_rpc_race = time.monotonic()
+    rpc_race = db.run("SELECT jt_rpc_race.documents__delete_document(1,"
+                      + quote(rpc_race_etag) + ");", False)
+    rpc_race_wait = time.monotonic() - started_rpc_race
+    ddl_writer.wait(timeout=10)
+    rpc_race_rows = db.value("""SELECT
+      (SELECT count(*) FROM jt_rpc_race.root_old)::text||':'||
+      (SELECT count(*) FROM jt_rpc_race.root)::text;""")
+    record("delete RPC stabilizes source identity before binding validation",
+           db.state(rpc_race) == "PT422" and rpc_race_wait > .6
+           and rpc_race_rows == "1:1",
+           f"state={db.state(rpc_race)},wait={rpc_race_wait:.3f},"
+           f"rows={rpc_race_rows}")
 
     db.run("""DROP SCHEMA IF EXISTS jt_provenance CASCADE; CREATE SCHEMA jt_provenance;
 CREATE TABLE jt_provenance.root(id integer PRIMARY KEY,label text);

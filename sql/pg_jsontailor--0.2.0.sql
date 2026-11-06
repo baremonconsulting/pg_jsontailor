@@ -18,7 +18,7 @@ DECLARE
     root_pairs text := ''; object_pairs text := ''; array_pairs text := '';
     object_expr text; object_lookup text; array_expr text; order_expr text; payload text; etag_payload text; json_expr text; root_key_json_expr text;
     object_key_field text; object_key_type text; array_key_field text;
-    body text; delete_body text; check_body text; guard_body text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; guard_lock_targets text[]; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb; health_bindings jsonb := '{}'::jsonb;
+    body text; delete_body text; check_body text; guard_body text; source_lock text; ddl text; binding_ddl text := ''; names text[]; binding_columns text[]; binding_ordinals integer[]; binding_pk_name text; relation_checks text := ''; guard_checks text; guard_lock_targets text[]; runtime_enforced_clause text; root_key_type text; root_touch_column text; generator_hash text; metadata jsonb; health_bindings jsonb := '{}'::jsonb;
 BEGIN
     IF view_name IS NULL OR spec IS NULL THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='view_name and spec must not be SQL NULL';
@@ -206,7 +206,8 @@ BEGIN
     guard_lock_targets:=ARRAY[format('%I.%I',root_schema,root_table)];
     IF cfg?'object' THEN guard_lock_targets:=array_append(guard_lock_targets,format('%I.%I',object_schema,object_table));END IF;
     IF cfg?'array' THEN guard_lock_targets:=array_append(guard_lock_targets,format('%I.%I',array_schema,array_table));END IF;
-    guard_body:=format('BEGIN BEGIN LOCK TABLE %s IN ACCESS SHARE MODE; EXCEPTION WHEN undefined_table OR invalid_schema_name THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END; %s RETURN NULL; END',array_to_string(guard_lock_targets,','),guard_checks);
+    source_lock:=format('BEGIN LOCK TABLE %s IN ACCESS SHARE MODE; EXCEPTION WHEN undefined_table OR invalid_schema_name THEN RAISE EXCEPTION USING ERRCODE=''PT422'',MESSAGE=''source relation role changed; regenerate the duality view'';END;',array_to_string(guard_lock_targets,','));
+    guard_body:=format('BEGIN %s %s RETURN NULL; END',source_lock,guard_checks);
     relation_checks:='';
     ddl:=binding_ddl||format('CREATE VIEW %s WITH (security_invoker=true) AS SELECT r.%I AS _id,d.payload||jsonb_build_object(''_metadata'',jsonb_build_object(''etag'',upper(encode(substr(sha256(convert_to((%s)::text,''UTF8'')),1,16),''hex'')))) AS data FROM %I.%I r CROSS JOIN LATERAL (SELECT %s AS payload OFFSET 0)d;',qview,cfg#>>'{root,key}',etag_payload,root_schema,root_table,payload);
 
@@ -573,6 +574,7 @@ $body$,
 DECLARE cfg constant jsonb:=%L::jsonb; cur jsonb; n int; expected int; changed boolean;
 BEGIN
   %s
+  %s
   IF expected_etag IS NULL THEN RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='expected_etag is required';END IF;
   IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
   n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO n USING expected_id;
@@ -595,7 +597,7 @@ BEGIN
   IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;
   RETURN cur;
 END
-$delete_body$,cfg,guard_checks,qview);
+$delete_body$,cfg,source_lock,guard_checks,qview);
     ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qguard,guard_body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I BEFORE INSERT ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_insert',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE UPDATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_update',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_delete',qview,qguard)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
     RETURN ddl;
 END

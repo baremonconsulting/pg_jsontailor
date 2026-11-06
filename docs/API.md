@@ -99,6 +99,12 @@ Generated objects have no runtime dependency on the `jsontailor` schema. Existin
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
 
+Statement writes and the generated `__delete_document` helper take fixed-order
+`ACCESS SHARE` locks on configured source relations before validating their
+bindings. These locks stabilize relation identity against DDL that requires
+`ACCESS EXCLUSIVE`; they do not replace row locks, RLS or a write-free reviewed
+schema-migration window.
+
 ## Inventory, health and regeneration
 
 `duality_view_inventory()` returns every managed view and its recorded and

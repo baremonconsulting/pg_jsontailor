@@ -54,7 +54,7 @@ retry conditions when other application statements use conflicting lock orders.
 
 ## Delete
 
-Call the generated `<view>__delete_document(expected_id, expected_etag)` function when an explicit-argument API is preferable. It locks the configured document state, reads it back after acquiring the lock, verifies the caller's ETag and then removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
+Call the generated `<view>__delete_document(expected_id, expected_etag)` function when an explicit-argument API is preferable. Before validating bindings, it takes fixed-order `ACCESS SHARE` locks on every configured source relation so DDL requiring `ACCESS EXCLUSIVE` cannot replace a source between validation and dynamic DML. It then locks the configured document rows, reads the document back, verifies the caller's ETag and removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
 
 Direct SQL deletion is supported when the caller filters by both identity and ETag:
 

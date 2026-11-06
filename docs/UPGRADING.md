@@ -12,6 +12,12 @@ The current replacement path stabilizes ETag-included referenced objects with
 `SELECT` plus `UPDATE` on at least one referenced-table column and that RLS
 permits the required locks. A column-level `UPDATE` grant is sufficient.
 
+Statement writes and explicit `__delete_document` calls also hold fixed-order
+`ACCESS SHARE` locks on all configured source relations. Schema migrations that
+need `ACCESS EXCLUSIVE` wait for those transactions; use a reviewed write-free
+window and deployment-appropriate `lock_timeout`. Missing source relations are
+reported as `PT422`. Regenerate existing helpers to obtain this behavior.
+
 Any view generated from an untagged 0.2.0 development snapshot, including an
 earlier public `main` commit, must be regenerated from the eventual tagged
 release before it is treated as a pilot deployment.
