@@ -73,10 +73,12 @@ Mapped domains, enums, `json`/`jsonb`, arrays and other types are not
 supported. An unmapped column may use any type supported by its source table,
 including a domain, because the generated write projection omits it.
 
-`timestamptz` values are emitted as UTC strings in the fixed form
-`YYYY-MM-DDTHH:MM:SS.ffffffZ`. Input strings may contain any PostgreSQL-accepted
+Finite AD `timestamptz` values are emitted as UTC strings in the fixed form
+`YYYY-MM-DDTHH:MM:SS.ffffffZ`; finite BC values append the PostgreSQL era suffix
+` BC`. Input strings may contain any PostgreSQL-accepted
 time-zone offset; reads normalize the represented instant to UTC. This makes
-documents and ETags independent of the session `TimeZone` setting.
+documents and ETags independent of the session `TimeZone` setting while keeping
+BC and AD instants distinct and reversible.
 
 ## Generated objects
 

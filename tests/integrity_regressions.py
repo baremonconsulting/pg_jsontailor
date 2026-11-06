@@ -1085,6 +1085,75 @@ WHERE _id='2026-06-01T10:00:00Z'::timestamptz;""", False)
            f"value={normalized_value},key={key_insert.returncode}/{key_update.returncode}/"
            f"{normalized_key}")
 
+    db.run("""CREATE TABLE jt_timestamptz.bc_reference(
+ id timestamptz PRIMARY KEY, observed_at timestamptz);
+CREATE TABLE jt_timestamptz.bc_root(
+ id timestamptz PRIMARY KEY, observed_at timestamptz,
+ reference_id timestamptz REFERENCES jt_timestamptz.bc_reference(id));
+CREATE TABLE jt_timestamptz.bc_child(
+ id timestamptz PRIMARY KEY,
+ parent timestamptz REFERENCES jt_timestamptz.bc_root(id),
+ observed_at timestamptz);
+INSERT INTO jt_timestamptz.bc_reference VALUES
+ ('0002-02-03 04:05:06.123456+00 BC','0003-03-04 05:06:07.234567+00 BC'),
+ ('0002-02-03 04:05:06.123456+00 AD','0003-03-04 05:06:07.234567+00 AD');
+INSERT INTO jt_timestamptz.bc_root VALUES
+ ('0001-01-01 00:00:00+00 BC','0004-04-05 06:07:08.345678+00 BC','0002-02-03 04:05:06.123456+00 BC'),
+ ('0001-01-01 00:00:00+00 AD','0004-04-05 06:07:08.345678+00 AD','0002-02-03 04:05:06.123456+00 AD');
+INSERT INTO jt_timestamptz.bc_child VALUES
+ ('0005-05-06 07:08:09.456789+00 BC','0001-01-01 00:00:00+00 BC','0006-06-07 08:09:10.567890+00 BC'),
+ ('0005-05-06 07:08:09.456789+00 AD','0001-01-01 00:00:00+00 AD','0006-06-07 08:09:10.567890+00 AD');""")
+    bc_spec = {
+        "root": {"table": "jt_timestamptz.bc_root", "key": "id",
+                 "fields": {"observedAt": "observed_at"}, "update": True},
+        "object": {"name": "reference", "table": "jt_timestamptz.bc_reference",
+                   "key": "id", "root_fk": "reference_id",
+                   "fields": {"id": "id", "observedAt": "observed_at"}},
+        "array": {"name": "items", "table": "jt_timestamptz.bc_child", "key": "id",
+                  "parent_fk": "parent", "fields": {"id": "id", "observedAt": "observed_at"},
+                  "update": True}}
+    create_view(db, "jt_timestamptz.bc_documents", bc_spec)
+    bc_document = json.loads(db.value("""SET TimeZone='Asia/Kathmandu';
+SELECT data::text FROM jt_timestamptz.bc_documents
+WHERE _id='0001-01-01 00:00:00+00 BC'::timestamptz;"""))
+    ad_document = json.loads(db.value("""SET TimeZone='America/New_York';
+SELECT data::text FROM jt_timestamptz.bc_documents
+WHERE _id='0001-01-01 00:00:00+00 AD'::timestamptz;"""))
+    changed_bc_document = json.loads(json.dumps(bc_document))
+    changed_bc_document["observedAt"] = "0007-07-08T09:10:11.123456Z BC"
+    changed_bc_document["items"][0]["observedAt"] = "0008-08-09T10:11:12.234567Z BC"
+    bc_roundtrip = db.run("SET TimeZone='Europe/Prague'; UPDATE jt_timestamptz.bc_documents "
+                          "SET data=" + quote(json.dumps(changed_bc_document)) +
+                          "::jsonb WHERE _id='0001-01-01 00:00:00+00 BC'::timestamptz "
+                          "RETURNING data::text;", False)
+    returned_bc_line = next((line for line in bc_roundtrip.stdout.splitlines()
+                             if line.startswith("{")), "")
+    returned_bc = (json.loads(returned_bc_line)
+                   if bc_roundtrip.returncode == 0 and returned_bc_line else {})
+    stored_bc = db.value("""SELECT
+      (r.observed_at='0007-07-08 09:10:11.123456+00 BC'::timestamptz)::text||':'||
+      (c.observed_at='0008-08-09 10:11:12.234567+00 BC'::timestamptz)::text
+      FROM jt_timestamptz.bc_root r JOIN jt_timestamptz.bc_child c ON c.parent=r.id
+      WHERE r.id='0001-01-01 00:00:00+00 BC'::timestamptz;""")
+    bc_values = [bc_document["_id"], bc_document["observedAt"],
+                 bc_document["reference"]["id"], bc_document["reference"]["observedAt"],
+                 bc_document["items"][0]["id"], bc_document["items"][0]["observedAt"]]
+    ad_values = [ad_document["_id"], ad_document["observedAt"],
+                 ad_document["reference"]["id"], ad_document["reference"]["observedAt"],
+                 ad_document["items"][0]["id"], ad_document["items"][0]["observedAt"]]
+    record("BC and AD timestamptz encoding is injective and reversible across mapped paths",
+           all(value.endswith(" BC") for value in bc_values)
+           and all(not value.endswith(" BC") for value in ad_values)
+           and bc_document["_metadata"]["etag"] != ad_document["_metadata"]["etag"]
+           and bc_roundtrip.returncode == 0 and stored_bc == "true:true"
+           and returned_bc.get("_id", "").endswith(" BC")
+           and returned_bc.get("reference", {}).get("id", "").endswith(" BC")
+           and returned_bc.get("items", [{}])[0].get("id", "").endswith(" BC"),
+           f"bc={bc_values},ad={ad_values},etags_distinct="
+           f"{bc_document['_metadata']['etag'] != ad_document['_metadata']['etag']},"
+           f"roundtrip={bc_roundtrip.returncode}/{db.state(bc_roundtrip)}/{stored_bc}/"
+           f"{bc_roundtrip.stderr[-300:]}")
+
     db.run("""DROP SCHEMA IF EXISTS jt_statement_guard CASCADE;
 CREATE SCHEMA jt_statement_guard;
 CREATE TABLE jt_statement_guard.root(id integer PRIMARY KEY,label text);

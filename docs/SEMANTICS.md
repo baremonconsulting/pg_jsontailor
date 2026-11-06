@@ -26,8 +26,9 @@ an array element that cannot be routed to a partition is rejected with
 `PT422`. Other relational constraints retain their native PostgreSQL error.
 
 Timestamp-with-time-zone values are rendered in UTC with a `Z` suffix and six
-fractional-second digits. Their document representation and ETag therefore do
-not change with the session `TimeZone`.
+fractional-second digits. Finite BC values additionally carry the ` BC` era
+suffix. Their document representation and ETag therefore do not change with the
+session `TimeZone`, and BC and AD values cannot collapse to the same document.
 
 ## Replacement
 
