@@ -190,6 +190,10 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/type-results.jsonl"
+          python3 tests/document_shape_matrix.py \
+            --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --output "$RUNNER_TEMP/shape-results.jsonl"
           python3 tools/verify_jsonl_results.py \
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
@@ -197,7 +201,8 @@ jobs:
             "$RUNNER_TEMP/repeatability-results.jsonl" \
             "$RUNNER_TEMP/subtransaction-results.jsonl" \
             "$RUNNER_TEMP/merge-results.jsonl" \
-            "$RUNNER_TEMP/type-results.jsonl"
+            "$RUNNER_TEMP/type-results.jsonl" \
+            "$RUNNER_TEMP/shape-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 
       - name: Verify custom and plain dump restore
@@ -222,6 +227,7 @@ jobs:
             --result "subtransaction=$RUNNER_TEMP/subtransaction-results.jsonl" \
             --result "merge=$RUNNER_TEMP/merge-results.jsonl" \
             --result "types=$RUNNER_TEMP/type-results.jsonl" \
+            --result "shapes=$RUNNER_TEMP/shape-results.jsonl" \
             --passed-suite installcheck \
             --passed-suite dump_restore \
             --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"

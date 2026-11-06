@@ -29,13 +29,15 @@ EXPECTED_CLAIMS = {
     "PGJT-40/CLAIM-BENCHMARK",
     "PGJT-40/CLAIM-POSTGREST",
     "PGJT-44/CLAIM-TYPE-SEMANTICS",
+    "PGJT-45/CLAIM-DOCUMENT-SHAPES",
+    "PGJT-45/CLAIM-OPERATION-SEMANTICS",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "65809ebeb6bbb175d5d773a3a03c27c80c7c059e8ddf46c53cf32804ccef1178",
-    "claims": "ae06b747068764096a48a6eb53d3da2e37df0b7fe5aa372d64531293937af35e",
+    "requirements": "d914017acccda38a8b3983648083977b8fc33615152ef2104306bb32b68e179d",
+    "claims": "2f59ce3c204a8f365d5a01694565bb32109440e6c54e90139770a6c4b515e547",
     "manual_evidence": "6b9dea547968a760dff9d8c1bce174e7cef7aae3d6bc25e379756cbb756d7d20",
-    "supplemental_evidence": "e0c31de5f6046e4c9e48a7b859aa9d9b2616d76d766dbbfde74a2ffa496d7a86",
-    "runtime_evidence": "65efc6029f5b76202ebca8746185a9458da6ac06a1d0f6cae5b4e058336d31a4",
+    "supplemental_evidence": "32321df82ea1a41e62f89dc6661ad5facb57455a454945e3409e5e7d02ffdd65",
+    "runtime_evidence": "ebc47a7063cea42ca25b34e0e986be09c903ecfb75814f55afe861d2d67fce35",
 }
 
 

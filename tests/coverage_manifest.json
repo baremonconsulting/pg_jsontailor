@@ -38,7 +38,7 @@
     {"jira":"PGJT-35","test_id":"PGJT-35/owner-acl-regeneration","kind":"functional","file":"tests/integrity_regressions.py","marker":"regeneration fails closed for non-default owner ACL state","postgresql":["17","18","19"]},
     {"jira":"PGJT-36","test_id":"PGJT-36/final-release-evidence","kind":"policy","file":"tools/verify_release_candidate.py","marker":"EXACT_SHA_CHECKS","postgresql":["17","18","19"]},
     {"jira":"PGJT-37","test_id":"PGJT-37/delete-rpc-source-identity","kind":"isolation","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-37/delete-rpc-source-identity","postgresql":["17","18","19"]},
-    {"jira":"PGJT-38","test_id":"PGJT-38/deferrable-child-key-race","kind":"partial","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-38/deferrable-child-key-race","postgresql":["17","18","19"],"gap":"The DEFERRABLE MERGE operation matrix is tracked by PGJT-45."}
+    {"jira":"PGJT-38","test_id":"PGJT-38/deferrable-child-key-race","kind":"isolation","file":"tests/specs/pgjt_43_concurrency.spec","marker":"PGJT-38/deferrable-child-key-race","postgresql":["17","18","19"]}
   ],
   "claims": [
     {"claim_id":"PGJT-40/CLAIM-SUPPORTED-VERSIONS","file":"README.md","marker":"controlled pilots on PostgreSQL 17, 18 and 19","tests":["PGJT-18/dump-restore-release-gate","PGJT-36/final-release-evidence"]},
@@ -52,7 +52,9 @@
     {"claim_id":"PGJT-40/CLAIM-DUMP-RESTORE","file":"docs/UPGRADING.md","marker":"Dump and restore","tests":["PGJT-18/dump-restore-release-gate"]},
     {"claim_id":"PGJT-40/CLAIM-BENCHMARK","file":"docs/BENCHMARKS.md","marker":"7,200 measured executions and 720 warm-ups","tests":["PGJT-26/cross-version-benchmark","PGJT-36/final-release-evidence"]},
     {"claim_id":"PGJT-40/CLAIM-POSTGREST","file":"README.md","marker":"PostgREST scenarios","tests":["PGJT-40/postgrest-manual-scenario"],"gap":"Automated CI integration is tracked by PGJT-48."},
-    {"claim_id":"PGJT-44/CLAIM-TYPE-SEMANTICS","file":"docs/SEMANTICS.md","marker":"Mapped JSON values must use the JSON type expected by the target PostgreSQL","tests":["PGJT-44/field-operation-matrix","PGJT-44/invalid-values-atomic","PGJT-44/numeric-timestamptz-boundaries","PGJT-44/key-position-matrix"]}
+    {"claim_id":"PGJT-44/CLAIM-TYPE-SEMANTICS","file":"docs/SEMANTICS.md","marker":"Mapped JSON values must use the JSON type expected by the target PostgreSQL","tests":["PGJT-44/field-operation-matrix","PGJT-44/invalid-values-atomic","PGJT-44/numeric-timestamptz-boundaries","PGJT-44/key-position-matrix"]},
+    {"claim_id":"PGJT-45/CLAIM-DOCUMENT-SHAPES","file":"docs/API.md","marker":"`root` is required. `object` and `array` are optional.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/identity-default-matrix"]},
+    {"claim_id":"PGJT-45/CLAIM-OPERATION-SEMANTICS","file":"docs/SEMANTICS.md","marker":"An update is a complete document replacement, not a partial patch.","tests":["PGJT-45/shape-operation-matrix","PGJT-45/operation-flags","PGJT-45/object-etag-modes","PGJT-45/failure-atomicity","PGJT-45/deferrable-merge-matrix"]}
   ],
   "manual_evidence": [
     {"test_id":"PGJT-40/postgrest-manual-scenario","file":"tests/run_postgrest.py","marker":"Run mandatory PostgREST test 13","status":"manual","tracking_jira":"PGJT-48"}
@@ -66,7 +68,13 @@
     {"test_id":"PGJT-44/field-operation-matrix","file":"tests/mapped_type_matrix.py","marker":"PGJT-44/field-operation-matrix"},
     {"test_id":"PGJT-44/invalid-values-atomic","file":"tests/mapped_type_matrix.py","marker":"PGJT-44/invalid-values-atomic"},
     {"test_id":"PGJT-44/numeric-timestamptz-boundaries","file":"tests/mapped_type_matrix.py","marker":"PGJT-44/numeric-timestamptz-boundaries"},
-    {"test_id":"PGJT-44/key-position-matrix","file":"tests/mapped_type_matrix.py","marker":"PGJT-44/key-position-matrix"}
+    {"test_id":"PGJT-44/key-position-matrix","file":"tests/mapped_type_matrix.py","marker":"PGJT-44/key-position-matrix"},
+    {"test_id":"PGJT-45/shape-operation-matrix","file":"tests/document_shape_matrix.py","marker":"PGJT-45/shape-operation-matrix"},
+    {"test_id":"PGJT-45/operation-flags","file":"tests/document_shape_matrix.py","marker":"PGJT-45/operation-flags"},
+    {"test_id":"PGJT-45/object-etag-modes","file":"tests/document_shape_matrix.py","marker":"PGJT-45/object-etag-modes"},
+    {"test_id":"PGJT-45/failure-atomicity","file":"tests/document_shape_matrix.py","marker":"PGJT-45/failure-atomicity"},
+    {"test_id":"PGJT-45/identity-default-matrix","file":"tests/document_shape_matrix.py","marker":"PGJT-45/identity-default-matrix"},
+    {"test_id":"PGJT-45/deferrable-merge-matrix","file":"tests/document_shape_matrix.py","marker":"PGJT-45/deferrable-merge-matrix"}
   ],
   "runtime_evidence": [
     {"test_id":"PGJT-2/null-parent-ownership","scope":"postgresql","suite":"integrity","field":"name","value":"NULL-parent child identities are rejected as foreign atomically"},
@@ -114,6 +122,12 @@
     {"test_id":"PGJT-44/field-operation-matrix","scope":"postgresql","suite":"types","field":"name","value":"PGJT-44/field-operation-matrix"},
     {"test_id":"PGJT-44/invalid-values-atomic","scope":"postgresql","suite":"types","field":"name","value":"PGJT-44/invalid-values-atomic"},
     {"test_id":"PGJT-44/numeric-timestamptz-boundaries","scope":"postgresql","suite":"types","field":"name","value":"PGJT-44/numeric-timestamptz-boundaries"},
-    {"test_id":"PGJT-44/key-position-matrix","scope":"postgresql","suite":"types","field":"name","value":"PGJT-44/key-position-matrix"}
+    {"test_id":"PGJT-44/key-position-matrix","scope":"postgresql","suite":"types","field":"name","value":"PGJT-44/key-position-matrix"},
+    {"test_id":"PGJT-45/shape-operation-matrix","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/shape-operation-matrix"},
+    {"test_id":"PGJT-45/operation-flags","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/operation-flags"},
+    {"test_id":"PGJT-45/object-etag-modes","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/object-etag-modes"},
+    {"test_id":"PGJT-45/failure-atomicity","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/failure-atomicity"},
+    {"test_id":"PGJT-45/identity-default-matrix","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/identity-default-matrix"},
+    {"test_id":"PGJT-45/deferrable-merge-matrix","scope":"postgresql","suite":"shapes","field":"name","value":"PGJT-45/deferrable-merge-matrix"}
   ]
 }
