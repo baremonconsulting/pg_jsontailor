@@ -43,6 +43,15 @@ For a non-`GENERATED ALWAYS` child key, a supplied key identifies an existing el
 
 When the client ETag is included in `WHERE`, an initially stale token selects no row and returns `UPDATE 0`. If a change occurs after row selection while the trigger waits for locks, the trigger's post-lock comparison returns `PT412`.
 
+For an ETag-checked referenced object, replacement locks the root first, then
+locks the visible current and requested referenced-object rows in deterministic
+key order with `FOR SHARE`, and only then locks children and reads the document
+back for the final ETag comparison. The locks stabilize both the old reference
+and a newly selected reference through `RETURNING`. Mappings with
+`object.etag=false` retain their NOCHECK behavior and do not take these object
+row locks. PostgreSQL deadlock or serialization errors remain whole-transaction
+retry conditions when other application statements use conflicting lock orders.
+
 ## Delete
 
 Call the generated `<view>__delete_document(expected_id, expected_etag)` function when an explicit-argument API is preferable. It locks the configured document state, reads it back after acquiring the lock, verifies the caller's ETag and then removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.

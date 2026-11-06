@@ -1873,6 +1873,8 @@ $attack$;""")
 
     share_role = "jt_share_lock_client"
     cleanup_share_role = role_cleanup(db, share_role)
+    nocheck_role = "jt_share_nocheck_client"
+    cleanup_nocheck_role = role_cleanup(db, nocheck_role)
     db.run(f"""DROP SCHEMA IF EXISTS jt_share_lock CASCADE;
 CREATE SCHEMA jt_share_lock;
 CREATE TABLE jt_share_lock.refs(id integer PRIMARY KEY, label text NOT NULL);
@@ -1883,6 +1885,7 @@ CREATE TABLE jt_share_lock.roots(
 INSERT INTO jt_share_lock.refs VALUES (7,'reference');
 INSERT INTO jt_share_lock.roots VALUES (1,'direct',7),(2,'rpc',7);
 CREATE ROLE {share_role} NOLOGIN;""")
+    db.run(f"CREATE ROLE {nocheck_role} NOLOGIN;")
     share_spec = {
         "root": {"table": "jt_share_lock.roots", "key": "id",
                  "fields": {"label": "label"}, "insert": True,
@@ -1892,18 +1895,37 @@ CREATE ROLE {share_role} NOLOGIN;""")
                    "etag": True},
     }
     create_view(db, "jt_share_lock.documents", share_spec)
+    nocheck_spec = json.loads(json.dumps(share_spec))
+    nocheck_spec["object"]["etag"] = False
+    create_view(db, "jt_share_lock.documents_nocheck", nocheck_spec)
     db.run(f"""GRANT USAGE ON SCHEMA jt_share_lock TO {share_role};
 GRANT SELECT, UPDATE, DELETE ON jt_share_lock.roots TO {share_role};
 GRANT SELECT ON jt_share_lock.refs TO {share_role};
-GRANT SELECT, DELETE ON jt_share_lock.documents TO {share_role};
+GRANT SELECT, UPDATE, DELETE ON jt_share_lock.documents TO {share_role};
 GRANT EXECUTE ON FUNCTION jt_share_lock.documents__delete_document(integer,text)
   TO {share_role};""")
+    db.run(f"""GRANT USAGE ON SCHEMA jt_share_lock TO {nocheck_role};
+GRANT SELECT, UPDATE ON jt_share_lock.roots TO {nocheck_role};
+GRANT SELECT ON jt_share_lock.refs TO {nocheck_role};
+GRANT SELECT, UPDATE ON jt_share_lock.documents_nocheck TO {nocheck_role};""")
     direct_etag = db.value(
         "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
     rpc_etag = db.value(
         "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=2;")
     readable = db.value(
         f"SET ROLE {share_role}; SELECT count(*) FROM jt_share_lock.documents;")
+    nocheck_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents_nocheck WHERE _id=2;"))
+    nocheck_document["label"] = "nocheck-update"
+    nocheck_update = db.run(
+        f"SET ROLE {nocheck_role}; UPDATE jt_share_lock.documents_nocheck SET data="
+        f"{quote(json.dumps(nocheck_document))}::jsonb WHERE _id=2;", False)
+    update_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    update_document["label"] = "updated"
+    denied_update = db.run(
+        f"SET ROLE {share_role}; UPDATE jt_share_lock.documents SET data="
+        f"{quote(json.dumps(update_document))}::jsonb WHERE _id=1;", False)
     denied_direct = db.run(
         f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
         f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)};", False)
@@ -1918,9 +1940,70 @@ GRANT EXECUTE ON FUNCTION jt_share_lock.documents__delete_document(integer,text)
       has_table_privilege('{share_role}','jt_share_lock.refs','UPDATE')::text||':'||
       has_column_privilege('{share_role}','jt_share_lock.refs','id','UPDATE')::text||':'||
       has_column_privilege('{share_role}','jt_share_lock.refs','label','UPDATE')::text;""")
+    allowed_update = db.run(
+        f"SET ROLE {share_role}; UPDATE jt_share_lock.documents SET data="
+        f"{quote(json.dumps(update_document))}::jsonb WHERE _id=1;", False)
+    lock_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    lock_document["label"] = "lock-current-object"
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
+                       + quote(json.dumps(lock_document))
+                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    started_object_lock = time.monotonic()
+    waited_current_object = db.run(
+        "UPDATE jt_share_lock.refs SET label='waited-current' WHERE id=7;", False)
+    current_object_wait = time.monotonic() - started_object_lock
+    writer.wait(timeout=10)
+    db.run("INSERT INTO jt_share_lock.refs VALUES(8,'new-reference');")
+    switch_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    switch_document["reference"] = {"id": 8, "label": "new-reference"}
+    writer = subprocess.Popen(db.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    assert writer.stdin
+    writer.stdin.write("BEGIN;UPDATE jt_share_lock.documents SET data="
+                       + quote(json.dumps(switch_document))
+                       + "::jsonb WHERE _id=1;SELECT pg_sleep(1);COMMIT;")
+    writer.stdin.close(); time.sleep(.2)
+    started_switch_lock = time.monotonic()
+    waited_both_objects = db.run(
+        "UPDATE jt_share_lock.refs SET label=label||'-waited' WHERE id=8;", False)
+    switch_object_wait = time.monotonic() - started_switch_lock
+    writer.wait(timeout=10)
+    stale_object_document = json.loads(db.value(
+        "SELECT data::text FROM jt_share_lock.documents WHERE _id=1;"))
+    stale_object_document["label"] = "must-not-commit"
+    root_blocker = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True)
+    assert root_blocker.stdin
+    root_blocker.stdin.write("BEGIN;UPDATE jt_share_lock.roots SET label=label "
+                             "WHERE id=1;SELECT pg_sleep(1);COMMIT;")
+    root_blocker.stdin.close(); time.sleep(.1)
+    object_writer = subprocess.Popen(db.command, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+    assert object_writer.stdin
+    object_writer.stdin.write("SELECT pg_sleep(.2);UPDATE jt_share_lock.refs "
+                              "SET label='changed-before-lock' WHERE id=8;")
+    object_writer.stdin.close()
+    started_stale_race = time.monotonic()
+    stale_object_update = db.run(
+        "UPDATE jt_share_lock.documents SET data="
+        + quote(json.dumps(stale_object_document)) + "::jsonb WHERE _id=1;", False)
+    stale_race_wait = time.monotonic() - started_stale_race
+    root_blocker.wait(timeout=10); object_writer.wait(timeout=10)
+    direct_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=1;")
     allowed_direct = db.run(
         f"SET ROLE {share_role}; DELETE FROM jt_share_lock.documents WHERE _id=1 "
         f"AND data#>>'{{_metadata,etag}}'={quote(direct_etag)} RETURNING _id;", False)
+    rpc_etag = db.value(
+        "SELECT data#>>'{_metadata,etag}' FROM jt_share_lock.documents WHERE _id=2;")
     allowed_rpc = db.run(
         f"SET ROLE {share_role}; SELECT jt_share_lock.documents__delete_document(2,"
         f"{quote(rpc_etag)})->>'label';", False)
@@ -1929,17 +2012,31 @@ GRANT EXECUTE ON FUNCTION jt_share_lock.documents__delete_document(integer,text)
       (SELECT label FROM jt_share_lock.refs WHERE id=7)
       FROM jt_share_lock.roots;""")
     record("FOR SHARE least privilege is enforced for direct and RPC delete",
-           readable == "2" and db.state(denied_direct) == "42501"
+           readable == "2" and nocheck_update.returncode == 0
+           and db.state(denied_update) == "42501"
+           and db.state(denied_direct) == "42501"
            and db.state(denied_rpc) == "42501" and preserved_before_grant == "2:1"
            and privilege_shape == "false:false:true"
+           and allowed_update.returncode == 0
+           and waited_current_object.returncode == 0 and current_object_wait > .6
+           and waited_both_objects.returncode == 0 and switch_object_wait > .6
+           and db.state(stale_object_update) == "PT412" and stale_race_wait > .6
            and allowed_direct.returncode == 0 and "1" in allowed_direct.stdout.splitlines()
-           and allowed_rpc.returncode == 0 and "rpc" in allowed_rpc.stdout.splitlines()
-           and final_state == "0:1:reference",
-           f"read={readable},denied={db.state(denied_direct)}/{db.state(denied_rpc)},"
+           and allowed_rpc.returncode == 0
+           and "nocheck-update" in allowed_rpc.stdout.splitlines()
+           and final_state == "0:2:waited-current",
+           f"read={readable},nocheck={nocheck_update.returncode},"
+           f"denied={db.state(denied_update)}/"
+           f"{db.state(denied_direct)}/{db.state(denied_rpc)},"
            f"preserved={preserved_before_grant},grants={privilege_shape},"
-           f"allowed={allowed_direct.returncode}/{allowed_rpc.returncode},final={final_state}")
+           f"allowed={allowed_update.returncode}/{allowed_direct.returncode}/"
+           f"{allowed_rpc.returncode},waits={current_object_wait:.3f}/"
+           f"{switch_object_wait:.3f}/{stale_race_wait:.3f},"
+           f"stale={db.state(stale_object_update)},"
+           f"final={final_state}")
     db.run("DROP SCHEMA jt_share_lock CASCADE;")
     cleanup_share_role()
+    cleanup_nocheck_role()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))

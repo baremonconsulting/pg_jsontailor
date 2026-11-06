@@ -135,7 +135,7 @@ the generated projection so their table or domain defaults remain effective.
 
 ## Permissions
 
-The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`. A referenced object included in the ETag is stabilized with `SELECT FOR SHARE`; PostgreSQL requires `SELECT` and `UPDATE` on at least one column of the referenced table for that lock. A column-level `UPDATE` grant is sufficient and does not permit other columns to be changed. Row-level security policies must also permit every required read, lock and write.
+The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`. During replacement, MERGE UPDATE and delete, a referenced object included in the ETag is stabilized with `SELECT FOR SHARE`; PostgreSQL requires `SELECT` and `UPDATE` on at least one column of the referenced table for that lock. A column-level `UPDATE` grant is sufficient and does not permit other columns to be changed. Mappings with `object.etag=false` do not acquire this object lock. Row-level security policies must also permit every required read, lock and write.
 
 ## Errors
 

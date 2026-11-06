@@ -7,6 +7,11 @@ into generated objects.
 
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
+The current replacement path stabilizes ETag-included referenced objects with
+`FOR SHARE`. Before regenerating, verify that replacement and MERGE roles have
+`SELECT` plus `UPDATE` on at least one referenced-table column and that RLS
+permits the required locks. A column-level `UPDATE` grant is sufficient.
+
 Any view generated from an untagged 0.2.0 development snapshot, including an
 earlier public `main` commit, must be regenerated from the eventual tagged
 release before it is treated as a pilot deployment.
