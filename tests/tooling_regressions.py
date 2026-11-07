@@ -472,12 +472,14 @@ def jsonl_checks() -> None:
     with tempfile.TemporaryDirectory(prefix="pgjt-jsonl-") as temporary:
         folder = Path(temporary)
         valid = folder / "valid.jsonl"
-        valid.write_text('{"name":"one","status":"PASS"}\n')
-        if verify(valid) != 1:
+        valid.write_text(''.join(json.dumps({'name': ident, 'status': 'PASS'}) + '\n'
+                                 for ident in inventories()['core']))
+        if verify(valid, 'core') != 6:
             raise AssertionError("valid JSONL result count is wrong")
         valid_id = folder / "valid-id.jsonl"
-        valid_id.write_text('{"id":"one","status":"PASS"}\n')
-        if verify(valid_id) != 1:
+        valid_id.write_text(''.join(json.dumps({'id': ident, 'status': 'PASS'}) + '\n'
+                                    for ident in inventories()['core']))
+        if verify(valid_id, 'core') != 6:
             raise AssertionError("valid id-based JSONL result count is wrong")
         for name, content, expected in (
                 ("empty", "", "no test results"),
@@ -487,7 +489,7 @@ def jsonl_checks() -> None:
             path = folder / f"{name}.jsonl"
             path.write_text(content)
             try:
-                verify(path)
+                verify(path, 'core')
             except RuntimeError as error:
                 if expected not in str(error):
                     raise AssertionError(f"unexpected JSONL rejection: {error}") from error

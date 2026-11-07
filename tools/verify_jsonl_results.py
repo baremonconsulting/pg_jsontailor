@@ -25,7 +25,10 @@ FILENAMES = {
 
 
 def verify(path: Path, suite: str | None = None) -> int:
-    rows = validate(result_rows(path), suite or FILENAMES.get(path.name))
+    selected = suite or FILENAMES.get(path.name)
+    if selected is None:
+        raise RuntimeError(f"no reviewed inventory selected for {path}")
+    rows = validate(result_rows(path), selected)
     return len(rows)
 
 
