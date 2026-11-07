@@ -111,9 +111,11 @@ class PersistentPsql:
         if rc: raise RuntimeError(f"persistent psql exited {rc}")
 
 
-def explain(session, statements, observer=None):
+def explain(session, statements, observer=None, before_statement=None):
     payloads = []
     for index, statement in enumerate(statements):
+        if before_statement is not None:
+            before_statement(index, statement)
         raw = session.execute(
             "EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON) " + statement + ";")
         try:
@@ -224,6 +226,24 @@ FROM bench_dv.orders_dv v WHERE v._id={source_id};
 """)
 sql("ANALYZE bench_dv.orders; ANALYZE bench_dv.items; ANALYZE bench_dv.payloads;")
 
+settings = loads(sql("SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN "
+    "('shared_buffers','work_mem','synchronous_commit','fsync','full_page_writes','server_version_num',"
+    "'max_connections','effective_cache_size','checkpoint_timeout','wal_level','default_transaction_isolation',"
+    "'TimeZone','lc_collate','lc_ctype');", tuples=True))
+settings.update(jit='off', max_parallel_workers_per_gather='0')
+postgresql = sql('SHOW server_version;', tuples=True).strip()
+postgresql_major = str(int(sql('SHOW server_version_num;', tuples=True).strip()) // 10000)
+diagnostic.append('environment', {
+    'postgresql': postgresql, 'postgresql_major': postgresql_major,
+    'server_settings': settings, 'platform': platform.platform(),
+    'cpu': Path('/proc/cpuinfo').read_text(), 'memory': Path('/proc/meminfo').read_text(),
+    'storage': str(os.statvfs(OUT)), 'load': str(os.getloadavg()), 'database': DB,
+    'pg_host': args.pg_host, 'pg_port': str(args.pg_port), 'pg_user': args.pg_user,
+    'pg_bin': str(PG.resolve()), 'python': sys.version, 'sizes': list(SIZES),
+    'operations': list(OPERATIONS), 'warmups': WARMUPS, 'maximum_warmups': 30,
+    'stability_threshold': .10, 'repetitions': REPETITIONS, 'sessions': 3,
+})
+
 
 
 
@@ -261,6 +281,7 @@ for session_number in range(1 if args.semantic_check_only else 3):
         backend = loads(session.execute("SELECT jsonb_build_object('pid',pg_backend_pid(),"
             "'backend_start',(SELECT backend_start::text FROM pg_stat_activity WHERE pid=pg_backend_pid()));"))
         backends.append({'session': session_number, **backend})
+        diagnostic.append('session-start', {'session': session_number, **backend})
         for size in SIZES:
             for operation in OPERATIONS:
                 warmup_values = {impl: [] for impl in IMPLEMENTATIONS}
@@ -276,25 +297,29 @@ for session_number in range(1 if args.semantic_check_only else 3):
                         diagnostic.append('constituent-start', coordinates)
                         session.execute('BEGIN;')
                         before = snapshot(session, size)
+                        before_id = intern(before)
                         workload = statements(operation, implementation, size)
                         def retain_statement(index, statement, plan):
-                            diagnostic_phase.update(phase='statement', interrupted={**coordinates,
-                                'statement': index})
                             diagnostic.append('statement-complete', {**coordinates, 'statement': index,
                                 'sql': statement, 'plan': plan})
-                        result = explain(session, workload, retain_statement)
+                        def identify_statement(index, statement):
+                            diagnostic_phase.update(phase='statement', interrupted={**coordinates,
+                                'statement': index, 'sql': statement})
+                        result = explain(session, workload, retain_statement, identify_statement)
                         diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
                         after = snapshot(session, size)
+                        after_id = intern(after)
                         diagnostic_phase.update(phase='rollback', interrupted=coordinates)
                         session.execute('ROLLBACK;')
                         diagnostic_phase.update(phase='restoration', interrupted=coordinates)
                         restored = snapshot(session, size)
+                        restored_id = intern(restored)
                         semantic = {'before': before, 'after': after, 'rollback': restored,
                             'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
                         verify_semantics(semantic, size, operation)
                         key = f'{session_number}:{size}:{operation}:{implementation}:{repetition}'
-                        semantic_samples[key] = {**{name: intern(semantic[name]) for name in ['before', 'after', 'rollback']},
-                                                 'branch': semantic['branch']}
+                        semantic_samples[key] = {'before': before_id, 'after': after_id,
+                                                 'rollback': restored_id, 'branch': semantic['branch']}
                         saved_plans[key] = {'statements': workload, 'plans': result.pop('plans')}
                         rows.append({'session': session_number, 'size': size, 'operation': operation,
                             'implementation': implementation, 'run': repetition, 'warmup': warmup,
@@ -341,14 +366,8 @@ for session_number in range(3):
             summary.append({'session': session_number, 'size': size, 'operation': operation, **values,
                             'median_ratio': values['duality']['median_ms'] / values['direct']['median_ms']})
 (OUT / 'summary.json').write_text(json.dumps(summary, indent=2))
-settings = loads(sql("SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN "
-    "('shared_buffers','work_mem','synchronous_commit','fsync','full_page_writes','server_version_num',"
-    "'max_connections','effective_cache_size','checkpoint_timeout','wal_level','default_transaction_isolation',"
-    "'TimeZone','lc_collate','lc_ctype');", tuples=True))
-settings.update(jit='off', max_parallel_workers_per_gather='0')
-postgresql = sql('SHOW server_version;', tuples=True).strip()
 metadata = {'schema_version': 3, 'run_id': RUN_ID, 'postgresql': postgresql,
-    'postgresql_major': str(int(sql('SHOW server_version_num;', tuples=True).strip()) // 10000),
+    'postgresql_major': postgresql_major,
     'platform': platform.platform(), 'cpu': Path('/proc/cpuinfo').read_text(),
     'memory': Path('/proc/meminfo').read_text(), 'storage': str(os.statvfs(OUT)), 'load': str(os.getloadavg()),
     'sizes': SIZES, 'operations': OPERATIONS, 'warmups': WARMUPS, 'maximum_warmups': 30,

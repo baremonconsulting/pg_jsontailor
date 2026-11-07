@@ -6,9 +6,12 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import re
 from typing import Any
 
-from bench.installation import canonical, sha256
+from bench.installation import canonical, sha256, verify_attestation, require
+from bench.verify_results import verify_plan_node, verify_semantics
+from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 
 JOURNAL = ".diagnostic-events.jsonl"
 MANIFEST = ".diagnostic-manifest.json"
@@ -43,19 +46,23 @@ class DiagnosticJournal:
         self.sequence = 0
         self.previous = "0" * 64
         self.journal_hash = hashlib.sha256()
+        self.closed = False
         self.folder.mkdir(parents=True, exist_ok=True)
         if self.path.exists() or self.manifest.exists():
             raise RuntimeError("diagnostic evidence already exists")
         self.append("header", provenance)
 
     def append(self, kind: str, payload: dict[str, Any]) -> None:
+        if self.closed:
+            raise RuntimeError("diagnostic journal is already terminal")
         body = {"sequence": self.sequence, "previous": self.previous,
                 "kind": kind, "payload": payload}
         digest = sha256(canonical(body))
         event = {**body, "digest": digest}
         encoded = canonical(event) + b"\n"
         with self.path.open("ab", buffering=0) as stream:
-            stream.write(encoded)
+            if stream.write(encoded) != len(encoded):
+                raise OSError("short diagnostic journal write")
             os.fsync(stream.fileno())
         self.journal_hash.update(encoded)
         self.sequence += 1
@@ -82,6 +89,7 @@ class DiagnosticJournal:
             "interrupted": interrupted,
         })
         self._manifest("FAIL")
+        self.closed = True
 
     def discard_after_success(self) -> None:
         for path in (self.path, self.manifest):
@@ -89,7 +97,8 @@ class DiagnosticJournal:
         _sync_directory(self.folder)
 
 
-def verify_diagnostic(folder: Path) -> dict[str, Any]:
+def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
+                      repo: Path) -> dict[str, Any]:
     """Classify diagnostic evidence as terminal fail, incomplete prefix or corrupt."""
     folder = folder.resolve()
     manifest_path, journal_path = folder / MANIFEST, folder / JOURNAL
@@ -119,6 +128,121 @@ def verify_diagnostic(folder: Path) -> dict[str, Any]:
     if header["kind"] != "header" or not isinstance(header["payload"], dict) \
             or set(header["payload"]) != required or header["payload"]["source_dirty"] is not False:
         raise RuntimeError("invalid diagnostic provenance")
+    provenance = header["payload"]
+    require(re.fullmatch('[0-9a-f]{40}', candidate) is not None
+            and provenance['source_commit'] == candidate, 'diagnostic candidate differs')
+    for name in ['installation_sha256', 'installation_log_sha256', 'workload_sha256',
+                 'producer_sha256']:
+        require(isinstance(provenance[name], str)
+                and re.fullmatch('[0-9a-f]{64}', provenance[name]), 'invalid diagnostic digest')
+    installation = folder / 'installation.json'
+    installation_log = folder / 'installation.log'
+    require(sha256(installation.read_bytes()) == provenance['installation_sha256'],
+            'diagnostic installation envelope differs')
+    require(sha256(installation_log.read_bytes()) == provenance['installation_log_sha256'],
+            'diagnostic installation log differs')
+    require(sha256((repo / 'bench/workload.py').read_bytes()) == provenance['workload_sha256']
+            and sha256((repo / 'bench/duality_overhead.py').read_bytes()) == provenance['producer_sha256'],
+            'diagnostic protocol identity differs')
+    verify_attestation(installation, repo=repo, candidate=candidate, trusted_key=trusted_key)
+
+    environment_seen = False
+    sessions, states, completed_coordinates, active = set(), {}, set(), None
+    statement_plans = []
+    last_completed = None
+    for event in events[1:]:
+        kind, payload = event['kind'], event['payload']
+        require(isinstance(payload, dict), 'invalid diagnostic payload')
+        if kind == 'environment':
+            require(not environment_seen and not sessions and active is None,
+                    'diagnostic environment order differs')
+            required_environment = {'postgresql', 'postgresql_major', 'server_settings', 'platform',
+                'cpu', 'memory', 'storage', 'load', 'database', 'pg_host', 'pg_port', 'pg_user',
+                'pg_bin', 'python', 'sizes', 'operations', 'warmups', 'maximum_warmups',
+                'stability_threshold', 'repetitions', 'sessions'}
+            require(set(payload) == required_environment and payload['sizes'] == list(SIZES)
+                    and payload['operations'] == list(OPERATIONS) and payload['warmups'] == 10
+                    and payload['maximum_warmups'] == 30 and payload['stability_threshold'] == .10
+                    and payload['repetitions'] >= 50 and payload['sessions'] == 3
+                    and isinstance(payload['server_settings'], dict) and payload['server_settings'],
+                    'invalid diagnostic environment')
+            environment_seen = True
+        elif kind == 'session-start':
+            require(environment_seen and active is None and set(payload) == {'session', 'pid', 'backend_start'}
+                    and payload['session'] == len(sessions) and payload['session'] in range(3)
+                    and type(payload['pid']) is int and payload['pid'] > 0
+                    and isinstance(payload['backend_start'], str) and payload['backend_start'],
+                    'invalid diagnostic backend identity/order')
+            sessions.add(payload['session'])
+        elif kind == 'semantic-state':
+            require(active is not None and set(payload) == {'sha256', 'value'}
+                    and sha256(canonical(payload['value'])) == payload['sha256'],
+                    'invalid diagnostic semantic state')
+            states[payload['sha256']] = payload['value']
+        elif kind == 'constituent-start':
+            require(environment_seen and sessions and active is None, 'overlapping diagnostic constituent')
+            required_coordinates = {'session', 'size', 'operation', 'implementation', 'run', 'warmup', 'pair_order'}
+            require(set(payload) == required_coordinates and payload['session'] in sessions
+                    and payload['size'] in SIZES and payload['operation'] in OPERATIONS
+                    and payload['implementation'] in IMPLEMENTATIONS and type(payload['run']) is int
+                    and payload['run'] >= 0 and type(payload['warmup']) is bool
+                    and payload['pair_order'] in {0, 1}, 'invalid diagnostic constituent coordinates')
+            order = IMPLEMENTATIONS if payload['run'] % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
+            require(order[payload['pair_order']] == payload['implementation'], 'diagnostic pair order differs')
+            coordinate_key = tuple(payload[name] for name in
+                ['session', 'size', 'operation', 'implementation', 'run'])
+            require(coordinate_key not in completed_coordinates,
+                    'duplicate diagnostic logical attempt')
+            active, statement_plans = payload, []
+        elif kind == 'statement-complete':
+            require(active is not None and all(payload.get(k) == v for k, v in active.items()),
+                    'diagnostic statement coordinates differ')
+            index = payload.get('statement')
+            expected = statements(active['operation'], active['implementation'], active['size'])
+            require(type(index) is int and index == len(statement_plans) and index < len(expected)
+                    and payload.get('sql') == expected[index] and isinstance(payload.get('plan'), dict),
+                    'diagnostic statement inventory differs')
+            plan = payload['plan']
+            require({'Plan', 'Planning Time', 'Execution Time'} <= set(plan), 'diagnostic plan root differs')
+            verify_plan_node(plan['Plan'])
+            require(type(plan['Planning Time']) in {int, float} and plan['Planning Time'] >= 0
+                    and type(plan['Execution Time']) in {int, float} and plan['Execution Time'] >= 0,
+                    'invalid diagnostic plan time')
+            statement_plans.append(plan)
+        elif kind == 'constituent-complete':
+            require(active is not None and all(payload.get(k) == v for k, v in active.items()),
+                    'diagnostic completion coordinates differ')
+            expected = statements(active['operation'], active['implementation'], active['size'])
+            require(len(statement_plans) == len(expected) and payload.get('restoration') == 'verified',
+                    'diagnostic constituent incomplete')
+            refs = [payload.get(name) for name in ['before', 'after', 'rollback']]
+            require(all(ref in states for ref in refs), 'diagnostic semantic reference missing')
+            verify_semantics({'before': states[refs[0]], 'after': states[refs[1]],
+                              'rollback': states[refs[2]],
+                              'branch': active['operation'].removeprefix('merge_')
+                              if active['operation'].startswith('merge_') else 'not_merge'},
+                             active['size'], active['operation'])
+            require(payload.get('execution_ms') == sum(p['Execution Time'] for p in statement_plans)
+                    and payload.get('planning_ms') == sum(p['Planning Time'] for p in statement_plans)
+                    and payload.get('shared_hit_blocks') == sum(p['Plan'].get('Shared Hit Blocks', 0) for p in statement_plans)
+                    and payload.get('shared_dirtied_blocks') == sum(p['Plan'].get('Shared Dirtied Blocks', 0) for p in statement_plans)
+                    and payload.get('wal_records') == sum(p['Plan'].get('WAL Records', 0) for p in statement_plans),
+                    'diagnostic plan/counter reconciliation differs')
+            completed_coordinates.add(tuple(active[name] for name in
+                ['session', 'size', 'operation', 'implementation', 'run']))
+            last_completed, active = dict(active), None
+        elif kind == 'terminal-failure':
+            require(event is events[-1] and set(payload) == {'phase', 'error_type', 'error', 'restoration', 'interrupted'}
+                    and payload['restoration'] in {'verified', 'failed', 'not-reached'},
+                    'invalid diagnostic terminal failure')
+            require(payload['phase'] in {'database-setup', 'constituent', 'statement',
+                    'semantic-read-back', 'rollback', 'restoration', 'between-arms'},
+                    'invalid diagnostic failure phase')
+            if payload['restoration'] == 'verified':
+                require(active is None and last_completed is not None and payload['phase'] == 'between-arms',
+                        'diagnostic restoration is not witnessed')
+        else:
+            raise RuntimeError('unknown diagnostic event kind')
     if not manifest_path.is_file():
         return {"outcome": "INCOMPLETE_PREFIX", "events": len(events), "publishable": False,
                 "restoration_verified": False}
