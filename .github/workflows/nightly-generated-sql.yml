@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: nightly-generated-sql
   cancel-in-progress: true
@@ -50,22 +51,36 @@ jobs:
             --output "$RUNNER_TEMP/mutation-generated-sql.jsonl"
           python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/property-generated-sql.jsonl" \
             "$RUNNER_TEMP/mutation-generated-sql.jsonl"
-      - name: Upload evidence
+      - name: Stop PostgreSQL
+        if: always()
+        run: /usr/lib/postgresql/18/bin/pg_ctl -D "$RUNNER_TEMP/pgdata" -m fast stop || true
+      - name: Collect and require complete nightly evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_DIAGNOSTICS_CERTIFICATE: ${{ vars.EVIDENCE_DIAGNOSTICS_CERTIFICATE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly-generated-sql.yml" --jq '.id' || echo 0)"
+          python3 tools/collect_evidence.py --kind nightly --major 18 \
+            --input "$RUNNER_TEMP" --repo . --workflow-id "$workflow_id" \
+            --output "$RUNNER_TEMP/evidence/nightly-pg18"
+      - name: Upload redacted nightly evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: generated-sql-pg18
+          retention-days: 30
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/property-generated-sql.jsonl
-            ${{ runner.temp }}/mutation-generated-sql.jsonl
-            ${{ runner.temp }}/postgresql.log
-      - name: Require complete evidence
+            ${{ runner.temp }}/evidence/nightly-pg18/bundle.json
+            ${{ runner.temp }}/evidence/nightly-pg18/public/
+      - name: Upload encrypted nightly diagnostics
         if: always()
-        shell: bash
-        run: |
-          test -s "$RUNNER_TEMP/property-generated-sql.jsonl"
-          test -s "$RUNNER_TEMP/mutation-generated-sql.jsonl"
-      - name: Stop PostgreSQL
-        if: always()
-        run: /usr/lib/postgresql/18/bin/pg_ctl -D "$RUNNER_TEMP/pgdata" -m fast stop || true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-sql-pg18-diagnostics
+          retention-days: 30
+          if-no-files-found: error
+          path: ${{ runner.temp }}/evidence/nightly-pg18/diagnostics/
