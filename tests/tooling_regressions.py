@@ -17,7 +17,7 @@ import tempfile
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.product_fingerprint import digest, working_tree_hashes
-from tools.strict_results import inventories
+from tools.strict_results import inventories, loads
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -483,41 +483,17 @@ def release_policy_checks() -> None:
     release = (ROOT / ".github/workflows/release.yml").read_text()
     dependency = (ROOT / ".github/workflows/dependency-review.yml").read_text()
     verifier.verify_release_policy(release, dependency)
+    policy = loads((ROOT / '.github/release-policy.json').read_text())
+    names = tuple(name for workflow in ['ci', 'codeql', 'dependency']
+                  for name in policy['workflows'][workflow]['jobs'])
+    if names != verifier.EXACT_SHA_CHECKS:
+        raise AssertionError('authoritative release check inventory differs')
 
-    start = release.index("required_checks=(")
-    end = release.index("\n          archive=", start)
-    gate = release[start:end]
-    gate = re.sub(
-        r"check_runs=\$\(gh api --paginate.*?@tsv'\)",
-        'check_runs="$PROBE_CHECK_RUNS"', gate, flags=re.DOTALL)
-    if "gh api" in gate:
-        raise AssertionError("release gate probe did not isolate the check loop")
-
-    def gate_status(rows: list[tuple[str, str, str]]) -> int:
-        value = "\n".join("\t".join(row) for row in rows)
-        return subprocess.run(
-            ["bash", "-ec", gate], text=True, capture_output=True,
-            env={**os.environ, "PROBE_CHECK_RUNS": value}).returncode
-
-    successful = [(name, "completed", "success")
-                  for name in verifier.EXACT_SHA_CHECKS]
-    if gate_status(successful):
-        raise AssertionError("complete exact-SHA release evidence was rejected")
-    for index, name in enumerate(verifier.EXACT_SHA_CHECKS):
-        if not gate_status(successful[:index] + successful[index + 1:]):
-            raise AssertionError(f"missing release check was accepted: {name}")
-        failed = list(successful)
-        failed[index] = (name, "completed", "failure")
-        if not gate_status(failed):
-            raise AssertionError(f"failed release check was accepted: {name}")
-        unfinished = list(successful)
-        unfinished[index] = (name, "in_progress", "")
-        if not gate_status(unfinished):
-            raise AssertionError(f"unfinished release check was accepted: {name}")
-
+    # Identity, app, attempt and pagination adversaries are exercised by
+    # release_trust_regressions.py, not a name-only shell check loop.
     for changed_release, changed_dependency, expected in (
-        (release.replace("            'Dependency review'\n", ""), dependency,
-         "exact-SHA check list differs"),
+        (release.replace('tools/prepare_release.py', 'missing-gate.py'), dependency,
+         'gate is missing'),
         (release, dependency.replace("  push:\n    branches: [main]\n", ""),
          "does not run on main pushes"),
         (release, dependency.replace("base-ref: ${{ github.event.before }}",

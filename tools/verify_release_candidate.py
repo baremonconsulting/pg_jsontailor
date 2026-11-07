@@ -14,6 +14,7 @@ from typing import Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.product_fingerprint import PRODUCT_INPUTS, SCHEMA_VERSION, digest
 from bench.installation import verify_attestation
+from tools.release_metadata import verify as verify_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,11 +110,13 @@ def benchmark_source_status(repo: Path, source_commit: str,
 
 
 def verify_release_policy(release: str, dependency: str) -> None:
-    block = re.search(r"required_checks=\(\n(.*?)\n\s+\)\n", release, re.DOTALL)
-    require(block is not None, "release gate required-check list is missing")
-    names = tuple(re.findall(r"'([^']+)'", block.group(1)))
-    require(names == EXACT_SHA_CHECKS,
-            "release gate exact-SHA check list differs")
+    require('tools/prepare_release.py' in release and 'environment: release' in release
+            and 'needs: [prepare, archive]' in release and '--verify-tag' in release,
+            'release authority/preparation/environment gate is missing')
+    require('  contents: read' in release and release.count('      contents: write') == 1,
+            'release write permission is not confined to publication')
+    require('workflow_dispatch:' in release and '\n  push:' not in release,
+            'release requires explicit authorised dispatch')
     require("push:\n    branches: [main]" in dependency,
             "dependency review does not run on main pushes")
     require("pull_request:\n    branches: [main]" in dependency,
@@ -159,6 +162,10 @@ def main() -> int:
     parser.add_argument('--benchmark-key', type=Path)
     args = parser.parse_args()
 
+    previous_metadata = git('show', 'HEAD^:release-metadata.json', check=False)
+    from tools.strict_results import loads
+    verify_metadata(ROOT, loads(previous_metadata.stdout) if previous_metadata.returncode == 0 else None)
+
     if not args.allow_dirty:
         require(not git("status", "--porcelain").stdout,
                 "release candidate worktree is dirty")
@@ -167,8 +174,6 @@ def main() -> int:
     match = re.search(r"^default_version = '([^']+)'$", control, re.MULTILINE)
     require(match is not None, "extension version is missing")
     version = match.group(1)
-    require(f"## {version} — unreleased" in (ROOT / "CHANGELOG.md").read_text(),
-            "changelog is not in release-candidate state")
     require(f"version: {version}" in (ROOT / "CITATION.cff").read_text(),
             "citation version differs")
     require("Baremon s.r.o." in (ROOT / "LICENSE").read_text(),
