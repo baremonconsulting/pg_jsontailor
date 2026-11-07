@@ -19,7 +19,9 @@ EXPECTED_IDS = {
  "security_contract_matrix.py": {"PGJT-46/source-privilege-matrix","PGJT-46/membership-column-grants","PGJT-46/owner-force-rls","PGJT-46/root-rls-matrix","PGJT-46/object-etag-lock-matrix","PGJT-46/array-rls-matrix","PGJT-46/policy-change-atomic-denial","PGJT-46/invoker-metadata"},
 }
 EXPECTED_WITNESSES = {
- 'locks': {'security_contract_matrix.py:PGJT-46/object-etag-lock-matrix'},
+ # Removing FOR SHARE also removes its UPDATE-column privilege requirement.
+ 'locks': {'security_contract_matrix.py:PGJT-46/object-etag-lock-matrix',
+           'security_contract_matrix.py:PGJT-46/membership-column-grants'},
  'atomic-reconciliation': {'validation_security.py:10',
                            'security_contract_matrix.py:PGJT-46/array-rls-matrix',
                            'security_contract_matrix.py:PGJT-46/policy-change-atomic-denial'},
