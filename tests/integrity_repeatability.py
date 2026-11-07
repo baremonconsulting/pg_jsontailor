@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.strict_results import loads
 
 
 TEST_NAME = "PGJT-41 complete integrity suite is repeatable in one database"
@@ -27,7 +29,7 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
 
 
 def load_results(path: Path) -> list[dict]:
-    rows = [json.loads(line, object_pairs_hook=reject_duplicate_keys)
+    rows = [loads(line)
             for line in path.read_text().splitlines()
             if line.strip()]
     if not rows or not all(isinstance(row, dict) for row in rows):

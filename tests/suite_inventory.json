@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "suites": {
+    "public_contract": ["PGJT-67/etag-coverage", "PGJT-67/direct-delete-predicate", "PGJT-67/mapping-restrictions"],
+    "docs_quickstart": ["PGJT-65/readme-quickstart"],
+    "upgrade_docs": ["PGJT-66/name-preserving-regeneration", "PGJT-66/mapped-rename-recreation", "PGJT-66/dependency-rollback", "PGJT-66/acl-rls-overload-preservation"],
+    "standalone": ["PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags", "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards", "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore"],
+    "stale_return": ["PGJT-61/stale-return-mutant"],
+    "core": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6"
+    ],
+    "validation": [
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "12",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20"
+    ],
+    "merge": [
+      "mixed actions, defaults and returning",
+      "replacement preconditions",
+      "statement atomicity",
+      "do nothing and absent targets",
+      "duplicate source behaviour",
+      "operation flags and object ETag",
+      "invoker rights and RLS",
+      "concurrent insert contract",
+      "concurrent update and explicit recreation",
+      "reused path integrity guards"
+    ],
+    "integrity": [
+      "delete rechecks the selected ETag after locking",
+      "malformed nested input is rejected atomically",
+      "key-only child mappings accept generated keys",
+      "numeric keys use lossless typed indexed identity",
+      "root update policy covers relationship changes",
+      "root identity cannot also be an object foreign key",
+      "source relation roles and physical columns remain bound",
+      "binding ordinals ignore dropped unmapped columns",
+      "root table and key renames reach binding drift checks",
+      "same-layout source role swaps are rejected before DML",
+      "per-role dependencies reject symmetric schema swaps before DML",
+      "physical column-name permutations are rejected before DML",
+      "binding guards are independent of identifier rendering settings",
+      "NOCHECK display drift does not imply a root relationship change",
+      "child-only updates do not rewrite a GENERATED ALWAYS root key",
+      "GENERATED ALWAYS child keys reject explicit new identities",
+      "globally unused explicit child keys append as one atomic replacement",
+      "NULL-parent child identities are rejected as foreign atomically",
+      "mixed orphan replacements and RLS-hidden orphans fail closed",
+      "secondary child uniqueness diagnostics are preserved",
+      "unique-conflict remapping uses exact relation identity",
+      "binding views remain non-writable under default and later broad grants",
+      "array identities are unique after conversion to the SQL key type",
+      "source relation replacement requires regeneration",
+      "runtime guards reject later inheritance and FK enforcement drift",
+      "unvalidated mapping foreign keys are rejected and later drift fails closed",
+      "unmapped NOT NULL domains preserve defaults and do not block writes",
+      "JSON types, numeric precision and INSERT identity errors use PT422",
+      "timestamptz documents and ETags are independent of session TimeZone",
+      "BC and AD timestamptz encoding is injective and reversible across mapped paths",
+      "catalog guards run once per statement rather than once per document",
+      "delete RPC stabilizes source identity before binding validation",
+      "regeneration fails closed for non-default owner ACL state",
+      "generator provenance, inventory, health and regeneration are operational",
+      "regeneration scopes binding cleanup to configured source roles",
+      "non-finite numeric values use canonical reversible document strings",
+      "inventory never executes an untrusted owner-supplied health callback",
+      "FOR SHARE least privilege is enforced for direct and RPC delete",
+      "DEFERRABLE child primary key uses safe explicit-key fallback"
+    ],
+    "types": [
+      "PGJT-44/field-operation-matrix",
+      "PGJT-44/invalid-values-atomic",
+      "PGJT-44/key-position-matrix",
+      "PGJT-44/numeric-timestamptz-boundaries"
+    ],
+    "shapes": [
+      "PGJT-45/shape-operation-matrix",
+      "PGJT-45/operation-flags",
+      "PGJT-45/object-etag-modes",
+      "PGJT-45/identity-default-matrix",
+      "PGJT-45/failure-atomicity",
+      "PGJT-45/deferrable-merge-matrix"
+    ],
+    "security": [
+      "PGJT-46/source-privilege-matrix",
+      "PGJT-46/membership-column-grants",
+      "PGJT-46/owner-force-rls",
+      "PGJT-46/root-rls-matrix",
+      "PGJT-46/object-etag-lock-matrix",
+      "PGJT-46/array-rls-matrix",
+      "PGJT-46/policy-change-atomic-denial",
+      "PGJT-46/invoker-metadata"
+    ],
+    "partitions": [
+      "PGJT-47/partition-role-transitions",
+      "PGJT-47/missing-partition-recovery",
+      "PGJT-47/post-change-operations",
+      "PGJT-47/partition-health-regeneration",
+      "PGJT-47/classic-inherits-rejection"
+    ],
+    "properties": [
+      "PGJT-50/seeded-valid-specifications",
+      "PGJT-50/seeded-invalid-specifications",
+      "PGJT-50/hostile-identifiers",
+      "PGJT-50/seeded-json-documents",
+      "PGJT-50/size-nesting-boundaries"
+    ],
+    "repeatability": [
+      "PGJT-41 complete integrity suite is repeatable in one database"
+    ],
+    "subtransaction": [
+      "PGJT-42 bulk operation matrix uses one top-level XID"
+    ],
+    "mutations": [
+      "PGJT-50/mutation-etag",
+      "PGJT-50/mutation-locks",
+      "PGJT-50/mutation-rls",
+      "PGJT-50/mutation-type-checks",
+      "PGJT-50/mutation-binding-guards",
+      "PGJT-50/mutation-atomic-reconciliation"
+    ],
+    "partition_restore": [
+      "PGJT-47/partition-custom-restore",
+      "PGJT-47/partition-plain-restore"
+    ],
+    "restore_matrix": [
+      "PGJT-49/custom-shape-inventory",
+      "PGJT-49/custom-optional-bindings",
+      "PGJT-49/custom-acl-comments",
+      "PGJT-49/custom-regeneration-guards",
+      "PGJT-49/custom-post-restore-crud",
+      "PGJT-49/plain-shape-inventory",
+      "PGJT-49/plain-optional-bindings",
+      "PGJT-49/plain-acl-comments",
+      "PGJT-49/plain-regeneration-guards",
+      "PGJT-49/plain-post-restore-crud",
+      "PGJT-49/maintenance-database-integration"
+    ],
+    "postgrest": [
+      "PGJT-48/http-get",
+      "PGJT-48/http-complete-patch",
+      "PGJT-48/http-stale-etag",
+      "PGJT-48/http-missing-etag",
+      "PGJT-48/http-incomplete-document",
+      "PGJT-48/http-insert",
+      "PGJT-48/http-delete-rpc",
+      "PGJT-48/http-options",
+      "PGJT-48/http-hidden-base-tables"
+    ]
+  }
+}

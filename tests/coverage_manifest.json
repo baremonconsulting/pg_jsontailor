@@ -138,7 +138,23 @@
     {"test_id":"PGJT-68/custom-restore","file":"tests/standalone_generated_sql.py","marker":"PGJT-68/custom-restore"},
     {"test_id":"PGJT-68/plain-restore","file":"tests/standalone_generated_sql.py","marker":"PGJT-68/plain-restore"},
     {"test_id":"PGJT-68/attestation-negatives","file":"tests/documentation_regressions.py","marker":"PGJT-68/attestation-negatives"},
-    {"test_id":"PGJT-72/notice-packaging-negatives","file":"tests/documentation_regressions.py","marker":"PGJT-72/notice-packaging-negatives"}
+    {"test_id":"PGJT-72/notice-packaging-negatives","file":"tests/documentation_regressions.py","marker":"PGJT-72/notice-packaging-negatives"},
+    {"test_id":"PGJT-63/core-1","file":"tests/core_operations.py","marker":"\"1\""},
+    {"test_id":"PGJT-63/core-2","file":"tests/core_operations.py","marker":"\"2\""},
+    {"test_id":"PGJT-63/core-3","file":"tests/core_operations.py","marker":"\"3\""},
+    {"test_id":"PGJT-63/core-4","file":"tests/core_operations.py","marker":"\"4\""},
+    {"test_id":"PGJT-63/core-5","file":"tests/core_operations.py","marker":"\"5\""},
+    {"test_id":"PGJT-63/core-6","file":"tests/core_operations.py","marker":"\"6\""},
+    {"test_id":"PGJT-63/merge-1","file":"tests/merge_operations.py","marker":"\"mixed actions, defaults and returning\""},
+    {"test_id":"PGJT-63/merge-2","file":"tests/merge_operations.py","marker":"\"replacement preconditions\""},
+    {"test_id":"PGJT-63/merge-3","file":"tests/merge_operations.py","marker":"\"statement atomicity\""},
+    {"test_id":"PGJT-63/merge-4","file":"tests/merge_operations.py","marker":"\"do nothing and absent targets\""},
+    {"test_id":"PGJT-63/merge-5","file":"tests/merge_operations.py","marker":"\"duplicate source behaviour\""},
+    {"test_id":"PGJT-63/merge-6","file":"tests/merge_operations.py","marker":"\"operation flags and object ETag\""},
+    {"test_id":"PGJT-63/merge-7","file":"tests/merge_operations.py","marker":"\"invoker rights and RLS\""},
+    {"test_id":"PGJT-63/merge-8","file":"tests/merge_operations.py","marker":"\"concurrent insert contract\""},
+    {"test_id":"PGJT-63/merge-9","file":"tests/merge_operations.py","marker":"\"concurrent update and explicit recreation\""},
+    {"test_id":"PGJT-63/merge-10","file":"tests/merge_operations.py","marker":"\"reused path integrity guards\""}
   ],
   "runtime_evidence": [
     {"test_id":"PGJT-2/null-parent-ownership","scope":"postgresql","suite":"integrity","field":"name","value":"NULL-parent child identities are rejected as foreign atomically"},
@@ -248,6 +264,22 @@
     {"test_id":"PGJT-68/custom-restore","scope":"postgresql","suite":"standalone","field":"name","value":"PGJT-68/custom-restore"},
     {"test_id":"PGJT-68/plain-restore","scope":"postgresql","suite":"standalone","field":"name","value":"PGJT-68/plain-restore"},
     {"test_id":"PGJT-68/attestation-negatives","scope":"repository","suite":"repository"},
-    {"test_id":"PGJT-72/notice-packaging-negatives","scope":"repository","suite":"repository"}
+    {"test_id":"PGJT-72/notice-packaging-negatives","scope":"repository","suite":"repository"},
+    {"test_id":"PGJT-63/core-1","scope":"postgresql","suite":"core","field":"id","value":"1"},
+    {"test_id":"PGJT-63/core-2","scope":"postgresql","suite":"core","field":"id","value":"2"},
+    {"test_id":"PGJT-63/core-3","scope":"postgresql","suite":"core","field":"id","value":"3"},
+    {"test_id":"PGJT-63/core-4","scope":"postgresql","suite":"core","field":"id","value":"4"},
+    {"test_id":"PGJT-63/core-5","scope":"postgresql","suite":"core","field":"id","value":"5"},
+    {"test_id":"PGJT-63/core-6","scope":"postgresql","suite":"core","field":"id","value":"6"},
+    {"test_id":"PGJT-63/merge-1","scope":"postgresql","suite":"merge","field":"name","value":"mixed actions, defaults and returning"},
+    {"test_id":"PGJT-63/merge-2","scope":"postgresql","suite":"merge","field":"name","value":"replacement preconditions"},
+    {"test_id":"PGJT-63/merge-3","scope":"postgresql","suite":"merge","field":"name","value":"statement atomicity"},
+    {"test_id":"PGJT-63/merge-4","scope":"postgresql","suite":"merge","field":"name","value":"do nothing and absent targets"},
+    {"test_id":"PGJT-63/merge-5","scope":"postgresql","suite":"merge","field":"name","value":"duplicate source behaviour"},
+    {"test_id":"PGJT-63/merge-6","scope":"postgresql","suite":"merge","field":"name","value":"operation flags and object ETag"},
+    {"test_id":"PGJT-63/merge-7","scope":"postgresql","suite":"merge","field":"name","value":"invoker rights and RLS"},
+    {"test_id":"PGJT-63/merge-8","scope":"postgresql","suite":"merge","field":"name","value":"concurrent insert contract"},
+    {"test_id":"PGJT-63/merge-9","scope":"postgresql","suite":"merge","field":"name","value":"concurrent update and explicit recreation"},
+    {"test_id":"PGJT-63/merge-10","scope":"postgresql","suite":"merge","field":"name","value":"reused path integrity guards"}
   ]
 }

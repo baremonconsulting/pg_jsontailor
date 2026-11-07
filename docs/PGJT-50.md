@@ -27,5 +27,6 @@ python3 tests/property_generated_sql.py --database jsontailor_test \
 python3 tests/mutate_generated_sql.py --database jsontailor_test \
   --repo . \
   --output /tmp/mutation.jsonl
-python3 tools/verify_jsonl_results.py /tmp/property.jsonl /tmp/mutation.jsonl
+python3 tools/verify_jsonl_results.py --suite properties /tmp/property.jsonl
+python3 tools/verify_jsonl_results.py --suite mutations /tmp/mutation.jsonl
 ```

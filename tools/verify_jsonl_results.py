@@ -5,29 +5,39 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.strict_results import result_rows, validate
+
+FILENAMES = {
+    'core-results.jsonl': 'core', 'validation-results.jsonl': 'validation',
+    'integrity-results.jsonl': 'integrity', 'repeatability-results.jsonl': 'repeatability',
+    'subtransaction-results.jsonl': 'subtransaction', 'merge-results.jsonl': 'merge',
+    'type-results.jsonl': 'types', 'shape-results.jsonl': 'shapes',
+    'security-results.jsonl': 'security', 'partition-results.jsonl': 'partitions',
+    'partition-restore-results.jsonl': 'partition_restore',
+    'restore-matrix-results.jsonl': 'restore_matrix', 'postgrest-results.jsonl': 'postgrest',
+    'property-generated-sql.jsonl': 'properties', 'mutation-generated-sql.jsonl': 'mutations',
+    'stale-return-results.jsonl': 'stale_return',
+    'standalone-results.jsonl': 'standalone', 'docs-quickstart-results.jsonl': 'docs_quickstart',
+    'upgrade-docs-results.jsonl': 'upgrade_docs', 'public-contract-results.jsonl': 'public_contract',
+}
 
 
-def verify(path: Path) -> int:
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    if not rows:
-        raise RuntimeError(f"{path} contains no test results")
-    identifiers = [row.get("name", row.get("id")) for row in rows]
-    if any(not isinstance(identifier, str) or not identifier for identifier in identifiers):
-        raise RuntimeError(f"{path} contains a result without a name or id")
-    if len(identifiers) != len(set(identifiers)):
-        raise RuntimeError(f"{path} contains duplicate test identifiers")
-    failures = [row for row in rows if row.get("status") != "PASS"]
-    if failures:
-        raise RuntimeError(f"{path} contains {len(failures)} non-PASS results")
+def verify(path: Path, suite: str | None = None) -> int:
+    rows = validate(result_rows(path), suite or FILENAMES.get(path.name))
     return len(rows)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("paths", nargs="+", type=Path)
+    parser.add_argument("--suite", help="Reviewed inventory; required for non-standard filenames")
     args = parser.parse_args()
     for path in args.paths:
-        print(f"{path}: {verify(path)} PASS results")
+        if not args.suite and path.name not in FILENAMES:
+            raise RuntimeError(f"no reviewed inventory selected for {path}")
+        print(f"{path}: {verify(path, args.suite)} PASS results")
     return 0
 
 

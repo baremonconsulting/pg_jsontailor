@@ -17,6 +17,7 @@ import tempfile
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.product_fingerprint import digest, working_tree_hashes
+from tools.strict_results import inventories
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,10 @@ def coverage_manifest_checks() -> None:
             if row not in rows.setdefault(item["suite"], []):
                 rows[item["suite"]].append(row)
         paths = {}
+        for suite in rows:
+            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation"}
+                           else {"name": ident, "status": "PASS"}
+                           for ident in inventories()[suite]]
         for suite, values in rows.items():
             path = folder / f"{suite}.jsonl"
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
@@ -205,7 +210,7 @@ def coverage_manifest_checks() -> None:
                       if row.get(selected["field"]) != selected["value"]]
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
 
-        runtime_rejected(remove_selected, "expected one runtime result, found 0")
+        runtime_rejected(remove_selected, "inventory differs")
 
         def fail_selected(changed_paths) -> None:
             path = changed_paths[selected["suite"]]
@@ -225,7 +230,7 @@ def coverage_manifest_checks() -> None:
             values.append(copy.deepcopy(duplicate))
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
 
-        runtime_rejected(duplicate_selected, "expected one runtime result, found 2")
+        runtime_rejected(duplicate_selected, "duplicate test identifiers")
 
         def duplicate_status_key(changed_paths) -> None:
             path = changed_paths[selected["suite"]]
@@ -239,13 +244,19 @@ def coverage_manifest_checks() -> None:
 
         runtime_rejected(duplicate_status_key, "duplicate JSON key: status")
 
+        def unreferenced_failure(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            path.write_text(path.read_text() + '{"id":"unreferenced-failure","status":"FAIL"}\n')
+
+        runtime_rejected(unreferenced_failure, "non-PASS")
+
         first_suite = next(iter(paths))
         paths[first_suite].write_text("")
         try:
             verifier.attest(manifest, "postgresql", "18", paths,
                             {"installcheck", "dump_restore"})
         except RuntimeError as error:
-            if "runtime result has no object rows" not in str(error):
+            if "no test results" not in str(error):
                 raise AssertionError(f"unexpected missing-result rejection: {error}") from error
         else:
             raise AssertionError("missing runtime results were accepted")

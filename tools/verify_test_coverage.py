@@ -7,6 +7,9 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.strict_results import loads as strict_json_loads, result_rows, validate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,8 +49,8 @@ EXPECTED_SECTION_DIGESTS = {
     "requirements": "d914017acccda38a8b3983648083977b8fc33615152ef2104306bb32b68e179d",
     "claims": "cddbd79e0645fe623190f75b1157d857849eeadf923d273188ea43d572aa541e",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "supplemental_evidence": "a51a08c065c708e945efbcb2fe1a0f9d8f0e4992ef56591f094ca0e25fa937f2",
-    "runtime_evidence": "179aeafc774fca0738c8e38d475b99a9d8f871a7358fdf1351b265d4232b7699",
+    "supplemental_evidence": "2fc26d282fe5d8ab4c629c42edeb797c589bdf8f7d51e63dcad781fb4971fe0b",
+    "runtime_evidence": "71c7520653672980500c36677c8d7d58389707069eb8660f72b7e4334e34c3c6",
 }
 
 
@@ -68,10 +71,6 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
         require(key not in result, f"duplicate JSON key: {key}")
         result[key] = value
     return result
-
-
-def strict_json_loads(content: str) -> object:
-    return json.loads(content, object_pairs_hook=reject_duplicate_keys)
 
 
 def source(entry: dict, *, label: str) -> str:
@@ -203,21 +202,6 @@ def verify(manifest: dict) -> None:
                 f"{name} differs from the reviewed PGJT-40 contract")
 
 
-def result_rows(path: Path) -> list[dict]:
-    require(path.is_file(), f"runtime result does not exist: {path}")
-    content = path.read_text()
-    try:
-        value = strict_json_loads(content)
-    except json.JSONDecodeError:
-        rows = [strict_json_loads(line)
-                for line in content.splitlines() if line.strip()]
-    else:
-        rows = value if isinstance(value, list) else [value]
-    require(rows and all(isinstance(row, dict) for row in rows),
-            f"runtime result has no object rows: {path}")
-    return rows
-
-
 def attest(manifest: dict, scope: str, postgresql: str | None,
            results: dict[str, Path], passed_suites: set[str]) -> dict:
     verify(manifest)
@@ -228,7 +212,7 @@ def attest(manifest: dict, scope: str, postgresql: str | None,
                 "PostgreSQL version is required for database attestation")
     else:
         require(postgresql is None, "repository attestation cannot declare PostgreSQL")
-    parsed = {suite: result_rows(path) for suite, path in results.items()}
+    parsed = {suite: validate(result_rows(path), suite) for suite, path in results.items()}
     evidence = {item["test_id"]: item for item in manifest["requirements"]}
     evidence.update({item["test_id"]: item
                      for item in manifest.get("supplemental_evidence", [])})

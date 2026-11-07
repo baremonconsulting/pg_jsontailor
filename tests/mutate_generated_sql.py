@@ -3,6 +3,8 @@
 from __future__ import annotations
 import argparse, json, subprocess, sys, tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.strict_results import result_rows, validate
 
 MUTATIONS = {
  "etag": ("IF cur IS NULL OR cur#>>'{_metadata,etag}' IS DISTINCT FROM doc#>>'{_metadata,etag}' THEN", "IF cur IS NULL THEN"),
@@ -32,7 +34,7 @@ def suites(args,directory,label):
   if script=="validation_security.py": cmd += ["--schema",str(args.repo/"examples/shop_schema.sql"),"--spec",str(args.repo/"examples/orders_dv.spec.json")]
   result=subprocess.run(cmd,text=True,capture_output=True)
   if not output.is_file(): raise RuntimeError(f"{script} produced no structured evidence: {result.stderr[-500:]}")
-  rows=[json.loads(line) for line in output.read_text().splitlines() if line.strip()]
+  rows=validate(result_rows(output), {'validation_security.py':'validation','security_contract_matrix.py':'security'}[script], allow_failures=True)
   if not rows or any(row.get("status") not in {"PASS","FAIL"} for row in rows): raise RuntimeError(f"{script} produced invalid structured evidence")
   identifiers=[str(row.get("id",row.get("name",row.get("test_id")))) for row in rows]
   if len(identifiers)!=len(set(identifiers)) or set(identifiers)!=EXPECTED_IDS[script]: raise RuntimeError(f"{script} produced an incomplete evidence inventory")
