@@ -31,7 +31,7 @@ SELECT api.orders_dv__delete_document(:inserted_id, :'current_etag') IS NOT NULL
 AS deleted \gset
 SELECT NOT EXISTS(SELECT FROM shop.orders WHERE order_id = :inserted_id)
    AND NOT EXISTS(SELECT FROM shop.order_items WHERE order_id = :inserted_id)
-   AND :deleted AS cleaned \gset
+   AND :'deleted'::boolean AS cleaned \gset
 \if :cleaned
 \echo quickstart/delete=PASS
 \else
