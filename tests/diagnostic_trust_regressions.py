@@ -32,12 +32,13 @@ def provenance(folder: Path) -> dict:
             "started_at": "2026-11-07T00:00:00+00:00"}
 
 def verify(folder: Path):
-    with mock.patch("bench.diagnostic_evidence.verify_attestation", return_value={}):
+    with mock.patch("bench.diagnostic_evidence.verify_attestation", return_value={'postgresql': '18.6'}):
         return verify_diagnostic(folder, candidate="1" * 40,
                                  trusted_key=folder / "trusted.pem", repo=ROOT)
 
 def environment() -> dict:
-    return {'postgresql': '18.6', 'postgresql_major': '18', 'server_settings': {'jit': 'off'},
+    return {'postgresql': '18.6', 'postgresql_major': '18',
+            'server_settings': {'jit': 'off', 'max_parallel_workers_per_gather': '0'},
             'platform': 'test', 'cpu': 'test', 'memory': 'test', 'storage': 'test', 'load': 'test',
             'database': 'test', 'pg_host': 'test', 'pg_port': '1', 'pg_user': 'test',
             'pg_bin': '/test', 'python': sys.version, 'sizes': [0, 1, 10, 100, 1000],
@@ -89,18 +90,14 @@ class DiagnosticTrust(unittest.TestCase):
             self.assertFalse(failed["publishable"])
             self.assertFalse(failed["restoration_verified"])
 
-    def test_every_required_interruption_phase_is_retained(self):
-        phases = ["between-arms", "statement", "semantic-read-back", "rollback", "restoration"]
-        for phase in phases:
+    def test_failure_phase_without_active_constituent_is_rejected(self):
+        for phase in ["statement", "semantic-read-back", "rollback", "restoration"]:
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
                 folder = Path(temporary)
                 journal = DiagnosticJournal(folder, provenance(folder))
-                journal.fail(phase, RuntimeError("forced " + phase),
-                             "failed" if phase in {"rollback", "restoration"} else "not-reached",
-                             {"statement": 1})
-                result = verify(folder)
-                self.assertEqual(result["outcome"], "TERMINAL_FAIL")
-                self.assertFalse(result["publishable"])
+                journal.fail(phase, RuntimeError("forced " + phase), "not-reached", {"statement": 1})
+                with self.assertRaisesRegex(RuntimeError, "no active constituent"):
+                    verify(folder)
 
     def test_release_benchmark_verifier_rejects_diagnostic_marker_first(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -179,6 +176,26 @@ print('ready',flush=True); time.sleep(60)
             result = verify(folder)
             self.assertEqual(result["outcome"], "INCOMPLETE_PREFIX")
             self.assertFalse(result["restoration_verified"])
+
+    def test_sigterm_and_corrupt_installation_remain_untrusted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            script = """
+import json,sys,time
+from pathlib import Path
+from bench.diagnostic_evidence import DiagnosticJournal
+DiagnosticJournal(Path(sys.argv[1]),json.loads(sys.argv[2])); print('ready',flush=True); time.sleep(60)
+"""
+            process = subprocess.Popen([sys.executable, "-c", script, str(folder),
+                                        json.dumps(provenance(folder))], cwd=ROOT,
+                                       stdout=subprocess.PIPE, text=True)
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=10); process.stdout.close()
+            self.assertEqual(verify(folder)["outcome"], "INCOMPLETE_PREFIX")
+            (folder / "installation.log").write_text("corrupt\n")
+            with self.assertRaisesRegex(RuntimeError, "installation log differs"):
+                verify(folder)
 
 
 if __name__ == "__main__":

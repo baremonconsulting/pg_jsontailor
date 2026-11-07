@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 from bench.installation import canonical, sha256, verify_attestation, require
-from bench.verify_results import verify_plan_node, verify_semantics
+from bench.verify_results import verify_plan_node, verify_semantics, stable
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 
 JOURNAL = ".diagnostic-events.jsonl"
@@ -144,12 +144,17 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
     require(sha256((repo / 'bench/workload.py').read_bytes()) == provenance['workload_sha256']
             and sha256((repo / 'bench/duality_overhead.py').read_bytes()) == provenance['producer_sha256'],
             'diagnostic protocol identity differs')
-    verify_attestation(installation, repo=repo, candidate=candidate, trusted_key=trusted_key)
+    attestation = verify_attestation(installation, repo=repo, candidate=candidate,
+                                     trusted_key=trusted_key)
 
     environment_seen = False
     sessions, states, completed_coordinates, active = set(), {}, set(), None
     statement_plans = []
+    witnesses = {}
     last_completed = None
+    expected_session = expected_size = expected_operation = expected_run = expected_pair = 0
+    expected_warmup = True
+    warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
     for event in events[1:]:
         kind, payload = event['kind'], event['payload']
         require(isinstance(payload, dict), 'invalid diagnostic payload')
@@ -164,12 +169,22 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and payload['operations'] == list(OPERATIONS) and payload['warmups'] == 10
                     and payload['maximum_warmups'] == 30 and payload['stability_threshold'] == .10
                     and payload['repetitions'] >= 50 and payload['sessions'] == 3
-                    and isinstance(payload['server_settings'], dict) and payload['server_settings'],
+                    and payload['postgresql_major'] in {'17', '18', '19'}
+                    and isinstance(payload['postgresql'], str)
+                    and payload['postgresql'].startswith(payload['postgresql_major'])
+                    and payload['postgresql'] == attestation['postgresql']
+                    and isinstance(payload['server_settings'], dict)
+                    and payload['server_settings'].get('jit') == 'off'
+                    and payload['server_settings'].get('max_parallel_workers_per_gather') == '0'
+                    and all(isinstance(payload[name], str) and payload[name]
+                            for name in ['platform', 'cpu', 'memory', 'storage', 'load', 'database',
+                                         'pg_host', 'pg_port', 'pg_user', 'pg_bin', 'python']),
                     'invalid diagnostic environment')
             environment_seen = True
         elif kind == 'session-start':
             require(environment_seen and active is None and set(payload) == {'session', 'pid', 'backend_start'}
-                    and payload['session'] == len(sessions) and payload['session'] in range(3)
+                    and payload['session'] == expected_session and payload['session'] == len(sessions)
+                    and payload['session'] in range(3)
                     and type(payload['pid']) is int and payload['pid'] > 0
                     and isinstance(payload['backend_start'], str) and payload['backend_start'],
                     'invalid diagnostic backend identity/order')
@@ -179,6 +194,16 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and sha256(canonical(payload['value'])) == payload['sha256'],
                     'invalid diagnostic semantic state')
             states[payload['sha256']] = payload['value']
+        elif kind == 'semantic-witness':
+            require(active is not None and all(payload.get(k) == v for k, v in active.items())
+                    and payload.get('role') in {'before', 'after', 'rollback'}
+                    and payload.get('sha256') in states
+                    and payload['role'] not in witnesses,
+                    'invalid diagnostic semantic witness')
+            expected_role = ('before' if not witnesses else 'after' if set(witnesses) == {'before'}
+                             else 'rollback')
+            require(payload['role'] == expected_role, 'diagnostic semantic witness order differs')
+            witnesses[payload['role']] = payload['sha256']
         elif kind == 'constituent-start':
             require(environment_seen and sessions and active is None, 'overlapping diagnostic constituent')
             required_coordinates = {'session', 'size', 'operation', 'implementation', 'run', 'warmup', 'pair_order'}
@@ -189,11 +214,17 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and payload['pair_order'] in {0, 1}, 'invalid diagnostic constituent coordinates')
             order = IMPLEMENTATIONS if payload['run'] % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
             require(order[payload['pair_order']] == payload['implementation'], 'diagnostic pair order differs')
+            expected_order = IMPLEMENTATIONS if expected_run % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
+            require(payload == {'session': expected_session, 'size': SIZES[expected_size],
+                    'operation': OPERATIONS[expected_operation],
+                    'implementation': expected_order[expected_pair], 'run': expected_run,
+                    'warmup': expected_warmup, 'pair_order': expected_pair},
+                    'diagnostic global sample order differs')
             coordinate_key = tuple(payload[name] for name in
                 ['session', 'size', 'operation', 'implementation', 'run'])
             require(coordinate_key not in completed_coordinates,
                     'duplicate diagnostic logical attempt')
-            active, statement_plans = payload, []
+            active, statement_plans, witnesses = payload, [], {}
         elif kind == 'statement-complete':
             require(active is not None and all(payload.get(k) == v for k, v in active.items()),
                     'diagnostic statement coordinates differ')
@@ -216,7 +247,9 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             require(len(statement_plans) == len(expected) and payload.get('restoration') == 'verified',
                     'diagnostic constituent incomplete')
             refs = [payload.get(name) for name in ['before', 'after', 'rollback']]
-            require(all(ref in states for ref in refs), 'diagnostic semantic reference missing')
+            require(all(ref in states for ref in refs)
+                    and witnesses == dict(zip(['before', 'after', 'rollback'], refs)),
+                    'diagnostic semantic reference missing')
             verify_semantics({'before': states[refs[0]], 'after': states[refs[1]],
                               'rollback': states[refs[2]],
                               'branch': active['operation'].removeprefix('merge_')
@@ -231,6 +264,27 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             completed_coordinates.add(tuple(active[name] for name in
                 ['session', 'size', 'operation', 'implementation', 'run']))
             last_completed, active = dict(active), None
+            if expected_warmup:
+                warmup_values[last_completed['implementation']].append(payload['execution_ms'])
+            if expected_pair == 0:
+                expected_pair = 1
+            else:
+                expected_pair = 0
+                expected_run += 1
+                if expected_warmup and expected_run >= 10 and expected_run % 5 == 0 \
+                        and all(stable(warmup_values[name]) for name in IMPLEMENTATIONS):
+                    expected_warmup = False
+                warmup_count = len(warmup_values[IMPLEMENTATIONS[0]])
+                if not expected_warmup and expected_run == warmup_count + 50:
+                    expected_operation += 1
+                    expected_run, expected_warmup = 0, True
+                    warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
+                    if expected_operation == len(OPERATIONS):
+                        expected_operation = 0
+                        expected_size += 1
+                        if expected_size == len(SIZES):
+                            expected_size = 0
+                            expected_session += 1
         elif kind == 'terminal-failure':
             require(event is events[-1] and set(payload) == {'phase', 'error_type', 'error', 'restoration', 'interrupted'}
                     and payload['restoration'] in {'verified', 'failed', 'not-reached'},
@@ -238,6 +292,21 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             require(payload['phase'] in {'database-setup', 'constituent', 'statement',
                     'semantic-read-back', 'rollback', 'restoration', 'between-arms'},
                     'invalid diagnostic failure phase')
+            if active is not None:
+                require(isinstance(payload['interrupted'], dict)
+                        and all(payload['interrupted'].get(name) == value
+                                for name, value in active.items()),
+                        'diagnostic interruption coordinates differ')
+                if payload['phase'] == 'statement':
+                    index = payload['interrupted'].get('statement')
+                    expected = statements(active['operation'], active['implementation'], active['size'])
+                    require(type(index) is int and index == len(statement_plans) and index < len(expected)
+                            and payload['interrupted'].get('sql') == expected[index],
+                            'diagnostic interrupted statement differs')
+            else:
+                require(payload['phase'] == 'database-setup'
+                        or (payload['phase'] == 'between-arms' and last_completed is not None),
+                        'diagnostic failure phase has no active constituent')
             if payload['restoration'] == 'verified':
                 require(active is None and last_completed is not None and payload['phase'] == 'between-arms',
                         'diagnostic restoration is not witnessed')

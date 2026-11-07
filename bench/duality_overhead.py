@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 from datetime import datetime, timezone
 import json
 import os
@@ -182,10 +183,12 @@ diagnostic = DiagnosticJournal(OUT, {
 original_excepthook = sys.excepthook
 def diagnostic_excepthook(error_type, error, traceback):
     try:
-        restoration = ('failed' if diagnostic_phase['phase'] in {'rollback', 'restoration'}
-                       else 'not-reached')
-        diagnostic.fail(diagnostic_phase['phase'], error, restoration,
-                        diagnostic_phase['interrupted'])
+        if not (isinstance(error, OSError) and error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO}):
+            restoration = ('verified' if diagnostic_phase['phase'] == 'between-arms'
+                           else 'failed' if diagnostic_phase['phase'] in {'rollback', 'restoration'}
+                           else 'not-reached')
+            diagnostic.fail(diagnostic_phase['phase'], error, restoration,
+                            diagnostic_phase['interrupted'])
     except BaseException as diagnostic_error:
         print(f'diagnostic finalisation failed: {diagnostic_error}', file=sys.stderr)
     original_excepthook(error_type, error, traceback)
@@ -298,6 +301,8 @@ for session_number in range(1 if args.semantic_check_only else 3):
                         session.execute('BEGIN;')
                         before = snapshot(session, size)
                         before_id = intern(before)
+                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'before',
+                                                               'sha256': before_id})
                         workload = statements(operation, implementation, size)
                         def retain_statement(index, statement, plan):
                             diagnostic.append('statement-complete', {**coordinates, 'statement': index,
@@ -309,11 +314,15 @@ for session_number in range(1 if args.semantic_check_only else 3):
                         diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
                         after = snapshot(session, size)
                         after_id = intern(after)
+                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'after',
+                                                               'sha256': after_id})
                         diagnostic_phase.update(phase='rollback', interrupted=coordinates)
                         session.execute('ROLLBACK;')
                         diagnostic_phase.update(phase='restoration', interrupted=coordinates)
                         restored = snapshot(session, size)
                         restored_id = intern(restored)
+                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'rollback',
+                                                               'sha256': restored_id})
                         semantic = {'before': before, 'after': after, 'rollback': restored,
                             'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
                         verify_semantics(semantic, size, operation)
@@ -340,7 +349,13 @@ for session_number in range(1 if args.semantic_check_only else 3):
                             warmup_count = repetition
                         elif repetition == 30:
                             raise RuntimeError(f'warm-up stability FAIL after 30 pairs: {session_number}:{size}:{operation}')
-    finally:
+    except BaseException:
+        try:
+            session.close()
+        except BaseException as close_error:
+            print(f'persistent psql close after failure also failed: {close_error}', file=sys.stderr)
+        raise
+    else:
         session.close()
 
 if args.semantic_check_only:
