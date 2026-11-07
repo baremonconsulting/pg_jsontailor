@@ -29,6 +29,7 @@ def provenance(folder: Path) -> dict:
             "installation_log_sha256": sha256((folder / "installation.log").read_bytes()),
             "workload_sha256": sha256((ROOT / "bench/workload.py").read_bytes()),
             "producer_sha256": sha256((ROOT / "bench/duality_overhead.py").read_bytes()),
+            "executor_sha256": sha256((ROOT / "bench/benchmark_execution.py").read_bytes()),
             "command": ["python3", "bench/duality_overhead.py"],
             "started_at": "2026-11-07T00:00:00+00:00"}
 
@@ -82,6 +83,13 @@ class DiagnosticTrust(unittest.TestCase):
             invalid['source_commit'] = 'not-a-commit'
             journal = DiagnosticJournal(folder, invalid)
             with self.assertRaises(RuntimeError):
+                verify(folder)
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            invalid = provenance(folder)
+            invalid['executor_sha256'] = '0' * 64
+            DiagnosticJournal(folder, invalid)
+            with self.assertRaisesRegex(RuntimeError, 'protocol identity differs'):
                 verify(folder)
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)

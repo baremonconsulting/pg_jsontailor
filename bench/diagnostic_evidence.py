@@ -124,7 +124,7 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
         previous = event["digest"]
     header = events[0]
     required = {"source_commit", "source_dirty", "installation_sha256", "installation_log_sha256",
-                "workload_sha256", "producer_sha256", "command", "started_at"}
+                "workload_sha256", "producer_sha256", "executor_sha256", "command", "started_at"}
     if header["kind"] != "header" or not isinstance(header["payload"], dict) \
             or set(header["payload"]) != required or header["payload"]["source_dirty"] is not False:
         raise RuntimeError("invalid diagnostic provenance")
@@ -132,7 +132,7 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
     require(re.fullmatch('[0-9a-f]{40}', candidate) is not None
             and provenance['source_commit'] == candidate, 'diagnostic candidate differs')
     for name in ['installation_sha256', 'installation_log_sha256', 'workload_sha256',
-                 'producer_sha256']:
+                 'producer_sha256', 'executor_sha256']:
         require(isinstance(provenance[name], str)
                 and re.fullmatch('[0-9a-f]{64}', provenance[name]), 'invalid diagnostic digest')
     installation = folder / 'installation.json'
@@ -142,7 +142,8 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
     require(sha256(installation_log.read_bytes()) == provenance['installation_log_sha256'],
             'diagnostic installation log differs')
     require(sha256((repo / 'bench/workload.py').read_bytes()) == provenance['workload_sha256']
-            and sha256((repo / 'bench/duality_overhead.py').read_bytes()) == provenance['producer_sha256'],
+            and sha256((repo / 'bench/duality_overhead.py').read_bytes()) == provenance['producer_sha256']
+            and sha256((repo / 'bench/benchmark_execution.py').read_bytes()) == provenance['executor_sha256'],
             'diagnostic protocol identity differs')
     attestation = verify_attestation(installation, repo=repo, candidate=candidate,
                                      trusted_key=trusted_key)

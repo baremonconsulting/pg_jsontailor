@@ -157,6 +157,7 @@ diagnostic = DiagnosticJournal(OUT, {
     'installation_log_sha256': sha256((OUT / 'installation.log').read_bytes()),
     'workload_sha256': sha256((ROOT / 'bench/workload.py').read_bytes()),
     'producer_sha256': sha256(Path(__file__).read_bytes()),
+    'executor_sha256': sha256((ROOT / 'bench/benchmark_execution.py').read_bytes()),
     'command': [sys.executable, *sys.argv],
     'started_at': STARTED,
 })
