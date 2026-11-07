@@ -14,18 +14,20 @@ from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.release_authority import GitHub, require
+from tools.release_authority import GitHub, require, authority_environment
 from tools.strict_results import loads
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def request(path, method='GET', payload=None):
+def request(path, method='GET', payload=None, *, authority=False):
+    require(not authority or method == 'GET', 'authority credential is read-only')
     command = ['gh', 'api', '-X', method, '-H', 'X-GitHub-Api-Version: 2022-11-28', path]
     if payload is not None:
         command += ['--input', '-']
     result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                            capture_output=True, text=True)
+                            capture_output=True, text=True,
+                            env=authority_environment() if authority else None)
     require(result.returncode == 0, f'governance API failed: {method} {path}: {result.stderr.strip()}')
     return loads(result.stdout) if result.stdout.strip() else None
 
@@ -137,9 +139,9 @@ def main():
     policy = loads((ROOT / '.github/governance-policy.json').read_text())
     if args.check_release_environment:
         require(not args.apply, 'environment check is read-only')
-        value = request(f'repos/{policy["repository"]}/environments/release')
+        value = request(f'repos/{policy["repository"]}/environments/release', authority=True)
         verify_environment(value, policy['emergency_owner']['id'])
-        require(request(f'repos/{policy["repository"]}/immutable-releases')['enabled'] is True,
+        require(request(f'repos/{policy["repository"]}/immutable-releases', authority=True)['enabled'] is True,
                 'immutable releases are not enabled')
         print('live release environment: PASS')
         return

@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - name: Consume approved index and signature; require main-authority rejection
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
         run: |
           python3 tools/prepare_release.py --candidate --sha "$GITHUB_SHA" --ref "$GITHUB_REF" \
             --evidence evidence --output package

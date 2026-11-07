@@ -7,6 +7,7 @@ trusted test snapshots; fixture success is not live release approval.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -24,15 +25,27 @@ def require(value, message):
         raise RuntimeError(message)
 
 
+def authority_environment():
+    """Use only the separately provisioned read-only authority credential."""
+    token = os.environ.get('GH_AUTHORITY_TOKEN', '').strip()
+    require(token, 'GH_AUTHORITY_TOKEN read-only authority credential is required')
+    environment = dict(os.environ)
+    environment.pop('GITHUB_TOKEN', None)
+    environment['GH_TOKEN'] = token
+    return environment
+
+
 class GitHub:
-    def __init__(self, repository):
+    def __init__(self, repository, *, authority=True):
         require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository), 'invalid repository')
         self.repository = repository
+        self.authority = authority
 
     def get(self, path):
         result = subprocess.run(['gh', 'api', '-H', 'Accept: application/vnd.github+json',
                                  '-H', 'X-GitHub-Api-Version: 2022-11-28',
-                                 f'repos/{self.repository}/{path}'], text=True, capture_output=True)
+                                 f'repos/{self.repository}/{path}'], text=True, capture_output=True,
+                                env=authority_environment() if self.authority else None)
         require(result.returncode == 0, f'GitHub API failure: {path}: {result.stderr.strip()}')
         return loads(result.stdout)
 

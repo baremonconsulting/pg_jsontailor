@@ -23,6 +23,25 @@ mutant and standalone results. Both gates consume that index; a bare check name
 or an unapproved producer JSON file is insufficient. Fixtures test the positive
 algorithm but never supply live approval.
 
+Live authority reads use the separately provisioned
+`RELEASE_AUTHORITY_READ_TOKEN` Actions secret, exposed only to read-only
+validation steps as `GH_AUTHORITY_TOKEN`. There is no fallback to `GITHUB_TOKEN`,
+`GH_TOKEN` or a runner's saved CLI credentials: a missing secret fails before the
+first API request. Use a repository-scoped fine-grained personal access token or
+GitHub App installation token with **read-only** Administration, Actions, Checks,
+Contents and Environments permissions (and automatically granted Metadata).
+Do not grant any write permission. GitHub requires
+[Administration: read for branch-protection reads](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection).
+The owner must provision, rotate and verify access with that identity before
+rehearsal; no credential is created or inferred by the tooling. Short-lived App
+tokens must be supplied fresh and remain valid for the validation job.
+
+The publication step receives only the separate `github.token` with
+`contents: write`; it does not receive the authority secret. Authority and
+environment read-back run immediately beforehand in a separate step. The
+post-publication asset verifier uses the publication token for read-only API
+requests and does not need Administration access.
+
 `tools/prepare_release.py` is shared by rehearsal and release preparation. It
 rebuilds `git archive`, requires the approved archive checksum, verifies the full
 generated-SQL legal notice, consumes the index and approvals, checks the signed
@@ -122,7 +141,8 @@ Name an independent collaborator to review releases and provision a real signing
 identity/key before freeze. Create/read back the `release` environment with
 required independent review, prevention of self-review, no admin bypass and
 protected-branch deployment restrictions. The checker fails closed while it is
-absent. Then collect all frozen-SHA CI/nightly/benchmark/archive evidence and an
+absent. Provision and verify the read-only authority secret described above.
+Then collect all frozen-SHA CI/nightly/benchmark/archive evidence and an
 approved signed candidate record. Protected-main positive authority, a final
 publication record, actual publication and live post-publication verification
 remain separate pending acceptance criteria; no tag or release is created by

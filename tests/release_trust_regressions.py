@@ -1,6 +1,7 @@
 """Trusted release fixtures prove algorithms, never live release approval."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -110,8 +111,29 @@ class RunAuthority(unittest.TestCase):
                       [{'total_count': 101, 'jobs': first}, {'total_count': 102, 'jobs': [{'id': 100}]}],
                       [{'total_count': 101, 'jobs': first}, {'total_count': 101, 'jobs': [{'id': 0}]}]]:
             with patch.object(api, 'get', side_effect=pages), self.assertRaises(RuntimeError): api.pages('jobs', 'jobs')
-        with patch('subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'unavailable')):
+        with patch.dict(os.environ, {'GH_AUTHORITY_TOKEN': 'fixture-read-only'}), \
+                patch('subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'unavailable')):
             with self.assertRaisesRegex(RuntimeError, 'API failure'): api.get('actions/runs')
+
+    def test_authority_identity_never_falls_back_to_publication_or_saved_credentials(self):
+        api = authority.GitHub(POLICY['repository'])
+        for environment in [{}, {'GH_TOKEN': 'publication'}, {'GITHUB_TOKEN': 'publication'},
+                            {'GH_AUTHORITY_TOKEN': '  ', 'GH_TOKEN': 'publication'}]:
+            with self.subTest(environment=list(environment)), patch.dict(os.environ, environment, clear=True), \
+                    patch('subprocess.run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'read-only authority credential is required'):
+                    api.get('branches/main/protection')
+                run.assert_not_called()
+        with patch.dict(os.environ, {'GH_AUTHORITY_TOKEN': 'read-only', 'GH_TOKEN': 'publication',
+                                     'GITHUB_TOKEN': 'publication'}, clear=True), \
+                patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
+            api.get('branches/main/protection')
+            environment = run.call_args.kwargs['env']
+            self.assertEqual(environment['GH_TOKEN'], 'read-only')
+            self.assertNotIn('GITHUB_TOKEN', environment)
+            self.assertNotIn('read-only', ' '.join(run.call_args.args[0]))
+        with self.assertRaisesRegex(RuntimeError, 'read-only'):
+            governance.request('repos/example/repo', 'PUT', {}, authority=True)
 
     def test_index_consumption_and_authoritative_binding(self):
         sys.path.insert(0, str(ROOT / 'tests'))
@@ -222,10 +244,11 @@ class SignedRecords(unittest.TestCase):
 
     def test_postpublication_positive_fixture_and_tampering(self):
         self.postverify(self.published())
-        for change in ['tag', 'mutable', 'draft', 'prerelease', 'missing-asset', 'extra-asset', 'digest', 'size', 'state']:
+        for change in ['tag', 'annotated-tag', 'mutable', 'draft', 'prerelease', 'missing-asset', 'extra-asset', 'digest', 'size', 'state']:
             with self.subTest(change=change):
                 value = self.published(); release = value['release']
                 if change == 'tag': value['tag']['object']['sha'] = 'b' * 40
+                elif change == 'annotated-tag': value['tag']['object']['type'] = 'tag'
                 elif change == 'mutable': release['immutable'] = False
                 elif change in {'draft', 'prerelease'}: release[change] = True
                 elif change == 'missing-asset': release['assets'].pop()
@@ -271,6 +294,23 @@ class GovernancePolicy(unittest.TestCase):
         release = (ROOT / '.github/workflows/release.yml').read_text()
         self.assertEqual(release.count('      contents: write'), 1)
         self.assertIn('environment: release', release)
+
+    def test_read_only_authority_and_publication_credentials_are_separate(self):
+        candidate = (ROOT / '.github/workflows/candidate-rehearsal.yml').read_text()
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        secret = 'GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}'
+        self.assertEqual(candidate.count(secret), 1)
+        self.assertNotIn('GH_TOKEN: ${{ github.token }}', candidate)
+        self.assertEqual(release.count(secret), 2)
+        write = release.split('- name: Publish verified package without authority credentials', 1)[1]
+        self.assertNotIn('GH_AUTHORITY_TOKEN', write)
+        self.assertIn('GH_TOKEN: ${{ github.token }}', write)
+        self.assertNotIn('tools/prepare_release.py', write)
+        self.assertNotIn('tools/repository_governance.py', write)
+        for document in ['docs/GITHUB_SETUP.md', 'docs/RELEASE_AUTHORITY.md']:
+            text = (ROOT / document).read_text()
+            self.assertNotIn('annotated', text)
+            self.assertIn('lightweight', text)
 
 
 if __name__ == '__main__':

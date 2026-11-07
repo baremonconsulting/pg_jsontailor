@@ -98,7 +98,7 @@ until an independent reviewer is named.
 The authorised sequence also requires version agreement across
 `pg_jsontailor.control`, `CHANGELOG.md` and `CITATION.cff`; a pull request with all
 required checks; all six `main` checks on the exact squash SHA; final PG17/18/19
-benchmark evidence for that exact immutable candidate; an existing annotated
+benchmark evidence for that exact immutable candidate; an existing lightweight
 version tag on the verified `main` commit; and verification of the published
 release, source archive and checksum. Product-equivalence fingerprints never
 replace exact-SHA runs. The `Dependency review` push run compares the previous

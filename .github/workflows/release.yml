@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - name: Verify release environment and prepare approved package
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
         run: |
           set -euo pipefail
           python3 tools/repository_governance.py --check-release-environment
@@ -81,12 +81,17 @@ jobs:
           path: checked-package
       - name: Recheck authority immediately before the only write
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
         run: |
           set -euo pipefail
           python3 tools/repository_governance.py --check-release-environment
           python3 tools/prepare_release.py --sha "$GITHUB_SHA" --ref "$GITHUB_REF" --evidence evidence --output package
           diff --recursive --no-dereference package checked-package
+      - name: Publish verified package without authority credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           version="$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq '.object.type')" = commit
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq '.object.sha')" = "$GITHUB_SHA"

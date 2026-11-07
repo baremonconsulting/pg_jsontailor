@@ -44,7 +44,7 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--repository', default='baremonconsulting/pg_jsontailor')
     args = parser.parse_args()
-    api = GitHub(args.repository)
+    api = GitHub(args.repository, authority=False)
     snapshot = {'release': api.get(f'releases/tags/v{args.version}'),
                 'tag': api.get(f'git/ref/tags/v{args.version}')}
     verify(snapshot, args.sha, args.version, args.archive, args.checksum, args.record, args.signature,
