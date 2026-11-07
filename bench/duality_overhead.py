@@ -36,6 +36,8 @@ parser.add_argument("--warmups", type=int, default=10)
 parser.add_argument("--repetitions", type=int, default=50)
 parser.add_argument('--installation', type=Path, required=True)
 parser.add_argument('--trusted-key', type=Path, required=True)
+parser.add_argument('--semantic-check-only', action='store_true',
+                    help='run each semantic/plan probe once; never emit publishable timing evidence')
 parser.add_argument("--output", type=Path)
 parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run" / "socket")))
 parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
@@ -226,7 +228,7 @@ def intern(state):
     return identity
 
 
-for session_number in range(3):
+for session_number in range(1 if args.semantic_check_only else 3):
     session = PersistentPsql()
     try:
         session.execute('SET jit=off; SET max_parallel_workers_per_gather=0; SET statement_timeout=60000;')
@@ -236,8 +238,8 @@ for session_number in range(3):
         for size in SIZES:
             for operation in OPERATIONS:
                 warmup_values = {impl: [] for impl in IMPLEMENTATIONS}
-                warmup_count, repetition = None, 0
-                while warmup_count is None or repetition < warmup_count + REPETITIONS:
+                warmup_count, repetition = (0 if args.semantic_check_only else None), 0
+                while warmup_count is None or repetition < warmup_count + (1 if args.semantic_check_only else REPETITIONS):
                     warmup = warmup_count is None
                     order = IMPLEMENTATIONS if repetition % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
                     for pair_order, implementation in enumerate(order):
@@ -268,6 +270,13 @@ for session_number in range(3):
                             raise RuntimeError(f'warm-up stability FAIL after 30 pairs: {session_number}:{size}:{operation}')
     finally:
         session.close()
+
+if args.semantic_check_only:
+    if args.drop_database_after:
+        run([PG / 'dropdb', DB])
+    print(json.dumps({'status': 'PASS', 'semantic_probes': len(rows), 'candidate': source_commit,
+                      'purpose': 'semantic/installation smoke only; not performance evidence'}))
+    raise SystemExit(0)
 
 with (OUT / 'measurements.csv').open('w', newline='') as handle:
     writer = csv.DictWriter(handle, fieldnames=FIELDS)

@@ -56,7 +56,7 @@ Protect tags matching `v*`. Restrict creation and deletion to maintainers. A rel
 
 1. Update `pg_jsontailor.control`, `CHANGELOG.md` and `CITATION.cff` to the same version.
 2. Merge through a pull request after all required pull-request checks pass, including dependency review of the proposed change.
-3. After the squash commit reaches `main`, wait for all six `main` checks to pass on that exact commit. The release verifier compares the candidate's product-file fingerprints with the measured evidence, so an approved product-equivalent squash remains valid without relabelling the benchmark source commit. The `Dependency review` push run compares the previous `main` commit with the new squash commit; an invalid or missing comparison base fails closed.
+3. After the squash commit reaches `main`, wait for all six `main` checks to pass on that exact commit. Final benchmark evidence must identify the exact immutable candidate; product-equivalence fingerprints do not replace the required exact-SHA runs. The `Dependency review` push run compares the previous `main` commit with the new squash commit; an invalid or missing comparison base fails closed.
 4. Create and push an annotated tag such as `v0.2.0` on that verified `main` commit.
 5. The release workflow verifies all six successful check runs for the tagged SHA before packaging it.
 6. Verify the generated GitHub release, source archive and checksum.

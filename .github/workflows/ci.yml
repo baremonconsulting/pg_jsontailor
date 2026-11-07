@@ -38,16 +38,6 @@ jobs:
         run: |
           python3 tools/verify_test_coverage.py
           python3 tools/verify_repository_consistency.py
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg17
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg18
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg19
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg17
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg18
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg19
-          python3 bench/verify_results.py bench/reference/azure-11e6d74
-          python3 bench/verify_results.py bench/reference/azure-afa643c
-          python3 bench/verify_results.py bench/reference/azure-04d053e
-          python3 bench/verify_results.py bench/reference/azure-acecaae
           python3 tests/tooling_regressions.py
           python3 tests/documentation_regressions.py
           python3 tools/verify_generated_sql_notice.py

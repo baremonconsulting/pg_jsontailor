@@ -186,18 +186,16 @@ The repository contains several layers of verification:
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, benchmark and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and benchmark execution remain explicit integration or measurement scenarios; committed benchmark evidence is independently verified on every run. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
+Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, current-only benchmark protocol and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and final exact-candidate benchmark execution remain explicit integration or measurement scenarios. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
 
 ## Performance
 
 The write path uses set-based array reconciliation and set-wise validation.
-The current Azure reference at commit `039a555` records a 49.782 ms
-median and 50.721 ms p95 for complete replacement of a document with 1,000
-children. It is current release evidence only when the release-candidate
-verifier proves product equivalence with the candidate. Results are
-host-specific and do not represent a production SLO. See
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full semantic and provenance
-context.
+Final exact-SHA measurements on PostgreSQL 17, 18 and 19 are pending the
+merged security/runtime freeze. No current performance figures are published.
+The benchmark compares the candidate with lower-contract direct SQL using
+signed installation evidence, semantic assertions and three independently
+restarted paired-sample sessions. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Limitations
 

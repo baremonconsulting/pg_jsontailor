@@ -47,12 +47,13 @@ regardless of commit-message wording.
 - Added deterministic UTC-normalized `timestamptz` mappings.
 - Added generator provenance, inventory, non-mutating health checks and transactional regeneration.
 - Moved catalogue guards to statement scope and made mapped-array validation set-wise.
-- Added verified current benchmark evidence, custom and plain dump/restore CI, and a release-candidate consistency gate.
+- Added custom and plain dump/restore CI and a release-candidate consistency gate.
 - Prevented lifecycle inventory from executing health callbacks owned by another role with the inventory caller's privileges.
 - Preserved column ACLs during regeneration and rejected unmanaged view triggers or rules instead of silently dropping them.
 - Made UTC `timestamptz` JSON and ETag encoding injective and reversible across BC and AD eras.
 - Corrected and tested the least-privilege contract for locking ETag-included referenced objects.
-- Aligned dependency-audit evidence with squash-merge release checks and clarified benchmark provenance equivalence.
+- Aligned dependency-audit evidence with squash-merge release checks.
+- Required signed exact-candidate installation attestation and semantic/plan verification for current-only benchmarks; final three-major measurements await the merged freeze.
 - Rejected unvalidated object and array foreign keys during view generation.
 - Forwarded the selected maintenance database through every dump/restore database lifecycle command.
 
