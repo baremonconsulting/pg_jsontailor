@@ -6,7 +6,7 @@ The unreleased 0.2.0 development line receives security fixes. No earlier valida
 
 ## Reporting a vulnerability
 
-Please report suspected vulnerabilities privately through the contact details published at [baremon.eu](https://www.baremon.eu/). Do not open a public issue before the report has been assessed.
+Please report suspected vulnerabilities through the enabled [GitHub private vulnerability reporting channel](https://github.com/baremonconsulting/pg_jsontailor/security/advisories/new). Do not open a public issue before the report has been assessed. The repository owner receives confidential reports and arranges assessment; this is not a response-time guarantee.
 
 Include the affected version, PostgreSQL version, reproduction steps and expected impact. Remove credentials, personal data and customer identifiers from all reports.
 
