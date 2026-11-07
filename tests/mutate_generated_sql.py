@@ -83,6 +83,17 @@ GRANT USAGE ON SCHEMA shop TO jt50_limited;
 GRANT SELECT,INSERT ON shop.orders_dv TO jt50_limited;
 GRANT SELECT,INSERT,UPDATE,DELETE ON shop.orders,shop.customers,shop.order_items TO jt50_limited;
 GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA shop TO jt50_limited;
+DO $$BEGIN
+ IF has_function_privilege('jt50_limited','shop.orders_dv__bounded_array(bigint)','EXECUTE') THEN
+  RAISE EXCEPTION 'fresh mutation role unexpectedly has array-reader capability';
+ END IF;
+END$$;
+SELECT jsontailor.grant_array_reader('shop.orders_dv','jt50_limited',false);
+DO $$BEGIN
+ IF NOT has_function_privilege('jt50_limited','shop.orders_dv__bounded_array(bigint)','EXECUTE') THEN
+  RAISE EXCEPTION 'reviewed mutation array-reader capability was not granted';
+ END IF;
+END$$;
 ALTER TABLE shop.orders ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS jt50_deny ON shop.orders;
 CREATE POLICY jt50_deny ON shop.orders FOR ALL TO jt50_limited USING(true) WITH CHECK(true);
