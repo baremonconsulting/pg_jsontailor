@@ -78,47 +78,48 @@ make installcheck
 
 ## Quick start
 
-Given ordinary relational tables such as those in [`examples/shop_schema.sql`](examples/shop_schema.sql), generate a writable JSON view from a specification:
+Warning: use a disposable database only. The fixture
+[`examples/shop_schema.sql`](examples/shop_schema.sql) executes `DROP SCHEMA shop CASCADE`
+and destroys existing data and dependent objects. Never load it into an application database.
+The following shell walkthrough runs from the repository root, creates its own
+database and removes that database on exit. The connected role needs `CREATEDB`
+and permission to install the extension; install the extension files first.
+Connection settings (`PGHOST`, `PGPORT`, `PGUSER` and optionally the maintenance
+`PGDATABASE`) follow the usual libpq environment variables.
 
-```sql
-CREATE SCHEMA api;
-
-SELECT jsontailor.create_duality_view(
-    'api.orders_dv',
-    '{
-      "root": {
-        "table": "shop.orders",
-        "key": "order_id",
-        "fields": {"status": "status", "created": "created_at"},
-        "insert": true,
-        "update": true,
-        "delete": true
-      }
-    }'::jsonb
-);
+<!-- quickstart-smoke:start -->
+```sh
+set -euo pipefail
+quickstart_db="pgjt_quickstart_$$"
+createdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
+trap 'dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"' EXIT
+psql -X -v ON_ERROR_STOP=1 -d "$quickstart_db" \
+  -v spec="$(tr -d '\n' < examples/orders_dv.spec.json)" \
+  -f examples/quickstart.sql
+dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
+trap - EXIT
+echo quickstart/cleanup=PASS
 ```
+<!-- quickstart-smoke:end -->
+
+Expected markers are `quickstart/read=new`, `quickstart/update=PASS`,
+`quickstart/delete=PASS` and `quickstart/cleanup=PASS`. The
+[`walkthrough`](examples/quickstart.sql) loads the complete shipped mapping,
+inserts an order and child, reads its ETag, performs a guarded replacement and
+deletes the inserted order and its child using the current ETag. It leaves the
+seeded order untouched before the database is removed. `psql` variables use
+literal quoting (`:'spec'`); application clients should bind query parameters.
 
 The same DDL can be inspected before execution:
 
 ```sql
-SELECT jsontailor.duality_view_ddl(
-    'api.orders_dv',
-    '{
-      "root": {
-        "table": "shop.orders",
-        "key": "order_id",
-        "fields": {"status": "status", "created": "created_at"},
-        "insert": true,
-        "update": true,
-        "delete": true
-      }
-    }'::jsonb
-);
+SELECT jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb);
 ```
 
 In applications, pass the specification as a query parameter rather than reading a server-side file. Both the target view and every source table must be schema-qualified.
 
-Read a document:
+The following SQL shapes are application examples, not additional steps after
+the disposable database has been removed. Read a document:
 
 ```sql
 SELECT data

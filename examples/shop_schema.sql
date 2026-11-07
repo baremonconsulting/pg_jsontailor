@@ -1,5 +1,7 @@
 -- pg_jsontailor example schema with synthetic seed data.
 -- Used by examples/orders_dv.spec.json and by the mandatory tests.
+-- WARNING: DISPOSABLE DATABASE ONLY. The next statement destroys the shop
+-- schema and every dependent object, including existing data, with CASCADE.
 
 DROP SCHEMA IF EXISTS shop CASCADE;
 CREATE SCHEMA shop;
