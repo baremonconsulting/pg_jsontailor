@@ -48,6 +48,8 @@ jobs:
           python3 bench/verify_results.py bench/reference/azure-04d053e
           python3 bench/verify_results.py bench/reference/azure-acecaae
           python3 tests/tooling_regressions.py
+          python3 tests/documentation_regressions.py
+          python3 tools/verify_generated_sql_notice.py
           python3 tools/verify_release_candidate.py
           python3 tools/verify_test_coverage.py \
             --scope repository \
@@ -217,6 +219,36 @@ jobs:
             "$RUNNER_TEMP/partition-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 
+      - name: Execute documentation and standalone generated SQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/documentation_smoke.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/docs-quickstart-results.jsonl"
+          python3 tests/upgrade_documentation.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/upgrade-docs-results.jsonl"
+          python3 tests/public_contract.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/public-contract-results.jsonl"
+          python3 tests/standalone_generated_sql.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/standalone-results.jsonl"
+          python3 tools/verify_jsonl_results.py \
+            "$RUNNER_TEMP/docs-quickstart-results.jsonl" \
+            "$RUNNER_TEMP/upgrade-docs-results.jsonl" \
+            "$RUNNER_TEMP/public-contract-results.jsonl" \
+            "$RUNNER_TEMP/standalone-results.jsonl"
+
+      - name: Retain documentation and standalone evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: standalone-docs-pg${{ matrix.postgresql }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/docs-quickstart-results.jsonl
+            ${{ runner.temp }}/upgrade-docs-results.jsonl
+            ${{ runner.temp }}/public-contract-results.jsonl
+            ${{ runner.temp }}/standalone-results.jsonl
+
       - name: Verify custom and plain dump restore
         shell: bash
         run: |
@@ -322,6 +354,10 @@ jobs:
             --result "partitions=$RUNNER_TEMP/partition-results.jsonl" \
             --result "partition_restore=$RUNNER_TEMP/partition-restore-results.jsonl" \
             --result "restore_matrix=$RUNNER_TEMP/restore-matrix-results.jsonl" \
+            --result "docs_quickstart=$RUNNER_TEMP/docs-quickstart-results.jsonl" \
+            --result "upgrade_docs=$RUNNER_TEMP/upgrade-docs-results.jsonl" \
+            --result "public_contract=$RUNNER_TEMP/public-contract-results.jsonl" \
+            --result "standalone=$RUNNER_TEMP/standalone-results.jsonl" \
             --passed-suite installcheck \
             --passed-suite dump_restore \
             --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"
