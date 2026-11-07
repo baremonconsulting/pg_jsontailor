@@ -17,6 +17,17 @@ from tools.verify_generated_sql_notice import verify_archive
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def expect_candidate_denial(gate):
+    try:
+        gate()
+    except RuntimeError as error:
+        require('no authoritative main run for exact SHA/ref' in str(error)
+                or 'SHA is not an ancestor of protected main' in str(error),
+                f'release gate failed for an unexpected reason: {error}')
+    else:
+        raise RuntimeError('candidate unexpectedly satisfied protected-main release authority')
+
+
 def prepare(sha, ref, evidence, output, candidate):
     require(not output.exists(), 'never overwrite an existing package directory')
     require(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip() == sha,
@@ -61,14 +72,7 @@ def prepare(sha, ref, evidence, output, candidate):
     authority = verify(collect(api, policy, sha, mode, ref), policy, sha, mode, ref)
     verify_evidence(index_path, sha, evidence, approval, {**authority, **nightly})
     if candidate:
-        try:
-            verify(collect(api, policy, sha, 'main', 'refs/heads/main'), policy, sha)
-        except RuntimeError as error:
-            require('no authoritative main run for exact SHA/ref' in str(error)
-                    or 'SHA is not an ancestor of protected main' in str(error),
-                    f'release gate failed for an unexpected reason: {error}')
-        else:
-            raise RuntimeError('candidate unexpectedly satisfied protected-main release authority')
+        expect_candidate_denial(lambda: verify(collect(api, policy, sha, 'main', 'refs/heads/main'), policy, sha))
     (output / f'{archive.name}.sha256').write_text(f'{digest(archive)}  {archive.name}\n')
     for name in ['record.json', 'record.sig']:
         (output / name).write_bytes((evidence / name).read_bytes())

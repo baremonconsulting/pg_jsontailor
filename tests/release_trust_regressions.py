@@ -15,6 +15,7 @@ from tools import repository_governance as governance
 from tools.evidence_index import digest
 from tools.strict_results import loads
 from tools.verify_postpublication import verify as postverify
+from tools.prepare_release import expect_candidate_denial
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = 'a' * 40
@@ -48,6 +49,17 @@ def snapshot(mode='main', ref='refs/heads/main'):
 
 
 class RunAuthority(unittest.TestCase):
+    def test_candidate_expected_denial_never_accepts_outages_or_positive_main(self):
+        def gate(message):
+            def run(): raise RuntimeError(message)
+            return run
+        expect_candidate_denial(gate('ci: no authoritative main run for exact SHA/ref'))
+        expect_candidate_denial(gate('SHA is not an ancestor of protected main'))
+        with self.assertRaisesRegex(RuntimeError, 'unexpected reason'):
+            expect_candidate_denial(gate('GitHub API failure'))
+        with self.assertRaisesRegex(RuntimeError, 'unexpectedly satisfied'):
+            expect_candidate_denial(lambda: None)
+
     def test_main_nightly_candidate_are_distinct(self):
         self.assertEqual(set(authority.verify(snapshot(), POLICY, SHA)), {'ci', 'codeql', 'dependency'})
         for mode in ['nightly', 'candidate']:
