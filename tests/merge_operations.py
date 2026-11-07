@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from psql_results import tuples, document as returned_document
 
 
 def literal(value: str) -> str:
@@ -99,6 +100,7 @@ def main() -> int:
     # Mixed update/insert, child reconciliation, defaults and stored RETURNING values.
     setup(db)
     updated = document(db)
+    previous = json.loads(json.dumps(updated))
     updated["label"] = "updated"
     updated["children"][0]["qty"] = 2
     updated["children"].append({"label": "generated", "qty": 3})
@@ -107,8 +109,11 @@ def main() -> int:
     result = db.run(merge_sql(source,
         "WHEN MATCHED THEN UPDATE SET data=source.doc",
         "WHEN NOT MATCHED THEN INSERT(data) VALUES(source.doc)"), False)
-    returned_rows = [line for line in result.stdout.splitlines()
-                     if line.startswith(("INSERT|", "UPDATE|"))]
+    returned_rows = ["|".join(row) for row in tuples(result, "MERGE", 2, 3)]
+    for action, ident, value in tuples(result, "MERGE", 2, 3):
+        if action not in {"INSERT", "UPDATE"}:
+            raise RuntimeError("unexpected MERGE RETURNING action")
+        returned_document(value, document(db, int(ident)), previous if action == "UPDATE" else None)
     actions = sorted(line.split("|", 1)[0] for line in returned_rows)
     state = db.value("SELECT (SELECT label FROM jt_merge.roots WHERE id=1)||':'||"
                      "(SELECT label FROM jt_merge.roots WHERE id=2)||':'||"
@@ -137,6 +142,12 @@ def main() -> int:
         "WHEN MATCHED AND target.data#>>'{_metadata,etag}'=source.doc#>>'{_metadata,etag}' THEN DELETE"), False)
     delete_result = db.run(merge_sql("VALUES(1," + literal(json.dumps(delete_doc)) + "::jsonb)",
         "WHEN MATCHED AND target.data#>>'{_metadata,etag}'=source.doc#>>'{_metadata,etag}' THEN DELETE"), False)
+    deleted = tuples(delete_result, "MERGE", 1, 3)[0]
+    if deleted[:2] != ["DELETE", "1"]:
+        raise RuntimeError("incorrect MERGE DELETE RETURNING identity")
+    returned_document(deleted[2], delete_doc)
+    if db.value("SELECT count(*) FROM jt_merge.documents WHERE _id=1;") != "0":
+        raise RuntimeError("MERGE DELETE did not remove returned preimage")
     record("replacement preconditions",
            [db.state(stale_result), db.state(missing_result), db.state(incomplete_result),
             db.state(delete_result)] == ["PT412", "PT428", "PT422", None]
