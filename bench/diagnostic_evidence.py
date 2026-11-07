@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 from bench.installation import canonical, sha256, verify_attestation, require
@@ -16,6 +17,12 @@ from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 JOURNAL = ".diagnostic-events.jsonl"
 MANIFEST = ".diagnostic-manifest.json"
 SCHEMA_VERSION = 1
+
+def _candidate_blob(repo: Path, candidate: str, path: str) -> bytes:
+    result = subprocess.run(['git', '-C', str(repo), 'show', f'{candidate}:{path}'],
+                            capture_output=True)
+    require(result.returncode == 0, 'diagnostic candidate protocol file is unavailable: ' + path)
+    return result.stdout
 
 
 def _sync_directory(path: Path) -> None:
@@ -141,9 +148,9 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             'diagnostic installation envelope differs')
     require(sha256(installation_log.read_bytes()) == provenance['installation_log_sha256'],
             'diagnostic installation log differs')
-    require(sha256((repo / 'bench/workload.py').read_bytes()) == provenance['workload_sha256']
-            and sha256((repo / 'bench/duality_overhead.py').read_bytes()) == provenance['producer_sha256']
-            and sha256((repo / 'bench/benchmark_execution.py').read_bytes()) == provenance['executor_sha256'],
+    require(sha256(_candidate_blob(repo, candidate, 'bench/workload.py')) == provenance['workload_sha256']
+            and sha256(_candidate_blob(repo, candidate, 'bench/duality_overhead.py')) == provenance['producer_sha256']
+            and sha256(_candidate_blob(repo, candidate, 'bench/benchmark_execution.py')) == provenance['executor_sha256'],
             'diagnostic protocol identity differs')
     attestation = verify_attestation(installation, repo=repo, candidate=candidate,
                                      trusted_key=trusted_key)

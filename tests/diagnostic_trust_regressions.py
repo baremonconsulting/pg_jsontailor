@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bench.diagnostic_evidence import DiagnosticJournal, MANIFEST, JOURNAL, verify_diagnostic
+from bench.diagnostic_evidence import DiagnosticJournal, MANIFEST, JOURNAL, _candidate_blob, verify_diagnostic
 from bench.verify_results import verify_results
 from bench.verify_results import stable
 from bench.installation import sha256
@@ -34,7 +34,10 @@ def provenance(folder: Path) -> dict:
             "started_at": "2026-11-07T00:00:00+00:00"}
 
 def verify(folder: Path):
-    with mock.patch("bench.diagnostic_evidence.verify_attestation", return_value={'postgresql': '18.6'}):
+    def candidate_blob(repo, candidate, path):
+        return (ROOT / path).read_bytes()
+    with mock.patch("bench.diagnostic_evidence.verify_attestation", return_value={'postgresql': '18.6'}), \
+            mock.patch("bench.diagnostic_evidence._candidate_blob", side_effect=candidate_blob):
         return verify_diagnostic(folder, candidate="1" * 40,
                                  trusted_key=folder / "trusted.pem", repo=ROOT)
 
@@ -54,6 +57,20 @@ def environment() -> dict:
 
 
 class DiagnosticTrust(unittest.TestCase):
+    def test_protocol_binding_reads_declared_candidate_not_working_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(['git', 'init', '-q', repo], check=True)
+            subprocess.run(['git', '-C', repo, 'config', 'user.email', 'test@example.invalid'], check=True)
+            subprocess.run(['git', '-C', repo, 'config', 'user.name', 'Test'], check=True)
+            (repo / 'protocol.py').write_text('version = 1\n')
+            subprocess.run(['git', '-C', repo, 'add', 'protocol.py'], check=True)
+            subprocess.run(['git', '-C', repo, 'commit', '-qm', 'v1'], check=True)
+            candidate = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], check=True,
+                                       text=True, capture_output=True).stdout.strip()
+            (repo / 'protocol.py').write_text('version = 2\n')
+            self.assertEqual(_candidate_blob(repo, candidate, 'protocol.py'), b'version = 1\n')
+
     def test_real_executor_stops_between_multi_statement_workload(self):
         plan = json.dumps([{'Plan': {'Node Type': 'Result', 'Actual Rows': 1, 'Actual Loops': 1},
                             'Planning Time': .1, 'Execution Time': .2}])
