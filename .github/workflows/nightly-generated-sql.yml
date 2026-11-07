@@ -11,7 +11,7 @@ concurrency:
 jobs:
   pg18:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       PGHOST: ${{ github.workspace }}/.pgsocket
       PGPORT: '55432'
@@ -20,18 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install PostgreSQL 18
+        timeout-minutes: 9
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors -fsSL \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor \
-            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends postgresql-18 postgresql-server-dev-18
+          python3 tools/install_postgresql.py 18 \
+            --log "$RUNNER_TEMP/installation.log" --job-minutes 45
+
       - name: Start isolated database and install extension
         shell: bash
         run: |

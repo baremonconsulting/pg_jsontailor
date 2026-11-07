@@ -67,7 +67,7 @@ jobs:
   postgres:
     name: PostgreSQL ${{ matrix.postgresql }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -87,29 +87,21 @@ jobs:
           echo "PGBIN=$RUNNER_TEMP/pgsql/bin" >> "$GITHUB_ENV"
 
       - name: Install PostgreSQL ${{ matrix.postgresql }} packages
+        timeout-minutes: 9
         if: matrix.postgresql != '19'
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
-            --connect-timeout 20 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | gpg --dearmor \
-            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends \
-            "postgresql-${{ matrix.postgresql }}" \
-            "postgresql-server-dev-${{ matrix.postgresql }}"
+          python3 tools/install_postgresql.py "${{ matrix.postgresql }}" \
+            --log "$RUNNER_TEMP/installation.log" --job-minutes 45
           ln -s "/usr/lib/postgresql/${{ matrix.postgresql }}" "$RUNNER_TEMP/pgsql"
-
       - name: Build PostgreSQL 19 release candidate
+        timeout-minutes: 15
         if: matrix.postgresql == '19'
         shell: bash
         run: |
           set -euo pipefail
+          {
           archive="$RUNNER_TEMP/postgresql-19rc1.tar.bz2"
           source_dir="$RUNNER_TEMP/postgresql-19rc1"
           curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
@@ -127,6 +119,7 @@ jobs:
             --without-zlib
           make -s -j2
           make -s install
+          } 2>&1 | tee "$RUNNER_TEMP/installation.log"
 
       - name: Start isolated PostgreSQL instance
         shell: bash
