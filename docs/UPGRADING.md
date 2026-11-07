@@ -70,7 +70,7 @@ resolve that state explicitly; the regenerator does not silently restore default
 owner privileges. Delegated grant chains
 block regeneration before any object is replaced and must be reapplied through
 the reviewed deployment procedure. Application triggers and rules must be removed and
-explicitly recreated as reviewed deployment objects:
+explicitly recreated as reviewed deployment objects.
 
 Generated-function EXECUTE grants survive regeneration only when the existing
 delete or array-read ACL entry still matches its recorded reviewed provenance.
@@ -81,6 +81,8 @@ reads now require the owner-only `__bounded_array(bigint)` capability in additio
 to source/view SELECT and RLS; otherwise PostgreSQL returns `42501`. Trigger,
 guard and health-check helpers remain owner-only. See
 [`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for migration and `PT413` resource limits.
+
+Regenerate inside the reviewed deployment transaction:
 
 ```sql
 BEGIN;
