@@ -25,6 +25,7 @@ class Upstream(socketserver.UnixStreamServer):
 class RawHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.calls += 1
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
         self.send_response(self.server.status)
         self.send_header('X-Diagnostics', SENTINEL)
         self.send_header('Content-Length', str(len(self.server.body)))
@@ -93,6 +94,43 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(400, self.request(headers={'Transfer-Encoding': 'chunked'})[0])
         self.assertEqual(413, self.request(headers={'Content-Length': '1048577'})[0])
         self.assertEqual(0, self.raw.calls)
+
+    def test_depth_and_invalid_json_rejected_before_upstream(self):
+        self.assertEqual(413, self.request(method='POST', body='[' * 33 + '0' + ']' * 33,
+                                          headers={'Content-Type': 'application/json'})[0])
+        self.assertEqual(400, self.request(method='POST', body='{"x":invalid}',
+                                          headers={'Content-Type': 'application/json'})[0])
+        self.assertEqual(0, self.raw.calls)
+        self.raw.status, self.raw.body = 200, b'[]'
+        self.assertEqual(200, self.request(method='POST', body=json.dumps({'x': '[[[\\"'}),
+                                          headers={'Content-Type': 'application/json'})[0])
+
+    def test_configuration_bounds(self):
+        for options in ({'max_request_bytes': 0}, {'max_json_depth': 129},
+                        {'max_connections': 0}, {'timeout': 121}):
+            with self.assertRaises(ValueError):
+                Boundary(('127.0.0.1', 0), self.raw.server_address, ['documents'], **options)
+
+    def test_exact_http_depth_and_byte_boundaries(self):
+        self.raw.status, self.raw.body = 200, b'[]'
+        self.boundary.max_request_bytes = 1024
+        for length, expected in ((1023, 200), (1024, 200), (1025, 413)):
+            self.assertEqual(expected, self.request(method='POST', body='{}' + ' ' * (length-2),
+                headers={'Content-Type': 'application/json'})[0])
+        for depth, expected in ((31, 200), (32, 200), (33, 413)):
+            self.assertEqual(expected, self.request(method='POST', body='[' * depth + '0' + ']' * depth,
+                headers={'Content-Type': 'application/json'})[0])
+
+    def test_pool_cap_rejects_without_upstream(self):
+        acquired = 0
+        try:
+            while self.boundary.slots.acquire(blocking=False):
+                acquired += 1
+            self.assertEqual(503, self.request()[0])
+            self.assertEqual(0, self.raw.calls)
+        finally:
+            for _ in range(acquired):
+                self.boundary.slots.release()
 
     def test_upstream_disconnect_fails_closed(self):
         self.raw.shutdown()

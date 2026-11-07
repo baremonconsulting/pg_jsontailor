@@ -72,11 +72,12 @@ def main():
         with socket.socket() as probe:
             probe.settimeout(1)
             record('PGJT-57/raw-upstream-not-tcp', probe.connect_ex(('127.0.0.1', args.raw_port)) != 0)
-        db.run('REVOKE EXECUTE ON FUNCTION api.orders_dv__delete_document(bigint,text) FROM jt_postgrest_anon; '
-               'NOTIFY pgrst,\'reload schema\';')
-        status, _, _ = request(args.base, 'POST', '/rpc/orders_dv__delete_document',
+        status, _, _ = request(args.base, 'POST', '/rpc/fresh_acl_dv__delete_document',
                                 {'expected_id': 42, 'expected_etag': original['_metadata']['etag']})
-        record('PGJT-56/http-no-rpc-capability', status in (401, 403, 404))
+        record('PGJT-56/http-no-rpc-capability', status in (401, 403, 404)
+               and db.value("SELECT has_function_privilege('jt_postgrest_anon',"
+                   "'api.fresh_acl_dv__delete_document(bigint,text)','EXECUTE');") == 'f'
+               and db.value('SELECT count(*) FROM shop.orders WHERE order_id=42;') == '1')
     finally:
         db.run('DROP TRIGGER reject_deferred ON shop.orders; DROP FUNCTION shop.reject_deferred(); '
                'ALTER TABLE shop.orders DROP CONSTRAINT internal_secret_check; '

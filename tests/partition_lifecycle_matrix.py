@@ -61,6 +61,7 @@ CREATE TABLE jt47.root_low PARTITION OF jt47.root FOR VALUES FROM(0) TO(100);
 CREATE TABLE jt47.item(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt47.root(id),
  label text NOT NULL DEFAULT 'item-default') PARTITION BY RANGE(id);
 CREATE TABLE jt47.item_low PARTITION OF jt47.item FOR VALUES FROM(0) TO(100);
+CREATE INDEX item_parent_order ON jt47.item(parent,id);
 INSERT INTO jt47.detail VALUES(7,'seven'),(8,'eight');
 INSERT INTO jt47.root VALUES(1,7,'one'),(2,8,'two');
 INSERT INTO jt47.item VALUES(10,1,'ten'),(20,2,'twenty');

@@ -161,6 +161,52 @@
       "PGJT-48/http-delete-rpc",
       "PGJT-48/http-options",
       "PGJT-48/http-hidden-base-tables"
+    ],
+    "helper_acl": [
+      "PGJT-56/fresh-owner-only",
+      "PGJT-56/delete-capability-matrix",
+      "PGJT-56/reviewed-provenance",
+      "PGJT-56/revocation-not-resurrected",
+      "PGJT-56/grant-option-provenance",
+      "PGJT-56/review-option-downgrade"
+    ],
+    "runtime_limits": [
+      "PGJT-70/missing-index-health",
+      "PGJT-70/valid-index-health",
+      "PGJT-70/reader-grant-required",
+      "PGJT-70/stored-n-minus-one",
+      "PGJT-70/stored-n",
+      "PGJT-70/stored-n-plus-one",
+      "PGJT-70/oversized-delete-preflight",
+      "PGJT-70/rls-visible-n-minus-one",
+      "PGJT-70/rls-visible-n",
+      "PGJT-70/rls-visible-n-plus-one",
+      "PGJT-70/reader-provenance-regeneration",
+      "PGJT-70/supplied-boundaries-atomic",
+      "PGJT-70/sql-document-bytes",
+      "PGJT-70/sql-document-depth",
+      "PGJT-70/configuration-bounds",
+      "PGJT-70/bounded-indexed-preflight-plan",
+      "PGJT-70/concurrent-direct-source-growth",
+      "PGJT-70/partition-index-health",
+      "PGJT-70/partition-missing-index-health"
+    ],
+    "http_security": [
+      "PGJT-57/immediate-raw-disclosure-control",
+      "PGJT-57/immediate-sentinel-rollback",
+      "PGJT-57/deferred-raw-disclosure-control",
+      "PGJT-57/deferred-sentinel-rollback",
+      "PGJT-57/hidden-_",
+      "PGJT-57/hidden-_rpc_orders_dv__check",
+      "PGJT-57/hidden-_rpc_duality_view_inventory",
+      "PGJT-57/raw-upstream-not-tcp",
+      "PGJT-56/http-no-rpc-capability"
+    ],
+    "http_concurrency": [
+      "PGJT-70/http-hot-root-stale-token",
+      "PGJT-70/http-object-lock-stale-rollback",
+      "PGJT-70/http-deadlock-full-rollback",
+      "PGJT-70/http-deadlock-complete-transaction-retry"
     ]
   }
 }

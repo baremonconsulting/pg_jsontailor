@@ -21,6 +21,29 @@ SAFE_CODES = frozenset({'22023', '23502', '23503', '23505', '23514', '23P01',
 SAFE_HEADERS = frozenset({'content-range', 'range-unit', 'preference-applied', 'allow'})
 
 
+def within_json_depth(body, limit):
+    """Count container nesting before decoding JSON; ignore escaped string bytes."""
+    depth = 0
+    in_string = escaped = False
+    for byte in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                in_string = False
+        elif byte == 34:
+            in_string = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > limit:
+                return False
+        elif byte in (93, 125):
+            depth -= 1
+    return True
+
+
 def safe_error(code='BOUNDARY_ERROR'):
     return json.dumps({'code': code if isinstance(code, str) and code in SAFE_CODES else 'BOUNDARY_ERROR',
                        'message': 'Request rejected.', 'details': None,
@@ -42,7 +65,14 @@ class Boundary(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, upstream, views, *, max_request_bytes=1048576,
-                 max_response_bytes=16777216, max_connections=16, timeout=10):
+                 max_json_depth=32, max_response_bytes=16777216,
+                 max_connections=16, timeout=10):
+        for value, low, high in ((max_request_bytes, 1024, 16777216),
+                                 (max_json_depth, 1, 128),
+                                 (max_response_bytes, 1024, 67108864),
+                                 (max_connections, 1, 256), (timeout, 1, 120)):
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError('HTTP boundary configuration outside supported bounds')
         self.upstream = Path(upstream)
         parent = self.upstream.parent.stat()
         endpoint = self.upstream.stat()
@@ -55,6 +85,7 @@ class Boundary(ThreadingHTTPServer):
         self.routes = {'/' + v for v in views}
         self.rpcs = {'/rpc/' + v + '__delete_document' for v in views}
         self.max_request_bytes = max_request_bytes
+        self.max_json_depth = max_json_depth
         self.max_response_bytes = max_response_bytes
         self.timeout_seconds = timeout
         self.slots = threading.BoundedSemaphore(max_connections)
@@ -137,6 +168,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(400, safe_error())
             if length and self.headers.get_content_type() != 'application/json':
                 return self.reply(415, safe_error())
+            if not within_json_depth(body, self.server.max_json_depth):
+                return self.reply(413, safe_error('PT413'))
+            if length:
+                try:
+                    json.loads(body, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+                except (ValueError, UnicodeError, RecursionError):
+                    return self.reply(400, safe_error())
             headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
             for key in ('Authorization', 'Prefer', 'Range', 'Range-Unit'):
                 if key in self.headers:
@@ -171,8 +209,16 @@ def main():
     parser.add_argument('--view', action='append', required=True)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=3050)
+    parser.add_argument('--max-request-bytes', type=int, default=1048576)
+    parser.add_argument('--max-json-depth', type=int, default=32)
+    parser.add_argument('--max-response-bytes', type=int, default=16777216)
+    parser.add_argument('--max-connections', type=int, default=16)
+    parser.add_argument('--timeout', type=int, default=10)
     args = parser.parse_args()
-    with Boundary((args.host, args.port), args.upstream_socket, args.view) as server:
+    with Boundary((args.host, args.port), args.upstream_socket, args.view,
+                  max_request_bytes=args.max_request_bytes, max_json_depth=args.max_json_depth,
+                  max_response_bytes=args.max_response_bytes,
+                  max_connections=args.max_connections, timeout=args.timeout) as server:
         server.serve_forever()
 
 

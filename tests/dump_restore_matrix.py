@@ -94,6 +94,7 @@ ALTER TABLE jt49.root ADD CONSTRAINT root_detail_fk
  FOREIGN KEY(detail_id) REFERENCES jt49.detail(id);
 CREATE TABLE jt49.item(id integer PRIMARY KEY,parent integer NOT NULL
  REFERENCES jt49.root(id),label text NOT NULL);
+CREATE INDEX item_parent_order ON jt49.item(parent,id);
 INSERT INTO jt49.detail VALUES(7,'detail');
 INSERT INTO jt49.root VALUES(1,'root',7),(2,'second',NULL),(3,'third',7),(4,'fourth',NULL);
 INSERT INTO jt49.item VALUES(1,3,'array'),(2,4,'array-only');
@@ -209,8 +210,8 @@ SELECT jsontailor.regenerate_duality_view('api.root_object_dv');
 SELECT jsontailor.regenerate_duality_view('api.root_array_dv');
 SELECT jsontailor.regenerate_duality_view('api.full_dv');
 """)
-    if acl_snapshot(commands, database, None) != "true:true:true":
-        raise RuntimeError("direct ACLs were not preserved by regeneration")
+    if acl_snapshot(commands, database, None) != "true:true:false":
+        raise RuntimeError("view ACLs must persist but unreviewed helper ACLs must not")
 
     post_regeneration = commands.sql(database, """
 SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

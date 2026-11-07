@@ -48,6 +48,11 @@ class Runner:
         if p.returncode: raise RuntimeError(p.stderr)
         value = self.spec.read_text() if specification is None else json.dumps(specification)
         self.run("SELECT jsontailor.create_duality_view(" + lit(view) + "," + lit(value) + "::jsonb);")
+        if view == 'shop.orders_dv' and json.loads(value).get('array'):
+            self.run("DO $$BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_data') THEN "
+                     "PERFORM jsontailor.grant_array_reader('shop.orders_dv','jt_test_data',false); "
+                     "PERFORM jsontailor.grant_delete_rpc('shop.orders_dv','jt_test_data',false); "
+                     "END IF;END$$;")
 
     def add(self, ident, variant, status, expected, observed, notes=""):
         self.rows.append({"id": str(ident), "variant": variant, "status": status,
@@ -134,6 +139,8 @@ class Runner:
     def test10(self):
         self.reset()
         self.run("DO $$BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_viewonly') THEN CREATE ROLE jt_test_viewonly NOLOGIN; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_data') THEN CREATE ROLE jt_test_data NOLOGIN; END IF; END$$; GRANT USAGE ON SCHEMA shop TO jt_test_viewonly,jt_test_data; GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_viewonly,jt_test_data; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA shop TO jt_test_data;")
+        self.run("SELECT jsontailor.grant_array_reader('shop.orders_dv','jt_test_data',false);")
+        self.run("SELECT jsontailor.grant_delete_rpc('shop.orders_dv','jt_test_data',false);")
         denied=self.run("SET ROLE jt_test_viewonly; SELECT * FROM shop.orders_dv;",False)
         obs=["view_only="+str(self.state(denied))];passed=self.state(denied)=="42501"
         allowed=self.run("SET ROLE jt_test_data;SELECT count(*) FROM shop.orders_dv;RESET ROLE;",False);obs.append("table_grants="+str(allowed.returncode));passed &= allowed.returncode==0
@@ -314,8 +321,8 @@ INSERT INTO jt_v5.root VALUES(1);INSERT INTO jt_v5.child VALUES('a',1,'same','a'
         values=self.scalar("""SELECT count(*)::text||':'||string_agg(proname||'/'||provolatile::text||'/'||prosecdef::text||'/'||array_to_string(proconfig,','),';' ORDER BY proname)
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jsontailor';""")
         usage=self.scalar("SELECT has_schema_privilege('public','jsontailor','USAGE');")
-        passed=values.startswith("4:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==3 and usage=='t'
-        self.add(18,"installation","PASS" if passed else "FAIL","four functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
+        passed=values.startswith("7:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==6 and usage=='t'
+        self.add(18,"installation","PASS" if passed else "FAIL","seven functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
 
     def test19(self):
         self.reset()

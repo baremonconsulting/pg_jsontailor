@@ -25,7 +25,7 @@ CREATE TABLE shop.order_items (
     quantity   integer NOT NULL CHECK (quantity > 0),
     unit_price numeric(12,2) NOT NULL
 );
-CREATE INDEX order_items_order_id_idx ON shop.order_items (order_id);
+CREATE INDEX order_items_order_id_idx ON shop.order_items (order_id, item_id);
 
 INSERT INTO shop.customers (customer_id, name) VALUES (7, 'ACME'), (8, 'Globex');
 INSERT INTO shop.orders (order_id, customer_id, status, created_at)

@@ -201,6 +201,10 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/partition-results.jsonl"
+          python3 tests/helper_acl_matrix.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/helper-acl-results.jsonl"
+          python3 tests/runtime_limits_matrix.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/runtime-limits-results.jsonl"
           python3 tools/verify_jsonl_results.py \
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
@@ -211,7 +215,9 @@ jobs:
             "$RUNNER_TEMP/type-results.jsonl" \
             "$RUNNER_TEMP/shape-results.jsonl" \
             "$RUNNER_TEMP/security-results.jsonl" \
-            "$RUNNER_TEMP/partition-results.jsonl"
+            "$RUNNER_TEMP/partition-results.jsonl" \
+            "$RUNNER_TEMP/helper-acl-results.jsonl" \
+            "$RUNNER_TEMP/runtime-limits-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
 
       - name: Execute documentation and standalone generated SQL
@@ -307,7 +313,7 @@ jobs:
           done
           python3 tools/http_boundary.py \
             --upstream-socket "$RUNNER_TEMP/postgrest-private/upstream.sock" \
-            --view orders_dv > "$RUNNER_TEMP/boundary.log" 2>&1 &
+            --view orders_dv --view concurrent_dv --view fresh_acl_dv > "$RUNNER_TEMP/boundary.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/boundary.pid"
           for attempt in {1..80}; do
             curl -fsS http://127.0.0.1:3050/orders_dv >/dev/null && break
@@ -321,10 +327,11 @@ jobs:
             --database jsontailor_ci \
             --upstream-socket "$RUNNER_TEMP/postgrest-private/upstream.sock" \
             --result "$RUNNER_TEMP/http-security-results.jsonl"
-          python3 tests/helper_acl_matrix.py --psql "$PGBIN/psql" \
-            --database jsontailor_ci --result "$RUNNER_TEMP/helper-acl-results.jsonl"
           python3 tests/http_boundary_regressions.py
-          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/postgrest-results.jsonl"
+          python3 tests/http_concurrency_contract.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/http-concurrency-results.jsonl"
+          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/postgrest-results.jsonl" \
+            "$RUNNER_TEMP/http-security-results.jsonl" "$RUNNER_TEMP/http-concurrency-results.jsonl"
           python3 tools/verify_test_coverage.py \
             --scope postgrest \
             --postgresql "${{ matrix.postgresql }}" \
@@ -360,6 +367,7 @@ jobs:
             ${{ runner.temp }}/postgrest-coverage.json
             ${{ runner.temp }}/http-security-results.jsonl
             ${{ runner.temp }}/helper-acl-results.jsonl
+            ${{ runner.temp }}/http-concurrency-results.jsonl
 
       - name: Verify Jira-keyed runtime coverage
         shell: bash
@@ -393,6 +401,10 @@ jobs:
           python3 tests/stale_return_mutant.py --psql "$PGBIN/psql" \
             --database jsontailor_ci --output "$RUNNER_TEMP/stale-return-results.jsonl"
           python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/stale-return-results.jsonl"
+
+      - name: Keep PostgreSQL diagnostics out of public job output
+        if: failure()
+        run: echo 'Full PostgreSQL and PostgREST diagnostics require protected operator retrieval.'
 
       - name: Stop PostgreSQL
         if: always()

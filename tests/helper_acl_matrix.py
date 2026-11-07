@@ -70,6 +70,17 @@ def main():
                "SELECT jsontailor.regenerate_duality_view('jt56.doc');")
         record('revocation-not-resurrected', db.value("SELECT has_function_privilege('jt56_app',"
                "'jt56.doc__delete_document(integer,text)','EXECUTE');") == 'f')
+        db.run("SELECT jsontailor.grant_delete_rpc('jt56.doc','jt56_app',true); "
+               'REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION jt56.doc__delete_document(integer,text) FROM jt56_app; '
+               "SELECT jsontailor.regenerate_duality_view('jt56.doc');")
+        record('grant-option-provenance', db.value("SELECT has_function_privilege('jt56_app',"
+               "'jt56.doc__delete_document(integer,text)','EXECUTE');") == 'f')
+        db.run("SELECT jsontailor.grant_delete_rpc('jt56.doc','jt56_app',true); "
+               "SELECT jsontailor.grant_delete_rpc('jt56.doc','jt56_app',false); "
+               "SELECT jsontailor.regenerate_duality_view('jt56.doc');")
+        record('review-option-downgrade', db.value("""SELECT count(*) FROM aclexplode((SELECT proacl FROM pg_proc
+ WHERE oid='jt56.doc__delete_document(integer,text)'::regprocedure))
+ WHERE grantee='jt56_app'::regrole AND NOT is_grantable;""") == '1')
     finally:
         db.run('ALTER DEFAULT PRIVILEGES IN SCHEMA jt56 REVOKE EXECUTE ON FUNCTIONS FROM jt56_default; '
                'DROP SCHEMA jt56 CASCADE; DROP ROLE jt56_app; DROP ROLE jt56_default;')
