@@ -18,8 +18,7 @@ $setup$;
 GRANT jt_postgrest_anon TO jt_postgrest_authenticator;
 GRANT USAGE ON SCHEMA api, shop TO jt_postgrest_anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO jt_postgrest_anon;
-GRANT EXECUTE ON FUNCTION api.orders_dv__delete_document(bigint, text)
-  TO jt_postgrest_anon;
+SELECT jsontailor.grant_delete_rpc('api.orders_dv','jt_postgrest_anon',false);
 GRANT SELECT, INSERT, UPDATE, DELETE ON shop.orders, shop.order_items
   TO jt_postgrest_anon;
 GRANT SELECT ON shop.customers TO jt_postgrest_anon;
