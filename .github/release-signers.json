@@ -1,5 +1,14 @@
 {
   "schema_version": 1,
-  "signers": [],
-  "benchmark_key": null
+  "signers": [
+    {
+      "identity": "Jan Suchánek",
+      "public_key_sha256": "b975a61cabfa780ab789231f3ed2e1a4ab40c4f646cbedc8f4d17184e17c687f",
+      "record_kinds": ["candidate", "publication"]
+    }
+  ],
+  "benchmark_key": {
+    "path": ".github/benchmark-public.pem",
+    "sha256": "b9d1cb365eacaeef88807d633a3b2fe94144cad070e9ca7c3f6a1e634cedbcbe"
+  }
 }
