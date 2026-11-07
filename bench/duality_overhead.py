@@ -236,6 +236,9 @@ settings = loads(sql("SELECT jsonb_object_agg(name,setting) FROM pg_settings WHE
     "('shared_buffers','work_mem','synchronous_commit','fsync','full_page_writes','server_version_num',"
     "'max_connections','effective_cache_size','checkpoint_timeout','wal_level','default_transaction_isolation',"
     "'TimeZone','lc_collate','lc_ctype');", tuples=True))
+database_locale = loads(sql("SELECT jsonb_build_object('lc_collate',datcollate,'lc_ctype',datctype) "
+                            "FROM pg_database WHERE datname=current_database();", tuples=True))
+settings.update(database_locale)
 settings.update(jit='off', max_parallel_workers_per_gather='0')
 postgresql = sql('SHOW server_version;', tuples=True).strip()
 postgresql_major = str(int(sql('SHOW server_version_num;', tuples=True).strip()) // 10000)
