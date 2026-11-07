@@ -87,13 +87,15 @@ signer identity, timestamp and named withdrawal owner.
 
 `tools/release_record.py sign` signs canonical JSON with an external RSA private
 key using SHA-256; `verify` independently checks its signature and key digest
-against `.github/release-signers.json`. This trust store deliberately starts
-empty: a real owner-reviewed public key and signer must be provisioned before
-freeze. Never trust a key solely because it arrived in the evidence bundle.
-`benchmark_key` separately pins a checked-in `.github/` public-key path and
-SHA-256 digest for Ed25519 installation attestations. Its initial null value
-denies preparation. Publication records require an independent release reviewer;
-candidate records explicitly set `release_approval: false` and cannot be reused.
+against `.github/release-signers.json`. The checked-in candidate keys are
+technically provisioned, but they do not become approved trust roots until the
+release owner verifies their fingerprints, accepts the stated signing-service
+identity and records private-key custody outside the repository. Never trust a
+key solely because it arrived in the evidence bundle. `benchmark_key` separately
+pins a checked-in `.github/` public-key path and SHA-256 digest for Ed25519
+installation attestations. Publication records require an independent release
+reviewer; candidate records explicitly set `release_approval: false` and cannot
+be reused.
 
 Example verification, using a previously approved record and public key:
 
@@ -137,13 +139,14 @@ withdrawal records alongside the original signed evidence.
 
 ## Live conditions still requiring owner action
 
-Name an independent collaborator to review releases and provision a real signing
-identity/key before freeze. Create/read back the `release` environment with
-required independent review, prevention of self-review, no admin bypass and
-protected-branch deployment restrictions. The checker fails closed while it is
-absent. Provision and verify the read-only authority secret described above.
-Then collect all frozen-SHA CI/nightly/benchmark/archive evidence and an
-approved signed candidate record. Protected-main positive authority, a final
-publication record, actual publication and live post-publication verification
-remain separate pending acceptance criteria; no tag or release is created by
-this implementation task.
+Name an independent collaborator to review releases. The release owner must
+verify and accept the provisioned public-key fingerprints and take custody of
+the corresponding external private keys before signing evidence. Create/read
+back the `release` environment with required independent review, prevention of
+self-review, no admin bypass and protected-branch deployment restrictions. The
+checker fails closed while it is absent. Provision and verify the read-only
+authority secret described above. Then collect all frozen-SHA
+CI/nightly/benchmark/archive evidence and an approved signed candidate record.
+Protected-main positive authority, a final publication record, actual
+publication and live post-publication verification remain separate pending
+acceptance criteria; no tag or release is created by this implementation task.
