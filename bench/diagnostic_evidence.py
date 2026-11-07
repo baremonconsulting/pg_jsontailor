@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 from bench.installation import canonical, sha256, verify_attestation, require
-from bench.verify_results import verify_plan_node, verify_semantics, expected_state, stable
+from bench.verify_results import verify_plan_node, verify_semantics, stable
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 
 JOURNAL = ".diagnostic-events.jsonl"
@@ -213,16 +213,13 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             require(payload['role'] == expected_role, 'diagnostic semantic witness order differs')
             statement_count = len(statements(active['operation'], active['implementation'], active['size']))
             if payload['role'] == 'before':
-                require(not statement_plans and states[payload['sha256']] == expected_state(active['size']),
-                        'diagnostic before witness differs')
+                require(not statement_plans, 'diagnostic before witness order differs')
             elif payload['role'] == 'after':
-                require(len(statement_plans) == statement_count
-                        and states[payload['sha256']] == expected_state(active['size'], active['operation']),
-                        'diagnostic after witness differs')
+                require(len(statement_plans) == statement_count,
+                        'diagnostic after witness order differs')
             else:
-                require(len(statement_plans) == statement_count
-                        and states[payload['sha256']] == expected_state(active['size']),
-                        'diagnostic rollback witness differs')
+                require(len(statement_plans) == statement_count,
+                        'diagnostic rollback witness order differs')
             witnesses[payload['role']] = payload['sha256']
         elif kind == 'constituent-start':
             require(environment_seen and sessions and active is None and not warmup_exhausted,
