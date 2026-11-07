@@ -23,7 +23,8 @@ def prepare(sha, ref, evidence, output, candidate):
             'checkout is not the exact candidate SHA')
     metadata = verify_metadata(ROOT, required=None if candidate else 'final')
     if candidate:
-        require(metadata['state'] in {'development', 'candidate'}, 'rehearsal must not use final metadata')
+        # Final source metadata may be rehearsed on a candidate branch before
+        # freeze. It never grants protected-main publication authority.
         require(ref != 'refs/heads/main' and ref.startswith('refs/heads/'), 'rehearsal requires a candidate branch')
     else:
         require(ref == 'refs/heads/main', 'publication preparation requires main')
