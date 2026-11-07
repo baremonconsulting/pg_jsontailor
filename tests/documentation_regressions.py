@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from verify_generated_sql_notice import verify_archive, verify_bundle, verify_notice, verify_source
 from verify_standalone_results import EXPECTED_IDS, verify as verify_results
+from source_provenance import archive_provenance, source_identity
 
 
 def claims() -> None:
@@ -92,6 +94,7 @@ def standalone_attestation() -> None:
         for major in ("17", "18", "19"):
             rows = [{"name": name, "status": "PASS", "postgresql": major,
                      "source_commit": "a" * 40, "dirty_tree": False,
+                     "source_provenance": "git-checkout",
                      "generated_sql_sha256": "b" * 64} for name in sorted(EXPECTED_IDS)]
             path = folder / (major + ".jsonl")
             path.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -110,10 +113,32 @@ def standalone_attestation() -> None:
         paths["17"].write_text(original)
 
 
+def archive_identity() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgjt68-archive-negative-") as temporary:
+        folder = Path(temporary)
+        extracted = folder / "source"
+        extracted.mkdir()
+        (extracted / "example.sql").write_text("SELECT 1;\n")
+        archive_path = folder / "source.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(extracted, arcname="candidate")
+        checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        result = archive_provenance(extracted, archive_path, "a" * 40, checksum)
+        assert result["source_provenance"] == "archive-declared"
+        rejected(lambda: source_identity(extracted))
+        rejected(lambda: archive_provenance(extracted, archive_path, "a" * 40, "b" * 64))
+        (extracted / "example.sql").write_text("SELECT 2;\n")
+        rejected(lambda: archive_provenance(extracted, archive_path, "a" * 40, checksum))
+        (extracted / "example.sql").write_text("SELECT 1;\n")
+        (extracted / "unexpected.sql").write_text("SELECT 1;\n")
+        rejected(lambda: archive_provenance(extracted, archive_path, "a" * 40, checksum))
+
+
 if __name__ == "__main__":
     claims()
     notices()
     standalone_attestation()
+    archive_identity()
     print("PGJT-67/documentation-claims: PASS")
     print("PGJT-72/notice-packaging-negatives: PASS")
     print("PGJT-68/attestation-negatives: PASS")

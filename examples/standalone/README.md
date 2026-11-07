@@ -36,3 +36,13 @@ response boundary; a raw database or PostgREST error is not a safe public respon
 database, operations, privileges, RLS and both dump formats on each supported
 PostgreSQL major. It records stable result IDs; a partial or missing result set
 is not acceptance evidence.
+
+When running that harness from an extracted source archive rather than a Git
+checkout, supply `--source-commit <full-SHA> --source-archive /path/source.tar.gz
+--archive-sha256 <approved-checksum>`. The SHA/checksum must come from the
+independently verified rehearsal/release manifest, not from an untrusted
+archive's contents. The harness checks the archive checksum and every extracted
+source file's identity, content and executable bit; missing, extra or changed
+source files fail. Keep result files outside the extracted tree. Provenance is
+labelled `archive-declared`, not Git-derived; these integrity checks do not
+themselves confer release authority or authenticate the declaring actor.

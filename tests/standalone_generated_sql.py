@@ -12,12 +12,14 @@ import sys
 import tempfile
 import uuid
 
+sys.dont_write_bytecode = True
 from dump_restore import Commands, literal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from export_standalone import export
 from verify_generated_sql_notice import verify_bundle
+from source_provenance import source_identity
 
 RESULT_IDS = (
     "PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags",
@@ -105,12 +107,14 @@ def main() -> int:
     parser.add_argument("--pg-bin", type=Path, required=True)
     parser.add_argument("--maintenance-database", default="postgres")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--archive-sha256")
     args = parser.parse_args()
     commands = Commands(args.pg_bin.resolve(), args.maintenance_database)
     major = last(commands, args.maintenance_database, "SHOW server_version_num;")[:2]
     require(major in {"17", "18", "19"}, "unsupported PostgreSQL major")
-    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
+    provenance = source_identity(ROOT, args.source_commit, args.source_archive, args.archive_sha256)
     prefix = "pgjt68_" + uuid.uuid4().hex[:10]
     databases = [prefix + suffix for suffix in ("_source", "_target", "_custom", "_plain")]
     source, target, custom, plain = databases
@@ -121,7 +125,7 @@ def main() -> int:
 
     def record(name: str, passed: bool, observed: str = "") -> None:
         results.append({"name": name, "status": "PASS" if passed else "FAIL",
-                        "postgresql": major, "source_commit": sha, "dirty_tree": dirty,
+                        "postgresql": major, **provenance,
                         "generated_sql_sha256": ddl_hash, "observed": observed})
         require(passed, name + ": " + observed)
 
