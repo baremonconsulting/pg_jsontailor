@@ -326,6 +326,8 @@ jobs:
             --scope postgrest \
             --postgresql "${{ matrix.postgresql }}" \
             --result "postgrest=$RUNNER_TEMP/postgrest-results.jsonl" \
+            --result "http_security=$RUNNER_TEMP/http-security-results.jsonl" \
+            --result "http_concurrency=$RUNNER_TEMP/http-concurrency-results.jsonl" \
             --output "$RUNNER_TEMP/postgrest-coverage.json"
 
       - name: Stop PostgREST
@@ -355,9 +357,6 @@ jobs:
           path: |
             ${{ runner.temp }}/postgrest-public-results.jsonl
             ${{ runner.temp }}/postgrest-coverage.json
-            ${{ runner.temp }}/http-security-results.jsonl
-            ${{ runner.temp }}/helper-acl-results.jsonl
-            ${{ runner.temp }}/http-concurrency-results.jsonl
 
       - name: Verify Jira-keyed runtime coverage
         shell: bash
@@ -375,6 +374,8 @@ jobs:
             --result "types=$RUNNER_TEMP/type-results.jsonl" \
             --result "shapes=$RUNNER_TEMP/shape-results.jsonl" \
             --result "security=$RUNNER_TEMP/security-results.jsonl" \
+            --result "helper_acl=$RUNNER_TEMP/helper-acl-results.jsonl" \
+            --result "runtime_limits=$RUNNER_TEMP/runtime-limits-results.jsonl" \
             --result "partitions=$RUNNER_TEMP/partition-results.jsonl" \
             --result "partition_restore=$RUNNER_TEMP/partition-restore-results.jsonl" \
             --result "restore_matrix=$RUNNER_TEMP/restore-matrix-results.jsonl" \

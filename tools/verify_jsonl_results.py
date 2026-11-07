@@ -9,6 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.strict_results import result_rows, validate
 
 FILENAMES = {
+    'helper-acl-results.jsonl': 'helper_acl',
+    'runtime-limits-results.jsonl': 'runtime_limits',
+    'http-security-results.jsonl': 'http_security',
+    'http-concurrency-results.jsonl': 'http_concurrency',
     'core-results.jsonl': 'core', 'validation-results.jsonl': 'validation',
     'integrity-results.jsonl': 'integrity', 'repeatability-results.jsonl': 'repeatability',
     'subtransaction-results.jsonl': 'subtransaction', 'merge-results.jsonl': 'merge',

@@ -141,7 +141,7 @@ def coverage_manifest_checks() -> None:
                 rows[item["suite"]].append(row)
         paths = {}
         for suite in rows:
-            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation"}
+            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "runtime_limits"}
                            else {"name": ident, "status": "PASS"}
                            for ident in inventories()[suite]]
         for suite, values in rows.items():
@@ -154,17 +154,16 @@ def coverage_manifest_checks() -> None:
                                 for item in manifest["runtime_evidence"])
         if len(database["tests"]) != expected_database:
             raise AssertionError("database runtime attestation count differs")
-        postgrest_rows = [
-            {item["field"]: item["value"], "status": "PASS"}
-            for item in manifest["runtime_evidence"]
-            if item["scope"] == "postgrest"
-        ]
-        postgrest_path = folder / "postgrest.jsonl"
-        postgrest_path.write_text(
-            "".join(json.dumps(row) + "\n" for row in postgrest_rows))
+        postgrest_paths = {}
+        for suite in {item["suite"] for item in manifest["runtime_evidence"]
+                      if item["scope"] == "postgrest"}:
+            path = folder / f"{suite}.jsonl"
+            path.write_text("".join(json.dumps({"id": ident, "status": "PASS"}) + "\n"
+                                    for ident in inventories()[suite]))
+            postgrest_paths[suite] = path
         postgrest = verifier.attest(
-            manifest, "postgrest", "18", {"postgrest": postgrest_path}, set())
-        if len(postgrest["tests"]) != len(postgrest_rows):
+            manifest, "postgrest", "18", postgrest_paths, set())
+        if len(postgrest["tests"]) != sum(item["scope"] == "postgrest" for item in manifest["runtime_evidence"]):
             raise AssertionError("PostgREST runtime attestation count differs")
         partials = [row for row in database["tests"]
                     if row["coverage"] == "partial"]

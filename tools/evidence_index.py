@@ -20,6 +20,8 @@ from tools.strict_results import loads, result_rows, validate
 from tools.verify_test_coverage import attest, MANIFEST
 
 CI_FILES = {
+    'helper-acl-results.jsonl': 'helper_acl',
+    'runtime-limits-results.jsonl': 'runtime_limits',
     'core-results.jsonl': 'core', 'validation-results.jsonl': 'validation',
     'integrity-results.jsonl': 'integrity', 'repeatability-results.jsonl': 'repeatability',
     'subtransaction-results.jsonl': 'subtransaction', 'merge-results.jsonl': 'merge',
@@ -33,6 +35,19 @@ CI_FILES = {
     'upgrade-docs-results.jsonl': 'upgrade_docs',
     'public-contract-results.jsonl': 'public_contract',
 }
+HTTP_FILES = {'postgrest-results.jsonl': 'postgrest',
+              'http-security-results.jsonl': 'http_security',
+              'http-concurrency-results.jsonl': 'http_concurrency'}
+
+
+def ci_files(major, event):
+    """HTTP is required on PG18 and on every scheduled all-major campaign."""
+    require(major in {'17', '18', '19'}, 'invalid CI PostgreSQL major')
+    require(event in {'push', 'pull_request', 'workflow_dispatch', 'schedule'},
+            'invalid CI event')
+    return CI_FILES | (HTTP_FILES if major == '18' or event == 'schedule' else {})
+
+
 NIGHTLY_FILES = {'property-generated-sql.jsonl': 'properties',
                  'mutation-generated-sql.jsonl': 'mutations'}
 OUTPUTS = ('regression-basic.out', 'isolation-concurrency.out',
@@ -68,9 +83,10 @@ def check_file(root, entry):
     return path
 
 
-def bundle_files(kind):
+def bundle_files(kind, major, event):
     if kind == 'ci':
-        return set(CI_FILES) | set(OUTPUTS) | {'environment.json', 'coverage.json',
+        http = bool(set(ci_files(major, event)) & set(HTTP_FILES))
+        return set(ci_files(major, event)) | set(OUTPUTS) | ({'postgrest-coverage.json'} if http else set()) | {'environment.json', 'coverage.json',
                                               'setbased-results.json', 'installation.log.p7m', 'postgresql.log.p7m',
                                               'suite-diagnostics.tar.p7m'}
     require(kind == 'nightly', "unknown evidence bundle kind")
@@ -95,9 +111,9 @@ def verify_bundle(path, root, sha):
     files = bundle['files']
     require(isinstance(files, list), "invalid evidence files")
     names = [Path(item['path']).name for item in files]
-    require(len(names) == len(set(names)) and set(names) == bundle_files(kind), "bundle file inventory differs")
+    require(len(names) == len(set(names)) and set(names) == bundle_files(kind, major, run['event']), "bundle file inventory differs")
     checked = {Path(item['path']).name: check_file(root, item) for item in files}
-    suites = CI_FILES if kind == 'ci' else NIGHTLY_FILES
+    suites = ci_files(major, run['event']) if kind == 'ci' else NIGHTLY_FILES
     for name, suite in suites.items():
         rows = validate(result_rows(checked[name]), suite)
         if suite == 'standalone':
@@ -124,6 +140,11 @@ def verify_bundle(path, root, sha):
                                   {suite: checked[name] for name, suite in CI_FILES.items()},
                                   {'installcheck', 'dump_restore'})
         require(coverage == expected_coverage, "coverage attestation differs")
+        if set(suites) & set(HTTP_FILES):
+            expected_http = attest(loads(MANIFEST.read_text()), 'postgrest', major,
+                                   {suite: checked[name] for name, suite in HTTP_FILES.items()}, set())
+            require(loads(checked['postgrest-coverage.json'].read_text()) == expected_http,
+                    'HTTP coverage attestation differs')
         setbased = loads(checked['setbased-results.json'].read_text())
         expected_setbased = {'add': '100:5050', 'update': '100:5150',
                             'delete': '50:1325', 'insert': '100:5050'}

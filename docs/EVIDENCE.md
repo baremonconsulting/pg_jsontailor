@@ -20,6 +20,14 @@ stale-return witness is mandatory on PG17/18/19; it does not change the nightly
 five-property/six-mutation campaign. Standalone, quick-start, upgrade and public
 contract suites are mandatory per-major inputs too.
 
+Helper-ACL and resource-limit suites are mandatory on PG17/18/19. HTTP contract,
+HTTP disclosure/security and HTTP concurrency suites, with their separate coverage
+attestation, are mandatory on PG18 for every CI event and on every major for the
+scheduled matrix. The bundle verifier derives this policy from the recorded major
+and workflow event; a missing HTTP suite cannot be replaced by a standalone,
+expiring artifact. All these result rows are redacted before public retention;
+their full observations remain in the encrypted diagnostic archive.
+
 Public artifacts contain only allow-listed structured result fields, checked
 regression/isolation fixtures, coverage, environment metadata and a digest
 manifest. Full structured observations, HTTP transcripts, installation and

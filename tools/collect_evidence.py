@@ -13,7 +13,7 @@ import sys
 import tempfile
 import tarfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.evidence_index import CI_FILES, NIGHTLY_FILES, WORKFLOWS, bundle_files, digest, verify_bundle
+from tools.evidence_index import ci_files, NIGHTLY_FILES, WORKFLOWS, bundle_files, digest, verify_bundle
 from tools.redact_results import redacted_rows
 
 
@@ -49,8 +49,9 @@ def collect(kind, major, source, repo, output, workflow_id):
     except (OSError, subprocess.SubprocessError):
         environment['psql_version'] = 'NOT_AVAILABLE'
     (public / 'environment.json').write_text(json.dumps(environment, sort_keys=True) + '\n')
+    suites = ci_files(major, run['event']) if kind == 'ci' else NIGHTLY_FILES
     sources = {name: source / name.removesuffix('.p7m') for name in
-               bundle_files(kind) - {'environment.json', 'suite-diagnostics.tar.p7m'}}
+               bundle_files(kind, major, run['event']) - {'environment.json', 'suite-diagnostics.tar.p7m'}}
     if kind == 'ci':
         sources['coverage.json'] = source / f'coverage-pg{major}.json'
         sources.update({'regression-basic.out': repo / 'tests/output/results/basic.out',
@@ -66,8 +67,8 @@ def collect(kind, major, source, repo, output, workflow_id):
                     encrypt(path, target)
                 except RuntimeError as error:
                     missing.append(name + ': ' + str(error)); continue
-            elif name in (CI_FILES if kind == 'ci' else NIGHTLY_FILES):
-                suite = (CI_FILES if kind == 'ci' else NIGHTLY_FILES)[name]
+            elif name in suites:
+                suite = suites[name]
                 try:
                     redacted = redacted_rows(path, suite)
                 except (RuntimeError, ValueError) as error:
