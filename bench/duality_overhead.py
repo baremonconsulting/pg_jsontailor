@@ -40,6 +40,9 @@ parser.add_argument('--installation', type=Path, required=True)
 parser.add_argument('--trusted-key', type=Path, required=True)
 parser.add_argument('--semantic-check-only', action='store_true',
                     help='run each semantic/plan probe once; never emit publishable timing evidence')
+parser.add_argument('--diagnostic-fault', choices=['between-arms', 'statement',
+                    'semantic-read-back', 'rollback', 'restoration'],
+                    help=argparse.SUPPRESS)
 parser.add_argument("--output", type=Path)
 parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run" / "socket")))
 parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
@@ -268,6 +271,18 @@ def snapshot(session, size):
 
 rows, saved_plans, semantic_samples, states, backends = [], {}, {}, {}, []
 diagnostic_states = set()
+diagnostic_fault_used = False
+def inject_diagnostic_fault(phase, coordinates, *, next_statement=None):
+    global diagnostic_fault_used
+    if args.diagnostic_fault != phase or diagnostic_fault_used:
+        return
+    diagnostic_fault_used = True
+    interrupted = dict(coordinates)
+    if next_statement is not None:
+        interrupted.update(statement=next_statement[0], sql=next_statement[1])
+    diagnostic_phase.update(phase=phase, interrupted=interrupted)
+    raise RuntimeError('forced producer diagnostic fault: ' + phase)
+
 def intern(state):
     identity = sha256(canonical(state))
     states[identity] = state
@@ -307,18 +322,24 @@ for session_number in range(1 if args.semantic_check_only else 3):
                         def retain_statement(index, statement, plan):
                             diagnostic.append('statement-complete', {**coordinates, 'statement': index,
                                 'sql': statement, 'plan': plan})
+                            if index + 1 < len(workload):
+                                inject_diagnostic_fault('statement', coordinates,
+                                    next_statement=(index + 1, workload[index + 1]))
                         def identify_statement(index, statement):
                             diagnostic_phase.update(phase='statement', interrupted={**coordinates,
                                 'statement': index, 'sql': statement})
                         result = explain(session, workload, retain_statement, identify_statement)
                         diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
+                        inject_diagnostic_fault('semantic-read-back', coordinates)
                         after = snapshot(session, size)
                         after_id = intern(after)
                         diagnostic.append('semantic-witness', {**coordinates, 'role': 'after',
                                                                'sha256': after_id})
                         diagnostic_phase.update(phase='rollback', interrupted=coordinates)
+                        inject_diagnostic_fault('rollback', coordinates)
                         session.execute('ROLLBACK;')
                         diagnostic_phase.update(phase='restoration', interrupted=coordinates)
+                        inject_diagnostic_fault('restoration', coordinates)
                         restored = snapshot(session, size)
                         restored_id = intern(restored)
                         diagnostic.append('semantic-witness', {**coordinates, 'role': 'rollback',
@@ -341,6 +362,7 @@ for session_number in range(1 if args.semantic_check_only else 3):
                             'before': semantic_samples[key]['before'], 'after': semantic_samples[key]['after'],
                             'rollback': semantic_samples[key]['rollback'], 'restoration': 'verified'})
                         diagnostic_phase.update(phase='between-arms', interrupted=coordinates)
+                        inject_diagnostic_fault('between-arms', coordinates)
                         if warmup:
                             warmup_values[implementation].append(result['execution_ms'])
                     repetition += 1
