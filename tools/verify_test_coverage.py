@@ -65,14 +65,6 @@ def section_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        require(key not in result, f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
 def source(entry: dict, *, label: str) -> str:
     path = entry.get("file")
     marker = entry.get("marker")

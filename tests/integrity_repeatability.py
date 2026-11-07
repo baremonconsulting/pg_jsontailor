@@ -19,15 +19,6 @@ EXPECTED_RESULT_ID_DIGEST = (
     "9e34cf635b3253b68a31bb8e4192a56c7d84eae6d012edf133cb1afa1481438d")
 
 
-def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise RuntimeError(f"duplicate JSON key in integrity result: {key}")
-        result[key] = value
-    return result
-
-
 def load_results(path: Path) -> list[dict]:
     rows = [loads(line)
             for line in path.read_text().splitlines()
