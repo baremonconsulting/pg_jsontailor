@@ -63,7 +63,7 @@ guard and check helpers remain owner-only; do not grant all functions.
 
 `__check()` and inventory health require a valid, ready, live, non-partial,
 non-expression B-tree whose leading columns are `(parent_fk, order_by, key)`;
-when order and key are the same column, use `(parent_fk, key)`. The check visits
+when order is the parent FK or the key, use `(parent_fk, key)`. The check visits
 every partitioned table and descendant partition, not just the parent. Creating
 an index on the partitioned parent normally creates the required leaf indexes.
 Missing/invalid indexes fail health checks; they do not silently create indexes

@@ -92,6 +92,12 @@ def main():
         record('missing-index-health', db.state(db.run('SELECT jt70.documents__check();', False)) == 'PT422')
         db.run('CREATE INDEX item_parent_order ON jt70.item(parent,id);')
         record('valid-index-health', db.value("SELECT jt70.documents__check()->>'status';") == 'OK')
+        spec_parent_order = {'root': {'table': 'jt70.root', 'key': 'id', 'fields': {'label': 'label'}},
+            'array': {'name': 'items', 'table': 'jt70.item', 'key': 'id', 'parent_fk': 'parent',
+                      'order_by': 'parent', 'fields': {'id': 'id', 'label': 'label'}}}
+        db.run("SELECT jsontailor.create_duality_view('jt70.parent_order',"
+               + quote(json.dumps(spec_parent_order)) + '::jsonb);')
+        assert db.value("SELECT jt70.parent_order__check()->>'status';") == 'OK'
         db.run('GRANT USAGE ON SCHEMA jt70 TO jt70_app; '
                'GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt70 TO jt70_app;')
         record('reader-grant-required', db.state(db.run(

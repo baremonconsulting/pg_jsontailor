@@ -229,9 +229,10 @@ BEGIN
           JOIN pg_attribute pk ON pk.attrelid=s.rel AND pk.attname=%L AND NOT pk.attisdropped
           WHERE i.indrelid=s.rel AND i.indisvalid AND i.indisready AND i.indislive
             AND i.indpred IS NULL AND i.indexprs IS NULL AND am.amname='btree'
-            AND i.indnkeyatts>=CASE WHEN ord.attnum=pk.attnum THEN 2 ELSE 3 END
-            AND i.indkey[0]=fk.attnum AND i.indkey[1]=ord.attnum
-            AND (ord.attnum=pk.attnum OR i.indkey[2]=pk.attnum))) THEN
+            AND i.indnkeyatts>=CASE WHEN ord.attnum IN(fk.attnum,pk.attnum) THEN 2 ELSE 3 END
+            AND i.indkey[0]=fk.attnum
+            AND i.indkey[1]=CASE WHEN ord.attnum=fk.attnum THEN pk.attnum ELSE ord.attnum END
+            AND (ord.attnum IN(fk.attnum,pk.attnum) OR i.indkey[2]=pk.attnum))) THEN
         RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='valid child parent-FK/order/key index required';END IF;$index$,
         cfg#>>'{array,table}',cfg#>>'{array,parent_fk}',cfg#>>'{array,order_by}',cfg#>>'{array,key}');
       bounded_body:=format($bounded$BEGIN
