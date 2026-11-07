@@ -3,6 +3,7 @@ message: If you use pg_jsontailor in published work, please cite this software.
 title: pg_jsontailor
 type: software
 version: 0.2.0
+# release-state: development
 authors:
   - name: Baremon s.r.o.
 repository-code: https://github.com/baremonconsulting/pg_jsontailor

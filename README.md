@@ -8,6 +8,8 @@ The design follows the same core idea as Oracle JSON Relational Duality Views: o
 
 ## Status
 
+Release metadata: `0.2.0` / `development`.
+
 The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier and PostgREST scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
 
 The current implementation supports:
