@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Execute generated-SQL mutants and require behavioural suites to kill them."""
 from __future__ import annotations
-import argparse, json, subprocess, sys, tempfile
+import argparse, json, re, subprocess, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.strict_results import result_rows, validate
@@ -18,6 +18,19 @@ EXPECTED_IDS = {
  "validation_security.py": {"6","7","8","9","10","12","14","15","16","17","18","19","20"},
  "security_contract_matrix.py": {"PGJT-46/source-privilege-matrix","PGJT-46/membership-column-grants","PGJT-46/owner-force-rls","PGJT-46/root-rls-matrix","PGJT-46/object-etag-lock-matrix","PGJT-46/array-rls-matrix","PGJT-46/policy-change-atomic-denial","PGJT-46/invoker-metadata"},
 }
+EXPECTED_WITNESSES = {
+ 'locks': {'security_contract_matrix.py:PGJT-46/object-etag-lock-matrix'},
+ 'atomic-reconciliation': {'validation_security.py:10',
+                           'security_contract_matrix.py:PGJT-46/array-rls-matrix',
+                           'security_contract_matrix.py:PGJT-46/policy-change-atomic-denial'},
+}
+
+def exact_witness(name, results):
+ failed={script+':'+ident for script, identifiers in results for ident in identifiers}
+ expected=EXPECTED_WITNESSES[name]
+ if failed - expected:
+  raise RuntimeError('mutant failed outside its expected witness inventory: '+repr(sorted(failed-expected)))
+ return bool(failed),sorted(failed)
 
 def sql(psql,database,text):
  return subprocess.run([psql,"-XAt","-v","ON_ERROR_STOP=1","-d",database],input="\\set VERBOSITY verbose\n"+text,text=True,capture_output=True)
@@ -41,7 +54,7 @@ def suites(args,directory,label):
   failed=[row.get("id",row.get("name",row.get("test_id"))) for row in rows if row.get("status") == "FAIL"]
   if result.returncode and not failed: raise RuntimeError(f"{script} failed without a failing invariant: {result.stderr[-500:]}")
   results.append((script,failed))
- return all(not failed for _,failed in results),repr(results)
+ return all(not failed for _,failed in results),results
 
 def setup_example(args):
  spec=(args.repo/"examples/orders_dv.spec.json").read_text().replace("'","''")
@@ -80,6 +93,11 @@ SET ROLE jt50_limited;
 INSERT INTO shop.orders_dv(data) VALUES('{"_id":9000,"status":"blocked","created":"2026-11-06","customer":{"customerId":7},"items":[]}'::jsonb);"""
  else: raise ValueError(name)
  result=sql(args.psql,args.database,statement)
+ expected_state={'etag':'PT412','type-checks':'PT422','binding-guards':'PT422','rls':'42501'}[name]
+ if result.returncode:
+  observed=re.search(r'ERROR:\s+([0-9A-Z]{5}):',result.stderr)
+  if observed is None or observed.group(1)!=expected_state:
+   raise RuntimeError('protected probe failed outside its exact SQLSTATE witness: '+result.stderr[-500:])
  if name=="rls":
   allowed=sql(args.psql,args.database,"SELECT count(*) FROM shop.orders WHERE order_id=8999;")
   if not allowed.stdout.strip().endswith("1"): raise RuntimeError("RLS positive-policy control did not persist its source row: "+result.stderr[-500:])
@@ -90,6 +108,11 @@ INSERT INTO shop.orders_dv(data) VALUES('{"_id":9000,"status":"blocked","created
    return True,result.stderr[-500:]
   readback=sql(args.psql,args.database,"SELECT count(*) FROM shop.orders WHERE order_id=9000;")
   if not readback.stdout.strip().endswith("1"): raise RuntimeError("RLS mutant produced no source-row readback")
+ if result.returncode==0 and name!='rls':
+  expected={'etag':'new','type-checks':'123','binding-guards':'changed'}[name]
+  readback=sql(args.psql,args.database,'SELECT status FROM shop.orders WHERE order_id=42;')
+  if readback.returncode or readback.stdout.strip()!=expected:
+   raise RuntimeError('mutant succeeded without its expected relational witness')
  return result.returncode != 0,result.stderr[-500:]
 
 def main():
@@ -98,7 +121,7 @@ def main():
  args=p.parse_args(); source="\n".join((args.repo/"sql/pg_jsontailor--0.2.0.sql").read_text().splitlines()[1:])+"\n";rows=[]
  with tempfile.TemporaryDirectory(prefix="pgjt50-") as temp:
   directory=Path(temp);load(args,source);control,detail=suites(args,directory,"control")
-  if not control: raise RuntimeError("control suites failed: "+detail)
+  if not control: raise RuntimeError("control suites failed: "+repr(detail))
   for protected in ("etag","type-checks","binding-guards","rls"):
    load(args,source);blocked,probe_detail=protected_probe(args,protected)
    if not blocked: raise RuntimeError("control did not block "+protected+": "+probe_detail)
@@ -106,12 +129,16 @@ def main():
    matches=source.count(needle);compiled=True
    try: load(args,source.replace(needle,replacement))
    except RuntimeError: compiled=False
-   survived=False;detail="mutant did not compile"
+   survived=False;detail="mutant did not compile";witness=[]
    if compiled and name in {"etag","type-checks","binding-guards","rls"}:
     blocked,detail=protected_probe(args,name);survived=blocked
-   elif compiled: survived,detail=suites(args,directory,name)
+    if not blocked: witness=['PGJT-59/probe-'+name]
+   elif compiled:
+    _passed,results=suites(args,directory,name)
+    killed_by_witness,witness=exact_witness(name,results)
+    survived=not killed_by_witness;detail=repr(results)
    killed=matches>0 and compiled and not survived
-   rows.append({"id":"PGJT-50/mutation-"+name,"status":"PASS" if control and killed else "FAIL","operator_matches":matches,"mutant_compiled":compiled,"mutant_killed":killed,"detail":detail})
+   rows.append({"id":"PGJT-50/mutation-"+name,"status":"PASS" if control and killed else "FAIL","operator_matches":matches,"mutant_compiled":compiled,"mutant_killed":killed,"control_passed":control,"witness":witness,"expected_sqlstate":{'etag':'PT412','type-checks':'PT422','binding-guards':'PT422','rls':'42501'}.get(name),"detail":detail})
  args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text("".join(json.dumps(x,sort_keys=True)+"\n" for x in rows))
  return 0 if all(x["status"]=="PASS" for x in rows) else 1
 if __name__=="__main__":raise SystemExit(main())

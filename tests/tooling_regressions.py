@@ -424,47 +424,13 @@ def expect_rejection(verify, folder: Path, expected: str) -> None:
 
 
 def benchmark_checks() -> None:
-    verify = load_verifier()
-    source = ROOT / "bench/reference/azure-04d053e"
-    with tempfile.TemporaryDirectory(prefix="pgjt-tooling-") as temporary:
-        scratch = Path(temporary)
-        changed = scratch / "changed"
-        shutil.copytree(source, changed)
-        with (changed / "measurements.csv").open(newline="") as stream:
-            reader = csv.DictReader(stream)
-            fields = reader.fieldnames
-            rows = list(reader)
-        row = next(row for row in rows if row["warmup"] == "False")
-        row["warmup"] = "false"
-        with (changed / "measurements.csv").open("w", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(rows)
-        expect_rejection(verify, changed, "noncanonical warm-up flag")
-
-        empty = scratch / "empty"
-        empty.mkdir()
-        (empty / "environment.json").write_text(json.dumps({
-            "sizes": [], "operations": ["read"], "warmups": 3, "repetitions": 30}))
-        (empty / "summary.json").write_text("[]")
-        (empty / "plans.json").write_text("{}")
-        with (empty / "measurements.csv").open("w", newline="") as stream:
-            csv.DictWriter(stream, fieldnames=fields).writeheader()
-        expect_rejection(verify, empty, "invalid size configuration")
-
-        for name,change,expected in (
-                ("empty-operations", lambda value: value.update(operations=[]),
-                 "invalid operation configuration"),
-                ("fractional-size", lambda value: value.update(sizes=[0.5,1,10,100,1000]),
-                 "invalid size configuration"),
-                ("fractional-warmups", lambda value: value.update(warmups=3.5),
-                 "invalid sampling configuration")):
-            case = scratch / name
-            shutil.copytree(source, case)
-            environment = json.loads((case / "environment.json").read_text())
-            change(environment)
-            (case / "environment.json").write_text(json.dumps(environment))
-            expect_rejection(verify, case, expected)
+    from bench.verify_results import statistics_for, stable
+    if statistics_for(list(range(50)))['p95_ms'] != 47:
+        raise AssertionError('p95 must use nearest rank')
+    if not stable([1.] * 10) or stable([1.] * 5 + [1.11] * 5):
+        raise AssertionError('warm-up stability threshold differs')
+    # Full signed current-only artifacts and adversarial mutations are exercised
+    # by benchmark_trust_regressions.py, without historical repository fixtures.
 
 
 def jsonl_checks() -> None:
