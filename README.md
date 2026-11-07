@@ -16,7 +16,7 @@ The current implementation supports:
 - an optional read-only many-to-one object;
 - an optional writable one-to-many array;
 - document reads, inserts, full replacements and guarded deletes;
-- optimistic concurrency using SHA-256 ETags;
+- optimistic concurrency using the first 128 bits of SHA-256 as 32 uppercase hexadecimal ETags (not authentication tokens);
 - PostgreSQL row-level security and invoker rights;
 - generator provenance, catalogue health checks and transactional regeneration;
 - generated DDL that has no runtime dependency on the extension.
@@ -177,6 +177,9 @@ The repository contains several layers of verification:
 - `tests/run_postgrest.py` for the automated REST contract;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `tests/dump_restore.py` for custom and plain dump/restore verification;
+- `tests/documentation_smoke.py` and `tests/upgrade_documentation.py` for executable walkthroughs;
+- `tests/public_contract.py` for precise ETag, deletion and mapping restrictions;
+- `tests/standalone_generated_sql.py` for clean no-extension deployment and restore;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
 - `bench/duality_overhead.py` for reproducible server-side measurements.
 - `bench/verify_results.py` for independent validation and recomputation of benchmark artifacts.
@@ -210,6 +213,13 @@ The complete mapped-type, foreign-key, identity and source-shape limits are in
 ## Licence
 
 `pg_jsontailor` is released under the PostgreSQL Licence. See [`LICENSE`](LICENSE).
+
+Exported generated SQL contains copied implementation logic. Standalone
+redistributions must retain the complete copyright, permission and disclaimer
+text in [`GENERATED_SQL_NOTICE`](GENERATED_SQL_NOTICE). See the
+[`standalone deployment example`](examples/standalone/README.md) and bundle
+verifier; this does not claim rights over user-authored data or specifications,
+or imply a warranty, support commitment or SLA.
 
 Copyright © 2026 Baremon s.r.o.
 

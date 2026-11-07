@@ -74,10 +74,25 @@ Mapped domains, enums, `json`/`jsonb`, arrays and other types are not
 supported. An unmapped column may use any type supported by its source table,
 including a domain, because the generated write projection omits it.
 
+Generated columns are not supported in mapped keys, fields, foreign keys or
+array ordering. Keys must be single-column primary keys. `root.fields` must
+not remap the root key or `object.root_fk`; each source column can appear only
+once within a role's fields. The object key must appear in `object.fields`,
+and the child key in `array.fields`. The child `parent_fk` must not appear in
+`array.fields`. Object and child foreign keys must be writable, validated,
+enforced and non-deferrable; the object foreign key cannot be the root primary
+key, and the child foreign key must use `NO ACTION` or `RESTRICT`.
+`GENERATED ALWAYS` identity fields are not writable, except that a child key
+may be mapped and omitted on insert so its sequence generates the value.
+
+ETags are the first 128 bits of SHA-256 encoded as 32 uppercase hexadecimal
+characters, not authentication tokens. See [`SEMANTICS.md`](SEMANTICS.md) for
+object-key coverage with `object.etag=false` and visibility-relative RLS reads.
+
 Finite AD `timestamptz` values are emitted as UTC strings in the fixed form
 `YYYY-MM-DDTHH:MM:SS.ffffffZ`; finite BC values append the PostgreSQL era suffix
 ` BC`. Input strings may contain any PostgreSQL-accepted
-time-zone offset; reads normalize the represented instant to UTC. This makes
+time-zone offset; reads normalise the represented instant to UTC. This makes
 documents and ETags independent of the session `TimeZone` setting while keeping
 BC and AD instants distinct and reversible.
 
@@ -101,7 +116,7 @@ The generated SQL is copied into each generated object. Regenerate a view after 
 
 Statement writes and the generated `__delete_document` helper take fixed-order
 `ACCESS SHARE` locks on configured source relations before validating their
-bindings. These locks stabilize relation identity against DDL that requires
+bindings. These locks stabilise relation identity against DDL that requires
 `ACCESS EXCLUSIVE`; they do not replace row locks, RLS or a write-free reviewed
 schema-migration window.
 
@@ -140,13 +155,13 @@ objects also cause PostgreSQL to stop and roll back the operation. Remove and
 explicitly recreate reviewed application triggers or rules around regeneration;
 they are never silently dropped or reconstructed.
 
-Write paths deserialize only the physical columns named by the specification.
+Write paths deserialise only the physical columns named by the specification.
 Unmapped columns, including columns using NOT NULL domains, are omitted from
 the generated projection so their table or domain defaults remain effective.
 
 ## Permissions
 
-The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`. During replacement, MERGE UPDATE and delete, a referenced object included in the ETag is stabilized with `SELECT FOR SHARE`; PostgreSQL requires `SELECT` and `UPDATE` on at least one column of the referenced table for that lock. A column-level `UPDATE` grant is sufficient and does not permit other columns to be changed. Mappings with `object.etag=false` do not acquire this object lock. Row-level security policies must also permit every required read, lock and write.
+The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`. During replacement, MERGE UPDATE and delete, a referenced object included in the ETag is stabilised with `SELECT FOR SHARE`; PostgreSQL requires `SELECT` and `UPDATE` on at least one column of the referenced table for that lock. A column-level `UPDATE` grant is sufficient and does not permit other columns to be changed. Mappings with `object.etag=false` do not acquire this object lock. Row-level security policies must also permit every required read, lock and write.
 
 ## Errors
 
@@ -164,19 +179,19 @@ is passed to PostgreSQL so target nullability remains authoritative. Unrelated
 table constraints keep their native SQLSTATE rather than being rewritten.
 
 The mapped child primary key may be `DEFERRABLE INITIALLY IMMEDIATE`. Generated
-writes detect that property after stabilizing source identities and use an
+writes detect that property after stabilising source identities and use an
 explicit-key fallback. Visible existing identities and concurrent mapped-key
 claims under immediate checking are reported as `PT422`; secondary uniqueness
 failures retain native `23505` diagnostics. Explicitly deferred transaction
 constraint mode is not changed by the extension.
 
-PostgreSQL can also return `40001` (serialization failure) or `40P01` (deadlock) for concurrent transactions. Retry
+PostgreSQL can also return `40001` (serialisation failure) or `40P01` (deadlock) for concurrent transactions. Retry
 the complete transaction after either error, re-read the document and use its current ETag; do not replay only the
 failed statement with an old token.
 
 Run DDL returned by `duality_view_ddl` in one transaction with stop-on-error behaviour.
 
-For direct SQL deletion, constrain the generated view by both `_id` and `data #>> '{_metadata,etag}'`. A token that is already stale selects no row (`DELETE 0`). If the document changes while the trigger waits for locks, its post-lock check returns `PT412`. The generated delete function provides the alternative explicit-argument contract and returns `PT412` for both stale and missing documents.
+For direct SQL deletion, constrain the generated view by both `_id` and `data #>> '{_metadata,etag}'`. A token that is already stale selects no row (`DELETE 0`). If the document changes while the trigger waits for locks, its post-lock check returns `PT412`. The trigger cannot require or inspect a client-supplied predicate: deleting by identity alone is allowed but does not assert the client's earlier ETag. The generated delete function provides the explicit-argument contract and returns `PT412` for both stale and missing documents.
 
 The same predicate pattern applies to updates. The client may provide only the identity, earlier ETag and changed values while the `SET` expression builds complete `NEW.data` from the view's `data` column. An initially stale token returns `UPDATE 0`; a post-selection race returns `PT412`.
 
