@@ -8,6 +8,8 @@ The design follows the same core idea as Oracle JSON Relational Duality Views: o
 
 ## Status
 
+Release metadata: `0.2.0` / `development`.
+
 The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier and PostgREST scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
 
 The current implementation supports:
@@ -16,7 +18,7 @@ The current implementation supports:
 - an optional read-only many-to-one object;
 - an optional writable one-to-many array;
 - document reads, inserts, full replacements and guarded deletes;
-- optimistic concurrency using SHA-256 ETags;
+- optimistic concurrency using the first 128 bits of SHA-256 as 32 uppercase hexadecimal ETags (not authentication tokens);
 - PostgreSQL row-level security and invoker rights;
 - generator provenance, catalogue health checks and transactional regeneration;
 - generated DDL that has no runtime dependency on the extension.
@@ -78,47 +80,48 @@ make installcheck
 
 ## Quick start
 
-Given ordinary relational tables such as those in [`examples/shop_schema.sql`](examples/shop_schema.sql), generate a writable JSON view from a specification:
+Warning: use a disposable database only. The fixture
+[`examples/shop_schema.sql`](examples/shop_schema.sql) executes `DROP SCHEMA shop CASCADE`
+and destroys existing data and dependent objects. Never load it into an application database.
+The following shell walkthrough runs from the repository root, creates its own
+database and removes that database on exit. The connected role needs `CREATEDB`
+and permission to install the extension; install the extension files first.
+Connection settings (`PGHOST`, `PGPORT`, `PGUSER` and optionally the maintenance
+`PGDATABASE`) follow the usual libpq environment variables.
 
-```sql
-CREATE SCHEMA api;
-
-SELECT jsontailor.create_duality_view(
-    'api.orders_dv',
-    '{
-      "root": {
-        "table": "shop.orders",
-        "key": "order_id",
-        "fields": {"status": "status", "created": "created_at"},
-        "insert": true,
-        "update": true,
-        "delete": true
-      }
-    }'::jsonb
-);
+<!-- quickstart-smoke:start -->
+```sh
+set -euo pipefail
+quickstart_db="pgjt_quickstart_$$"
+createdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
+trap 'dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"' EXIT
+psql -X -v ON_ERROR_STOP=1 -d "$quickstart_db" \
+  -v spec="$(tr -d '\n' < examples/orders_dv.spec.json)" \
+  -f examples/quickstart.sql
+dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
+trap - EXIT
+echo quickstart/cleanup=PASS
 ```
+<!-- quickstart-smoke:end -->
+
+Expected markers are `quickstart/read=new`, `quickstart/update=PASS`,
+`quickstart/delete=PASS` and `quickstart/cleanup=PASS`. The
+[`walkthrough`](examples/quickstart.sql) loads the complete shipped mapping,
+inserts an order and child, reads its ETag, performs a guarded replacement and
+deletes the inserted order and its child using the current ETag. It leaves the
+seeded order untouched before the database is removed. `psql` variables use
+literal quoting (`:'spec'`); application clients should bind query parameters.
 
 The same DDL can be inspected before execution:
 
 ```sql
-SELECT jsontailor.duality_view_ddl(
-    'api.orders_dv',
-    '{
-      "root": {
-        "table": "shop.orders",
-        "key": "order_id",
-        "fields": {"status": "status", "created": "created_at"},
-        "insert": true,
-        "update": true,
-        "delete": true
-      }
-    }'::jsonb
-);
+SELECT jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb);
 ```
 
 In applications, pass the specification as a query parameter rather than reading a server-side file. Both the target view and every source table must be schema-qualified.
 
-Read a document:
+The following SQL shapes are application examples, not additional steps after
+the disposable database has been removed. Read a document:
 
 ```sql
 SELECT data
@@ -176,24 +179,25 @@ The repository contains several layers of verification:
 - `tests/run_postgrest.py` for the automated REST contract;
 - `tests/setbased_reconciliation.py` for bulk array reconciliation;
 - `tests/dump_restore.py` for custom and plain dump/restore verification;
+- `tests/documentation_smoke.py` and `tests/upgrade_documentation.py` for executable walkthroughs;
+- `tests/public_contract.py` for precise ETag, deletion and mapping restrictions;
+- `tests/standalone_generated_sql.py` for clean no-extension deployment and restore;
 - `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
 - `bench/duality_overhead.py` for reproducible server-side measurements.
 - `bench/verify_results.py` for independent validation and recomputation of benchmark artifacts.
 
 The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
 
-Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, benchmark and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and benchmark execution remain explicit integration or measurement scenarios; committed benchmark evidence is independently verified on every run. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
+Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, current-only benchmark protocol and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and final exact-candidate benchmark execution remain explicit integration or measurement scenarios. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
 
 ## Performance
 
 The write path uses set-based array reconciliation and set-wise validation.
-The current Azure reference at commit `039a555` records a 49.782 ms
-median and 50.721 ms p95 for complete replacement of a document with 1,000
-children. It is current release evidence only when the release-candidate
-verifier proves product equivalence with the candidate. Results are
-host-specific and do not represent a production SLO. See
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full semantic and provenance
-context.
+Final exact-SHA measurements on PostgreSQL 17, 18 and 19 are pending the
+merged security/runtime freeze. No current performance figures are published.
+The benchmark compares the candidate with lower-contract direct SQL using
+signed installation evidence, semantic assertions and three independently
+restarted paired-sample sessions. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Limitations
 
@@ -209,6 +213,13 @@ The complete mapped-type, foreign-key, identity and source-shape limits are in
 ## Licence
 
 `pg_jsontailor` is released under the PostgreSQL Licence. See [`LICENSE`](LICENSE).
+
+Exported generated SQL contains copied implementation logic. Standalone
+redistributions must retain the complete copyright, permission and disclaimer
+text in [`GENERATED_SQL_NOTICE`](GENERATED_SQL_NOTICE). See the
+[`standalone deployment example`](examples/standalone/README.md) and bundle
+verifier; this does not claim rights over user-authored data or specifications,
+or imply a warranty, support commitment or SLA.
 
 Copyright © 2026 Baremon s.r.o.
 

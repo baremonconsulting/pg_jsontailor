@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from concurrent_writer import held_writer
 
 
 def lit(value: str) -> str:
@@ -30,7 +31,7 @@ class Runner:
 
     def run(self, sql, check=True):
         p = subprocess.run(self.cmd(), input="\\set VERBOSITY verbose\n" + sql,
-                           text=True, capture_output=True)
+                           text=True, capture_output=True, timeout=15)
         if check and p.returncode:
             raise RuntimeError(p.stderr)
         return p
@@ -47,6 +48,11 @@ class Runner:
         if p.returncode: raise RuntimeError(p.stderr)
         value = self.spec.read_text() if specification is None else json.dumps(specification)
         self.run("SELECT jsontailor.create_duality_view(" + lit(view) + "," + lit(value) + "::jsonb);")
+        if view == 'shop.orders_dv' and json.loads(value).get('array'):
+            self.run("DO $$BEGIN IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_data') THEN "
+                     "PERFORM jsontailor.grant_array_reader('shop.orders_dv','jt_test_data',false); "
+                     "PERFORM jsontailor.grant_delete_rpc('shop.orders_dv','jt_test_data',false); "
+                     "END IF;END$$;")
 
     def add(self, ident, variant, status, expected, observed, notes=""):
         self.rows.append({"id": str(ident), "variant": variant, "status": status,
@@ -133,6 +139,8 @@ class Runner:
     def test10(self):
         self.reset()
         self.run("DO $$BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_viewonly') THEN CREATE ROLE jt_test_viewonly NOLOGIN; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='jt_test_data') THEN CREATE ROLE jt_test_data NOLOGIN; END IF; END$$; GRANT USAGE ON SCHEMA shop TO jt_test_viewonly,jt_test_data; GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_viewonly,jt_test_data; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA shop TO jt_test_data;")
+        self.run("SELECT jsontailor.grant_array_reader('shop.orders_dv','jt_test_data',false);")
+        self.run("SELECT jsontailor.grant_delete_rpc('shop.orders_dv','jt_test_data',false);")
         denied=self.run("SET ROLE jt_test_viewonly; SELECT * FROM shop.orders_dv;",False)
         obs=["view_only="+str(self.state(denied))];passed=self.state(denied)=="42501"
         allowed=self.run("SET ROLE jt_test_data;SELECT count(*) FROM shop.orders_dv;RESET ROLE;",False);obs.append("table_grants="+str(allowed.returncode));passed &= allowed.returncode==0
@@ -155,16 +163,26 @@ class Runner:
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
         changed=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items,0,qty}','3') WHERE _id=42;",False);deleted=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False)
         # g1: an uncommitted direct child change must not make the view deletion wait.
-        direct=subprocess.Popen(self.cmd(),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert direct.stdin
-        direct.stdin.write("BEGIN;UPDATE shop.order_items SET quantity=9 WHERE item_id=1;SELECT pg_sleep(1);COMMIT;");direct.stdin.close();time.sleep(.2)
-        started=time.monotonic();g1=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items}',(data->'items')-0) WHERE _id=42;",False);elapsed1=time.monotonic()-started;direct.wait(timeout=10)
+        expected = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        expected["items"][0]["qty"] = 9
+        with held_writer(self.cmd(), self.scalar,
+                         "UPDATE shop.order_items SET quantity=9 WHERE item_id=1;", "shop.order_items"):
+            started=time.monotonic();g1=self.run("SET statement_timeout='2s';SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items}',(data->'items')-0) WHERE _id=42;",False);elapsed1=time.monotonic()-started
+        final = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        expected.pop("_metadata"); final.pop("_metadata")
+        passed &= final == expected and self.scalar("SELECT quantity FROM shop.order_items WHERE item_id=1;") == "9"
         # g5: status-only update holds no child lock, so a direct child update does not wait.
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
-        writer=subprocess.Popen(self.cmd(),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True);assert writer.stdin
-        writer.stdin.write("SET ROLE jt_test_data;BEGIN;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"held\"') WHERE _id=42;SELECT pg_sleep(1);COMMIT;");writer.stdin.close();time.sleep(.2)
-        started=time.monotonic();g5=self.run("UPDATE shop.order_items SET quantity=8 WHERE item_id=1;",False);elapsed5=time.monotonic()-started;writer.wait(timeout=10)
+        expected = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        expected["status"] = "held"; expected["items"][0]["qty"] = 8
+        with held_writer(self.cmd(), self.scalar,
+                         "SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"held\"') WHERE _id=42;", "shop.orders"):
+            started=time.monotonic();g5=self.run("SET statement_timeout='2s';UPDATE shop.order_items SET quantity=8 WHERE item_id=1;",False);elapsed5=time.monotonic()-started
+        final = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        expected.pop("_metadata"); final.pop("_metadata")
+        passed &= final == expected and self.scalar("SELECT status||':'||(SELECT quantity FROM shop.order_items WHERE item_id=1) FROM shop.orders WHERE order_id=42;") == "held:8"
         obs.append(f"e_g={status.returncode}/{self.state(changed)}/{self.state(deleted)};g1={self.state(g1)}/{elapsed1:.3f};g5={g5.returncode}/{elapsed5:.3f}")
-        passed &= status.returncode==0 and self.state(changed)=="42501" and self.state(deleted)=="42501" and self.state(g1)=="42501" and elapsed1<.6 and g5.returncode==0 and elapsed5<.6
+        passed &= status.returncode==0 and self.state(changed)=="42501" and self.state(deleted)=="42501" and self.state(g1)=="42501" and g5.returncode==0
         self.add(10,"V1/RLS","PASS" if passed else "FAIL","permissions, hidden rows/object, hostile path and non-lockable rows",";".join(obs),"RLS policy matrices are recreated between subcases; two-session races are covered by test 5 and the isolation suite.")
 
     def test12(self):
@@ -303,8 +321,8 @@ INSERT INTO jt_v5.root VALUES(1);INSERT INTO jt_v5.child VALUES('a',1,'same','a'
         values=self.scalar("""SELECT count(*)::text||':'||string_agg(proname||'/'||provolatile::text||'/'||prosecdef::text||'/'||array_to_string(proconfig,','),';' ORDER BY proname)
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='jsontailor';""")
         usage=self.scalar("SELECT has_schema_privilege('public','jsontailor','USAGE');")
-        passed=values.startswith("4:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==3 and usage=='t'
-        self.add(18,"installation","PASS" if passed else "FAIL","four functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
+        passed=values.startswith("7:") and values.count("/s/false/search_path=pg_catalog, pg_temp")==1 and values.count("/v/false/search_path=pg_catalog, pg_temp")==6 and usage=='t'
+        self.add(18,"installation","PASS" if passed else "FAIL","seven functions with contract attributes and PUBLIC usage",f"catalog={values};usage={usage}")
 
     def test19(self):
         self.reset()

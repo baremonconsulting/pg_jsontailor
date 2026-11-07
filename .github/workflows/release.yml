@@ -1,63 +1,109 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      evidence_commit:
+        description: Immutable commit in the repository-controlled durable evidence store
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
   checks: read
 
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
 jobs:
-  release:
-    name: Publish source release
+  prepare:
+    name: Read-only release preparation
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-
-      - name: Verify tag and package source
-        id: package
-        shell: bash
+          persist-credentials: false
+      - name: Validate immutable evidence reference
+        env:
+          EVIDENCE_COMMIT: ${{ inputs.evidence_commit }}
+        run: '[[ "$EVIDENCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ vars.EVIDENCE_STORE_REPOSITORY }}
+          ref: ${{ inputs.evidence_commit }}
+          path: evidence
+          persist-credentials: false
+      - name: Verify release environment and prepare approved package
+        env:
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
         run: |
           set -euo pipefail
-          version=$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)
-          test "$GITHUB_REF_NAME" = "v$version"
-          required_checks=(
-            'Repository checks'
-            'PostgreSQL 17'
-            'PostgreSQL 18'
-            'PostgreSQL 19'
-            'CodeQL (Python)'
-            'Dependency review'
-          )
-          check_runs=$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
-            --jq '.check_runs[] | [.name,.status,.conclusion] | @tsv')
-          for required in "${required_checks[@]}"; do
-            awk -F '\t' -v name="$required" \
-              '$1==name && $2=="completed" && $3=="success" {found=1} END {exit !found}' \
-              <<<"$check_runs"
-          done
-          archive="pg_jsontailor-$version.tar.gz"
-          git archive --format=tar.gz --prefix="pg_jsontailor-$version/" \
-            -o "$archive" "$GITHUB_SHA"
-          sha256sum "$archive" > "$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          python3 tools/repository_governance.py --check-release-environment
+          python3 tools/prepare_release.py --sha "$GITHUB_SHA" --ref "$GITHUB_REF" --evidence evidence --output package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package
+          if-no-files-found: error
+          path: package/
+  archive:
+    needs: prepare
+    uses: ./.github/workflows/archive-validation.yml
+  publish:
+    name: Approval-protected minimal-write publication
+    needs: [prepare, archive]
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ vars.EVIDENCE_STORE_REPOSITORY }}
+          ref: ${{ inputs.evidence_commit }}
+          path: evidence
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-package
+          path: checked-package
+      - name: Recheck authority immediately before the only write
         env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Create GitHub release
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 tools/repository_governance.py --check-release-environment
+          python3 tools/prepare_release.py --sha "$GITHUB_SHA" --ref "$GITHUB_REF" --evidence evidence --output package
+          diff --recursive --no-dereference package checked-package
+      - name: Publish verified package without authority credentials
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "${{ steps.package.outputs.archive }}" \
-            "${{ steps.package.outputs.archive }}.sha256" \
-            --verify-tag \
-            --generate-notes \
-            --title "pg_jsontailor $GITHUB_REF_NAME"
+          set -euo pipefail
+          version="$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq '.object.type')" = commit
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq '.object.sha')" = "$GITHUB_SHA"
+          gh release create "v$version" package/* --verify-tag --generate-notes --title "pg_jsontailor v$version"
+      - name: Download and verify published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n "s/^default_version = '\([^']*\)'/\1/p" pg_jsontailor.control)"
+          gh release download "v$version" --dir published
+          python3 tools/verify_postpublication.py --sha "$GITHUB_SHA" --version "$version" \
+            --archive "published/pg_jsontailor-$version.tar.gz" --checksum "published/pg_jsontailor-$version.tar.gz.sha256" \
+            --record published/record.json --signature published/record.sig --key evidence/signer.pem \
+            --trust .github/release-signers.json --index evidence/evidence-index.json

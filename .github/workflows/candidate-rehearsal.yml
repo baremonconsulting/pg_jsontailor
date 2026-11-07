@@ -1,0 +1,50 @@
+name: Nonpublishing candidate rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_commit:
+        description: Immutable commit in the repository-controlled durable evidence store
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+jobs:
+  prepare:
+    name: Candidate validation is not release approval
+    if: github.ref != 'refs/heads/main' && startsWith(github.ref, 'refs/heads/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable evidence reference
+        env:
+          EVIDENCE_COMMIT: ${{ inputs.evidence_commit }}
+        run: '[[ "$EVIDENCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ vars.EVIDENCE_STORE_REPOSITORY }}
+          ref: ${{ inputs.evidence_commit }}
+          path: evidence
+          persist-credentials: false
+      - name: Consume approved index and signature; require main-authority rejection
+        env:
+          GH_AUTHORITY_TOKEN: ${{ secrets.RELEASE_AUTHORITY_READ_TOKEN }}
+        run: |
+          python3 tools/prepare_release.py --candidate --sha "$GITHUB_SHA" --ref "$GITHUB_REF" \
+            --evidence evidence --output package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package
+          if-no-files-found: error
+          path: package/
+  archive:
+    needs: prepare
+    uses: ./.github/workflows/archive-validation.yml

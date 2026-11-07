@@ -29,7 +29,13 @@ BEGIN
                 AND p.pronargs=1
                 AND p.proargtypes[0]='pg_catalog.text'::regtype::oid
                 AND p.prorettype='pg_catalog.void'::regtype::oid
-                AND p.provolatile='v'))
+                AND p.provolatile='v')
+            OR (p.proname=ANY(ARRAY['grant_delete_rpc','grant_array_reader'])
+                AND p.pronargs=3 AND p.proargtypes='25 25 16'::oidvector
+                AND p.prorettype='pg_catalog.void'::regtype::oid AND p.provolatile='v')
+            OR (p.proname='review_helper_grant'
+                AND p.pronargs=4 AND p.proargtypes='25 25 25 16'::oidvector
+                AND p.prorettype='pg_catalog.void'::regtype::oid AND p.provolatile='v'))
       INTO total,valid
       FROM pg_catalog.pg_proc p
       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
@@ -38,7 +44,7 @@ BEGIN
       JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
      WHERE n.nspname='jsontailor' AND e.extname='pg_jsontailor';
 
-    IF total<>4 OR valid<>4 THEN
+    IF total<>7 OR valid<>7 THEN
         RAISE EXCEPTION 'extension function type contract mismatch';
     END IF;
     IF EXISTS(

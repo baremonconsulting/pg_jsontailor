@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "repository": "baremonconsulting/pg_jsontailor",
+  "actions_app_id": 15368,
+  "workflows": {
+    "ci": {"id": 407266932, "path": ".github/workflows/ci.yml", "jobs": ["Repository checks", "PostgreSQL 17", "PostgreSQL 18", "PostgreSQL 19"]},
+    "codeql": {"id": 407266933, "path": ".github/workflows/codeql.yml", "jobs": ["CodeQL (Python)"]},
+    "dependency": {"id": 407266937, "path": ".github/workflows/dependency-review.yml", "jobs": ["Dependency review"]},
+    "nightly": {"id": 409799714, "path": ".github/workflows/nightly-generated-sql.yml", "jobs": ["pg18"]}
+  }
+}

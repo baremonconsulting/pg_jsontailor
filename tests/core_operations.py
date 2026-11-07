@@ -9,6 +9,9 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import secrets
+from psql_results import tuples, document as returned_document
+from concurrent_writer import held_writer, wait_for
 
 
 def literal(value: str) -> str:
@@ -28,7 +31,7 @@ class Harness:
 
     def run(self, sql: str, check: bool = True) -> subprocess.CompletedProcess:
         completed = subprocess.run(self.command(), input="\\set VERBOSITY verbose\n" + sql,
-                                   text=True, capture_output=True)
+                                   text=True, capture_output=True, timeout=15)
         if check and completed.returncode:
             raise RuntimeError(completed.stderr)
         return completed
@@ -62,7 +65,8 @@ class Harness:
     def test1(self) -> None:
         self.reset()
         etag = self.scalar("SELECT data#>>'{_metadata,etag}' FROM shop.orders_dv WHERE _id=42;")
-        returned = self.scalar("""
+        previous = json.loads(self.document())
+        result = self.run("""
 UPDATE shop.orders_dv
 SET data = pg_catalog.jsonb_set(
              pg_catalog.jsonb_set(data, '{status}', '"processing"'::jsonb),
@@ -70,8 +74,10 @@ SET data = pg_catalog.jsonb_set(
              '[{"itemId":1,"product":"Kabel","qty":3,"price":99.00},
                {"product":"Adapter","qty":1,"price":12.34}]'::jsonb)
 WHERE _id=42
-RETURNING data#>>'{_metadata,etag}';
+RETURNING data;
 """)
+        stored = json.loads(self.document())
+        returned = returned_document(tuples(result, "UPDATE", 1)[0][0], stored, previous)
         tables_ok = self.scalar("""
 SELECT (SELECT status='processing' AND customer_id=7 FROM shop.orders WHERE order_id=42)
    AND (SELECT count(*)=2 AND bool_and(
@@ -79,7 +85,13 @@ SELECT (SELECT status='processing' AND customer_id=7 FROM shop.orders WHERE orde
           (item_id<>1 AND quantity=1 AND product='Adapter'))
         FROM shop.order_items WHERE order_id=42);
 """)
-        passed = etag == "70AF45CCE541C9A5C8B598F2DA5C2CBC" and tables_ok == "t" and returned != etag
+        passed = etag == "70AF45CCE541C9A5C8B598F2DA5C2CBC" and tables_ok == "t" and returned["status"] == "processing"
+        inserted = self.run("INSERT INTO shop.orders_dv(data) VALUES "
+                            "('{\"_id\":1234,\"status\":\"inserted\",\"created\":\"2026-11-06\","
+                            "\"customer\":{\"customerId\":7},\"items\":[{\"product\":\"new\",\"qty\":2,\"price\":3}]}') RETURNING data;")
+        insert_readback = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=1234;"))
+        returned_document(tuples(inserted, "INSERT", 1)[0][0], insert_readback)
+        passed &= insert_readback["status"] == "inserted" and len(insert_readback["items"]) == 1
         self.record("1", "control ETag and successful round trip", f"etag={etag};new={returned};tables={tables_ok}", passed)
 
     def test2(self) -> None:
@@ -128,21 +140,38 @@ WHERE _id=42;
         else:
             first["status"] = "first"
         second["status"] = "second"
-        a_sql = ("BEGIN; UPDATE shop.orders_dv SET data=" + literal(json.dumps(first)) +
-                 "::jsonb WHERE _id=42; SELECT pg_sleep(1.0); COMMIT;")
-        b_sql = (f"BEGIN ISOLATION LEVEL {isolation}; UPDATE shop.orders_dv SET data=" +
+        a_sql = ("UPDATE shop.orders_dv SET data=" + literal(json.dumps(first)) +
+                 "::jsonb WHERE _id=42;")
+        contender_name = 'jt_core_contender_' + secrets.token_hex(6)
+        b_sql = (f"SET application_name='{contender_name}';SET statement_timeout='10s';"
+                 f"BEGIN ISOLATION LEVEL {isolation}; UPDATE shop.orders_dv SET data=" +
                  literal(json.dumps(second)) + "::jsonb WHERE _id=42; COMMIT;")
-        a = subprocess.Popen(self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True)
-        assert a.stdin is not None
-        a.stdin.write("\\set VERBOSITY verbose\n" + a_sql)
-        a.stdin.close()
-        time.sleep(0.2)
         started = time.monotonic()
-        b = self.run(b_sql, False)
-        waited = time.monotonic() - started
-        a.wait(timeout=10)
-        return self.state(b), waited
+        contender = None
+        try:
+            with held_writer(self.command(), self.scalar, a_sql, 'shop.orders'):
+                contender = subprocess.Popen(self.command(), stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                contender.stdin.write("\\set VERBOSITY verbose\n" + b_sql + '\n')
+                contender.stdin.flush()
+                wait_for(self.scalar, contender,
+                    f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{contender_name}' "
+                    "AND wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0);", 'contender')
+            stdout, stderr = contender.communicate(timeout=10)
+            result = subprocess.CompletedProcess(self.command(), contender.returncode, stdout, stderr)
+            expected = json.loads(self.document())
+            first.pop('_metadata'); expected.pop('_metadata')
+            if not add_only:
+                exact = expected == first
+            else:
+                exact = expected['items'][:-1] == first['items'][:-1] and expected['status'] == first['status']
+                exact &= {key: value for key, value in expected['items'][-1].items() if key != 'itemId'} == first['items'][-1]
+            if result.returncode == 0 or not exact:
+                raise RuntimeError('contender did not fail atomically after committed writer')
+            return self.state(result), time.monotonic() - started
+        finally:
+            if contender is not None and contender.poll() is None:
+                contender.terminate(); contender.communicate(timeout=5)
 
     def test4(self) -> None:
         observations = []
@@ -153,7 +182,7 @@ WHERE _id=42;
             for add_only in (False, True):
                 state, waited = self.concurrent(isolation, add_only)
                 observations.append(f"{isolation}/{'add' if add_only else 'status'}:{state}/{waited:.3f}s")
-                passed &= state == expected and waited >= 0.6
+                passed &= state == expected
         self.record("4", "PT412 in RC; 40001 in RR/SERIALIZABLE", ";".join(observations), passed)
 
     def test5(self) -> None:

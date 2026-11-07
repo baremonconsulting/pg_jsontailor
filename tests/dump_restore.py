@@ -187,6 +187,7 @@ CREATE TABLE partition_restore.part_item_low PARTITION OF partition_restore.part
  FOR VALUES FROM(0) TO(100);
 CREATE TABLE partition_restore.part_item_high PARTITION OF partition_restore.part_item
  FOR VALUES FROM(100) TO(200);
+CREATE INDEX part_item_parent_order ON partition_restore.part_item(parent,id);
 INSERT INTO partition_restore.part_detail VALUES(107,'partition-detail');
 INSERT INTO partition_restore.part_root VALUES(150,107,'partition-root');
 INSERT INTO partition_restore.part_item VALUES(150,150,'partition-item');

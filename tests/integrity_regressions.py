@@ -44,6 +44,16 @@ def role_cleanup(db: TestDatabase, role: str):
 
 
 def create_view(db: TestDatabase, name: str, specification: dict) -> None:
+    if 'array' in specification:
+        array = specification['array']
+        columns = list(dict.fromkeys([array['parent_fk'], array.get('order_by', array['key']), array['key']]))
+        db.run("DO $index$ DECLARE source regclass:=to_regclass(" + quote(array['table'])
+               + "); names text[]:=parse_ident(" + quote(name)
+               + "); BEGIN EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (%s)',"
+               + "names[2]||'__limit_index',source,"
+               + "(SELECT string_agg(quote_ident(c),',') FROM unnest(ARRAY["
+               + ','.join(quote(column) for column in columns)
+               + "])c)); END $index$;")
     db.run(f"SELECT jsontailor.create_duality_view({quote(name)},"
            f"{quote(json.dumps(specification))}::jsonb);")
 
@@ -628,6 +638,7 @@ SELECT jt_nullable_owner.documents__delete_document(
     db.run(f"""CREATE ROLE {nullable_role} NOLOGIN;
 GRANT USAGE ON SCHEMA jt_nullable_owner TO {nullable_role};
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_nullable_owner TO {nullable_role};
+SELECT jsontailor.grant_array_reader('jt_nullable_owner.documents','{nullable_role}',false);
 ALTER TABLE jt_nullable_owner.child ENABLE ROW LEVEL SECURITY;
 CREATE POLICY nullable_visible ON jt_nullable_owner.child TO {nullable_role}
  USING (parent=2) WITH CHECK (parent=2);""")
@@ -787,6 +798,7 @@ INSERT INTO jt_binding_acl.child VALUES('a',1,'A');""")
                   "parent_fk": "parent", "fields": {"id": "id", "value": "value"},
                   "insert": True, "update": True, "delete": True}}
     create_view(db, "jt_binding_acl.documents", binding_spec)
+    db.run(f"SELECT jsontailor.grant_array_reader('jt_binding_acl.documents','{binding_role}',false);")
     db.run(f"GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA jt_binding_acl TO {binding_role};")
     helper_writes = [
         db.run(f"SET ROLE {binding_role}; INSERT INTO jt_binding_acl.documents__root_binding"
@@ -864,7 +876,7 @@ INSERT INTO jt_typed_duplicate.child VALUES(10,1);""")
            "DO $$DECLARE item regprocedure; BEGIN FOR item IN "
            "SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
            "WHERE n.nspname='jt_integrity' AND p.proname=ANY(ARRAY['documents__insert',"
-           "'documents__update','documents__delete','documents__guard','documents__delete_document','documents__check']) LOOP "
+           "'documents__update','documents__delete','documents__guard','documents__delete_document','documents__check','documents__bounded_array']) LOOP "
            "EXECUTE format('DROP FUNCTION %s',item); END LOOP; END$$;")
     create_view(db, "jt_integrity.documents", spec)
     regenerated_doc = json.loads(db.value("SELECT data::text FROM jt_integrity.documents WHERE _id=1;"))
@@ -1548,6 +1560,7 @@ GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO jt_lifecycle_role 
 COMMENT ON FUNCTION jt_provenance.documents__check() IS 'preserved health comment';
 CREATE FUNCTION jt_provenance.documents__check(integer) RETURNS integer
 LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
+    db.run(f"SELECT jsontailor.grant_delete_rpc('jt_provenance.documents','{lifecycle_role}',true);")
     regenerated = db.run(
         "SELECT jsontailor.regenerate_duality_view('jt_provenance.documents');", False)
     column_acl = db.value(f"""SELECT
@@ -1565,16 +1578,16 @@ LANGUAGE sql IMMUTABLE AS 'SELECT $1';""")
         "SET data=jsonb_set(data,'{label}','\"role-after\"') WHERE _id=1; RESET ROLE;", False)
     db.run(f"""SET ROLE {lifecycle_role};
 GRANT SELECT (data) ON jt_provenance.documents TO {delegated_grantee};
-GRANT EXECUTE ON FUNCTION jt_provenance.documents__check() TO {delegated_grantee};
+GRANT EXECUTE ON FUNCTION jt_provenance.documents__delete_document(integer,text) TO {delegated_grantee};
 RESET ROLE;
 REVOKE SELECT (data) ON jt_provenance.documents FROM {lifecycle_role} CASCADE;
-REVOKE EXECUTE ON FUNCTION jt_provenance.documents__check() FROM {lifecycle_role} CASCADE;""")
+REVOKE EXECUTE ON FUNCTION jt_provenance.documents__delete_document(integer,text) FROM {lifecycle_role} CASCADE;""")
     owner_grant_cascade = db.value(
         f"SELECT EXISTS(SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl)x "
         "WHERE a.attrelid='jt_provenance.documents'::regclass AND a.attname='data' "
         f"AND x.grantee=(SELECT oid FROM pg_roles WHERE rolname='{delegated_grantee}'))::text||':'||"
         f"has_function_privilege('{delegated_grantee}',"
-        "'jt_provenance.documents__check()','EXECUTE')::text;")
+        "'jt_provenance.documents__delete_document(integer,text)','EXECUTE')::text;")
     db.run("UPDATE jt_provenance.root SET label='one' WHERE id=1;")
     preserved = db.value("""SELECT
       has_table_privilege('public','jt_provenance.documents','SELECT')::text||':'||
@@ -2106,6 +2119,7 @@ GRANT USAGE ON SCHEMA jt_deferrable_pk TO {deferrable_role};
 GRANT SELECT,INSERT ON jt_deferrable_pk.root,jt_deferrable_pk.child
   TO {deferrable_role};
 GRANT SELECT,INSERT ON jt_deferrable_pk.documents TO {deferrable_role};""")
+    db.run(f"SELECT jsontailor.grant_array_reader('jt_deferrable_pk.documents','{deferrable_role}',false);")
     restricted_deferrable = db.run(
         f"SET ROLE {deferrable_role}; INSERT INTO jt_deferrable_pk.documents(data) "
         "VALUES ('{\"_id\":3,\"value\":\"restricted\",\"items\":["
