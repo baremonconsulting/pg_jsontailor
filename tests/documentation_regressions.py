@@ -111,6 +111,19 @@ def standalone_attestation() -> None:
             paths["17"].write_text("\n".join(mutation) + "\n")
             rejected(lambda: verify_results(paths, "a" * 40))
         paths["17"].write_text(original)
+        for major, path in paths.items():
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            for row in rows:
+                row.update(source_provenance="archive-declared", source_archive_sha256="c" * 64,
+                           source_manifest_sha256="d" * 64)
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        verify_results(paths, "a" * 40, archive_sha256="c" * 64)
+        rejected(lambda: verify_results(paths, "a" * 40))
+        rejected(lambda: verify_results(paths, "a" * 40, archive_sha256="e" * 64))
+        rejected(lambda: source_identity(ROOT, "a" * 40))
+        altered = paths["17"].read_text().replace('"d' + 'd' * 63 + '"', '"e' + 'e' * 63 + '"')
+        paths["17"].write_text(altered)
+        rejected(lambda: verify_results(paths, "a" * 40, archive_sha256="c" * 64))
 
 
 def archive_identity() -> None:
