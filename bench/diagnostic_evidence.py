@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 from bench.installation import canonical, sha256, verify_attestation, require
-from bench.verify_results import verify_plan_node, verify_semantics, stable
+from bench.verify_results import verify_plan_node, verify_semantics, expected_state, stable
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 
 JOURNAL = ".diagnostic-events.jsonl"
@@ -154,6 +154,8 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
     last_completed = None
     expected_session = expected_size = expected_operation = expected_run = expected_pair = 0
     expected_warmup = True
+    warmup_exhausted = False
+    configured_repetitions = None
     warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
     for event in events[1:]:
         kind, payload = event['kind'], event['payload']
@@ -176,11 +178,17 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and isinstance(payload['server_settings'], dict)
                     and payload['server_settings'].get('jit') == 'off'
                     and payload['server_settings'].get('max_parallel_workers_per_gather') == '0'
+                    and {'shared_buffers', 'work_mem', 'synchronous_commit', 'fsync',
+                         'full_page_writes', 'server_version_num', 'max_connections',
+                         'effective_cache_size', 'checkpoint_timeout', 'wal_level',
+                         'default_transaction_isolation', 'TimeZone', 'lc_collate', 'lc_ctype'}
+                        <= set(payload['server_settings'])
                     and all(isinstance(payload[name], str) and payload[name]
                             for name in ['platform', 'cpu', 'memory', 'storage', 'load', 'database',
                                          'pg_host', 'pg_port', 'pg_user', 'pg_bin', 'python']),
                     'invalid diagnostic environment')
             environment_seen = True
+            configured_repetitions = payload['repetitions']
         elif kind == 'session-start':
             require(environment_seen and active is None and set(payload) == {'session', 'pid', 'backend_start'}
                     and payload['session'] == expected_session and payload['session'] == len(sessions)
@@ -203,9 +211,22 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             expected_role = ('before' if not witnesses else 'after' if set(witnesses) == {'before'}
                              else 'rollback')
             require(payload['role'] == expected_role, 'diagnostic semantic witness order differs')
+            statement_count = len(statements(active['operation'], active['implementation'], active['size']))
+            if payload['role'] == 'before':
+                require(not statement_plans and states[payload['sha256']] == expected_state(active['size']),
+                        'diagnostic before witness differs')
+            elif payload['role'] == 'after':
+                require(len(statement_plans) == statement_count
+                        and states[payload['sha256']] == expected_state(active['size'], active['operation']),
+                        'diagnostic after witness differs')
+            else:
+                require(len(statement_plans) == statement_count
+                        and states[payload['sha256']] == expected_state(active['size']),
+                        'diagnostic rollback witness differs')
             witnesses[payload['role']] = payload['sha256']
         elif kind == 'constituent-start':
-            require(environment_seen and sessions and active is None, 'overlapping diagnostic constituent')
+            require(environment_seen and sessions and active is None and not warmup_exhausted,
+                    'overlapping or post-exhaustion diagnostic constituent')
             required_coordinates = {'session', 'size', 'operation', 'implementation', 'run', 'warmup', 'pair_order'}
             require(set(payload) == required_coordinates and payload['session'] in sessions
                     and payload['size'] in SIZES and payload['operation'] in OPERATIONS
@@ -228,6 +249,7 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
         elif kind == 'statement-complete':
             require(active is not None and all(payload.get(k) == v for k, v in active.items()),
                     'diagnostic statement coordinates differ')
+            require(set(witnesses) == {'before'}, 'diagnostic statement precedes before witness')
             index = payload.get('statement')
             expected = statements(active['operation'], active['implementation'], active['size'])
             require(type(index) is int and index == len(statement_plans) and index < len(expected)
@@ -274,8 +296,10 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                 if expected_warmup and expected_run >= 10 and expected_run % 5 == 0 \
                         and all(stable(warmup_values[name]) for name in IMPLEMENTATIONS):
                     expected_warmup = False
+                elif expected_warmup and expected_run == 30:
+                    warmup_exhausted = True
                 warmup_count = len(warmup_values[IMPLEMENTATIONS[0]])
-                if not expected_warmup and expected_run == warmup_count + 50:
+                if not expected_warmup and expected_run == warmup_count + configured_repetitions:
                     expected_operation += 1
                     expected_run, expected_warmup = 0, True
                     warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
@@ -303,6 +327,19 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     require(type(index) is int and index == len(statement_plans) and index < len(expected)
                             and payload['interrupted'].get('sql') == expected[index],
                             'diagnostic interrupted statement differs')
+                    require(set(witnesses) == {'before'},
+                            'diagnostic statement phase differs from semantic progress')
+                elif payload['phase'] == 'semantic-read-back':
+                    require(len(statement_plans) == len(statements(
+                            active['operation'], active['implementation'], active['size']))
+                            and set(witnesses) in ({'before'}, {'before', 'after'}),
+                            'diagnostic read-back phase differs from progress')
+                elif payload['phase'] == 'rollback':
+                    require(set(witnesses) == {'before', 'after'},
+                            'diagnostic rollback phase differs from progress')
+                elif payload['phase'] == 'restoration':
+                    require(set(witnesses) in ({'before', 'after'}, {'before', 'after', 'rollback'}),
+                            'diagnostic restoration phase differs from progress')
             else:
                 require(payload['phase'] == 'database-setup'
                         or (payload['phase'] == 'between-arms' and last_completed is not None),

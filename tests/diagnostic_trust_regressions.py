@@ -37,8 +37,12 @@ def verify(folder: Path):
                                  trusted_key=folder / "trusted.pem", repo=ROOT)
 
 def environment() -> dict:
-    return {'postgresql': '18.6', 'postgresql_major': '18',
-            'server_settings': {'jit': 'off', 'max_parallel_workers_per_gather': '0'},
+    settings = {name: 'test' for name in ['shared_buffers', 'work_mem', 'synchronous_commit',
+        'fsync', 'full_page_writes', 'server_version_num', 'max_connections',
+        'effective_cache_size', 'checkpoint_timeout', 'wal_level',
+        'default_transaction_isolation', 'TimeZone', 'lc_collate', 'lc_ctype']}
+    settings.update(jit='off', max_parallel_workers_per_gather='0')
+    return {'postgresql': '18.6', 'postgresql_major': '18', 'server_settings': settings,
             'platform': 'test', 'cpu': 'test', 'memory': 'test', 'storage': 'test', 'load': 'test',
             'database': 'test', 'pg_host': 'test', 'pg_port': '1', 'pg_user': 'test',
             'pg_bin': '/test', 'python': sys.version, 'sizes': [0, 1, 10, 100, 1000],
