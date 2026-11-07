@@ -17,6 +17,7 @@ from bench.diagnostic_evidence import DiagnosticJournal, MANIFEST, JOURNAL, veri
 from bench.verify_results import verify_results
 from bench.verify_results import stable
 from bench.installation import sha256
+from bench.benchmark_execution import explain
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,6 +53,21 @@ def environment() -> dict:
 
 
 class DiagnosticTrust(unittest.TestCase):
+    def test_real_executor_stops_between_multi_statement_workload(self):
+        plan = json.dumps([{'Plan': {'Node Type': 'Result', 'Actual Rows': 1, 'Actual Loops': 1},
+                            'Planning Time': .1, 'Execution Time': .2}])
+        class Session:
+            def __init__(self): self.executed = []
+            def execute(self, sql): self.executed.append(sql); return plan
+        session = Session()
+        def fail_after_first(index, statement, payload):
+            if index == 0:
+                raise RuntimeError('forced producer diagnostic fault: statement')
+        with self.assertRaisesRegex(RuntimeError, 'forced producer'):
+            explain(session, ['SELECT 1', 'SELECT 2'], fail_after_first)
+        self.assertEqual(len(session.executed), 1)
+        self.assertIn('SELECT 1', session.executed[0])
+
     def test_stability_trace_classes_remain_fail_closed(self):
         self.assertTrue(stable([1.0] * 10))
         self.assertFalse(stable([1.0] * 5 + [1.2] * 5))       # drift

@@ -24,6 +24,7 @@ from bench.workload import SIZES as REVIEWED_SIZES, OPERATIONS, IMPLEMENTATIONS,
 from bench.installation import canonical, require, sha256, verify_attestation
 from bench.attest_installation import PROBE_SCHEMA, catalogue_and_ddl, installed_files
 from bench.diagnostic_evidence import DiagnosticJournal
+from bench.benchmark_execution import explain
 from tools.strict_results import loads
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,30 +114,6 @@ class PersistentPsql:
         if self.process.stdin: self.process.stdin.close()
         rc=self.process.wait(timeout=10)
         if rc: raise RuntimeError(f"persistent psql exited {rc}")
-
-
-def explain(session, statements, observer=None, before_statement=None):
-    payloads = []
-    for index, statement in enumerate(statements):
-        if before_statement is not None:
-            before_statement(index, statement)
-        raw = session.execute(
-            "EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON) " + statement + ";")
-        try:
-            payload = json.loads(raw)[0]
-        except (json.JSONDecodeError, IndexError, TypeError) as error:
-            raise RuntimeError(f"invalid plan for statement {index}: {raw[:500]}") from error
-        payloads.append(payload)
-        if observer is not None:
-            observer(index, statement, payload)
-    return {
-        "execution_ms": sum(float(p["Execution Time"]) for p in payloads),
-        "planning_ms": sum(float(p["Planning Time"]) for p in payloads),
-        "shared_hit_blocks": sum(int(p["Plan"].get("Shared Hit Blocks", 0)) for p in payloads),
-        "shared_dirtied_blocks": sum(int(p["Plan"].get("Shared Dirtied Blocks", 0)) for p in payloads),
-        "wal_records": sum(int(p["Plan"].get("WAL Records", 0)) for p in payloads),
-        "plans": payloads,
-    }
 
 
 if OUT.exists() and not OUT.is_dir():
