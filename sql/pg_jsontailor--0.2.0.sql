@@ -634,6 +634,9 @@ DECLARE cfg constant jsonb:=%L::jsonb; cur jsonb; n int; expected int; changed b
 BEGIN
   %s
   %s
+  IF NOT has_table_privilege(current_user,%L,'DELETE') THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='delete RPC requires DELETE on the duality view';
+  END IF;
   IF expected_etag IS NULL THEN RAISE EXCEPTION USING ERRCODE='PT428',MESSAGE='expected_etag is required';END IF;
   IF NOT (cfg#>>'{root,delete}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root delete is disabled';END IF;
   n:=NULL;EXECUTE format('SELECT 1 FROM %%I.%%I WHERE %%I=$1 FOR UPDATE',(parse_ident(cfg#>>'{root,table}'))[1],(parse_ident(cfg#>>'{root,table}'))[2],cfg#>>'{root,key}') INTO n USING expected_id;
@@ -656,8 +659,19 @@ BEGIN
   IF n<>1 THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='root delete denied';END IF;
   RETURN cur;
 END
-$delete_body$,cfg,source_lock,guard_checks,qview);
+$delete_body$,cfg,source_lock,guard_checks,qview,qview);
     ddl:=ddl||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qinsert,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qupdate,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete,body)||E'\n'||format('CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qguard,guard_body)||E'\n'||format('CREATE FUNCTION %s(expected_id %s,expected_etag text) RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qdelete_document,root_key_type,delete_body)||E'\n'||format('CREATE FUNCTION %s() RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,pg_temp AS %L;',qcheck,check_body)||E'\n'||format('CREATE TRIGGER %I BEFORE INSERT ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_insert',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE UPDATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_update',qview,qguard)||E'\n'||format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH STATEMENT EXECUTE FUNCTION %s();',vp[2]||'__guard_delete',qview,qguard)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF INSERT ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__insert',qview,qinsert)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__update',qview,qupdate)||E'\n'||format('CREATE TRIGGER %I INSTEAD OF DELETE ON %s FOR EACH ROW EXECUTE FUNCTION %s();',vp[2]||'__delete',qview,qdelete)||E'\n'||format('COMMENT ON VIEW %s IS %L;',qview,'pg_jsontailor metadata v1: '||metadata::text);
+    -- Clear every non-owner default grant, not merely PostgreSQL's PUBLIC default.
+    FOREACH k IN ARRAY ARRAY[qinsert||'()',qupdate||'()',qdelete||'()',qguard||'()',
+      qcheck||'()',qdelete_document||'('||root_key_type||',text)'] LOOP
+      ddl:=ddl||E'\n'||format($acl$DO $revoke$ DECLARE principal text; BEGIN
+        FOR principal IN SELECT DISTINCT CASE WHEN x.grantee=0 THEN 'PUBLIC'
+          ELSE quote_ident(pg_get_userbyid(x.grantee)) END
+          FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) x
+          WHERE p.oid=%L::regprocedure AND x.grantee<>p.proowner
+        LOOP EXECUTE format('REVOKE ALL ON FUNCTION %%s FROM %%s CASCADE',%L,principal);END LOOP;
+      END $revoke$;$acl$,k,k);
+    END LOOP;
     RETURN ddl;
 END
 $generator$;
@@ -672,6 +686,44 @@ BEGIN
   ddl:=jsontailor.duality_view_ddl(view_name,spec);EXECUTE ddl;
 END
 $creator$;
+
+-- This owner-only review operation is the sole provenance source used to retain
+-- delete-RPC grants during regeneration. Direct GRANT remains valid until then.
+CREATE FUNCTION jsontailor.grant_delete_rpc(view_name text,role_name text,grant_option boolean DEFAULT false)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY INVOKER
+SET search_path=pg_catalog,pg_temp
+AS $review$
+DECLARE target oid; owner_id oid; grantee_id oid; metadata jsonb; entry jsonb;
+  vp text[]; signature text; grants jsonb;
+BEGIN
+  target:=to_regclass(view_name);vp:=parse_ident(view_name,true);
+  SELECT relowner INTO owner_id FROM pg_class WHERE oid=target AND relkind='v';
+  IF cardinality(vp)<>2 OR owner_id IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='review requires a qualified managed view';END IF;
+  IF owner_id<>(SELECT oid FROM pg_roles WHERE rolname=current_user) THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='only the view owner may review RPC grants';END IF;
+  SELECT oid INTO grantee_id FROM pg_roles WHERE rolname=role_name;
+  IF grantee_id IS NULL OR grantee_id=owner_id OR grant_option IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='review requires a non-owner role and explicit grant option';END IF;
+  metadata:=substr(obj_description(target,'pg_class'),length('pg_jsontailor metadata v1: ')+1)::jsonb;
+  IF metadata->>'format' IS DISTINCT FROM '1' THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='managed view metadata is required';END IF;
+  SELECT format('%I.%I(%s,text)',vp[1],vp[2]||'__delete_document',format_type(a.atttypid,a.atttypmod))
+    INTO signature FROM pg_attribute a WHERE a.attrelid=target AND a.attname='_id';
+  IF (SELECT proowner FROM pg_proc WHERE oid=signature::regprocedure) IS DISTINCT FROM owner_id THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='RPC ownership does not match the view';END IF;
+  EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I%s',signature,role_name,
+    CASE WHEN grant_option THEN ' WITH GRANT OPTION' ELSE '' END);
+  entry:=jsonb_build_object('role',role_name,'grantee',grantee_id,'grantor',owner_id,
+    'grant_option',grant_option);
+  SELECT coalesce(jsonb_agg(e),'[]'::jsonb) INTO grants
+    FROM jsonb_array_elements(coalesce(metadata->'reviewed_rpc_grants','[]'::jsonb)) e
+    WHERE e->>'role'<>role_name;
+  metadata:=jsonb_set(metadata,'{reviewed_rpc_grants}',grants||jsonb_build_array(entry));
+  EXECUTE format('COMMENT ON VIEW %s IS %L',target::regclass,
+    'pg_jsontailor metadata v1: '||metadata::text);
+END
+$review$;
 
 CREATE FUNCTION jsontailor.duality_view_inventory()
 RETURNS TABLE(
@@ -1064,7 +1116,11 @@ BEGIN
                     CASE WHEN x.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)
       FROM aclexplode(coalesce((SELECT proacl FROM pg_proc WHERE oid=r.oid),
                                acldefault('f',r.proowner))) x
-      WHERE x.grantee<>r.proowner
+      WHERE x.grantee<>r.proowner AND r.proname=vp[2]||'__delete_document'
+        AND EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(metadata->'reviewed_rpc_grants','[]'::jsonb)) e
+          WHERE e->>'role'=pg_get_userbyid(x.grantee)
+            AND (e->>'grantee')::oid=x.grantee AND (e->>'grantor')::oid=x.grantor
+            AND (e->>'grant_option')::boolean=x.is_grantable)
     LOOP restore_commands:=array_append(restore_commands,command);END LOOP;
     IF r.description IS NOT NULL THEN
       restore_commands:=array_append(restore_commands,
@@ -1090,6 +1146,14 @@ BEGIN
             AND p.prorettype='jsonb'::regtype))
   LOOP EXECUTE format('DROP FUNCTION %s',r.identity);END LOOP;
   EXECUTE ddl;
+
+  IF metadata?'reviewed_rpc_grants' THEN
+    SELECT substr(obj_description(format('%I.%I',vp[1],vp[2])::regclass,'pg_class'),
+      length('pg_jsontailor metadata v1: ')+1)::jsonb ||
+      jsonb_build_object('reviewed_rpc_grants',metadata->'reviewed_rpc_grants') INTO metadata;
+    EXECUTE format('COMMENT ON VIEW %I.%I IS %L',vp[1],vp[2],
+      'pg_jsontailor metadata v1: '||metadata::text);
+  END IF;
 
   FOR command IN
     SELECT DISTINCT CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(x.grantee)) END
