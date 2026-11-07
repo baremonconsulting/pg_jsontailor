@@ -12,6 +12,7 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.installation import canonical, candidate_files, sha256, sign, verify_attestation
+from bench.measurement_attestation import attest_measurement
 from bench.verify_results import ARTIFACTS, ENVIRONMENT_FIELDS, FIELDS, expected_state, statistics_for, verify_results
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 from tools.verify_release_candidate import verify_benchmark_candidate
@@ -94,6 +95,7 @@ def fixture(folder, repo, candidate, private):
     write_json(folder / 'semantics.json', {'states': states, 'samples': semantics})
     write_json(folder / 'summary.json', summary)
     rehash(folder)
+    attest_measurement(folder, candidate, private)
 
 
 class BenchmarkTrust(unittest.TestCase):
@@ -139,6 +141,43 @@ class BenchmarkTrust(unittest.TestCase):
             result = self.verify(consumer)
             self.assertEqual(result['measurements'], 14400)
         self.assertEqual(statistics_for(list(range(50)))['p95_ms'], 47)
+
+    def test_pgjt_93_unsigned_completed_measurement_rejected(self):
+        self.rejected(lambda: (self.folder / 'measurement.json').unlink(),
+                      'signed completed measurement required')
+
+    def test_pgjt_93_completed_signature_tamper_rejected(self):
+        value = json.loads((self.folder / 'measurement.json').read_text())
+        value['signature'] = '0' * 128
+        write_json(self.folder / 'measurement.json', value)
+        for consumer in (verify_results, verify_benchmark_candidate):
+            with self.subTest(consumer=consumer.__name__), self.assertRaisesRegex(
+                    RuntimeError, 'completed measurement signature verification failed'):
+                self.verify(consumer)
+
+    def test_pgjt_93_coherent_timing_rewrite_rejected(self):
+        def rewrite():
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            for row in rows:
+                if row['implementation'] == 'duality':
+                    row['execution_ms'] = str(float(row['execution_ms']) * .01)
+            with (self.folder / 'measurements.csv').open('w', newline='') as target:
+                writer = csv.DictWriter(target, fieldnames=FIELDS)
+                writer.writeheader(); writer.writerows(rows)
+            plans = json.loads((self.folder / 'plans.json').read_text())
+            for key, entry in plans.items():
+                if key.split(':')[3] == 'duality':
+                    for plan in entry['plans']:
+                        plan['Execution Time'] *= .01
+            write_json(self.folder / 'plans.json', plans)
+            summaries = json.loads((self.folder / 'summary.json').read_text())
+            for summary in summaries:
+                summary['duality'] = {key: value * .01 for key, value in summary['duality'].items()}
+                summary['median_ratio'] = .01
+            write_json(self.folder / 'summary.json', summaries)
+            rehash(self.folder)
+        self.rejected(rewrite, 'completed measurement binding differs')
 
     def test_self_consistent_workload_shrink_is_rejected(self):
         def shrink():

@@ -13,6 +13,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.strict_results import loads
 from bench.installation import canonical, require, sha256, verify_attestation
+from bench.measurement_attestation import verify_measurement
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,6 +253,7 @@ def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT,
         require(summary['direct']['median_ms'] > 0 and type(summary['median_ratio']) in {int, float}
                 and math.isclose(summary['median_ratio'], summary['duality']['median_ms'] / summary['direct']['median_ms'], rel_tol=1e-12, abs_tol=1e-12), 'summary ratio differs')
     require(seen == expected_summaries, 'summary inventory differs')
+    verify_measurement(folder, candidate, trusted_key)
     return {'status': 'PASS', 'measurements': len(rows), 'groups': len(summaries), 'candidate': candidate}
 
 

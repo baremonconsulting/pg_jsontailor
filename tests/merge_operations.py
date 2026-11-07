@@ -99,6 +99,18 @@ def main() -> int:
 
     # Mixed update/insert, child reconciliation, defaults and stored RETURNING values.
     setup(db)
+    # The documented staging guard must reject NULL as well as false agreement.
+    stage_states = []
+    for staged in ('{}', '{"_id":null}', '{"_id":2}'):
+        result = db.run("CREATE TEMP TABLE document_stage(root_id bigint PRIMARY KEY,doc jsonb NOT NULL,"
+            "CHECK ((doc->'_id' = to_jsonb(root_id)) IS TRUE));"
+            "INSERT INTO document_stage VALUES(1," + literal(staged) + "::jsonb);", False)
+        stage_states.append(Database.state(result))
+    stage_ok = db.value("CREATE TEMP TABLE document_stage(root_id bigint PRIMARY KEY,doc jsonb NOT NULL,"
+        "CHECK ((doc->'_id' = to_jsonb(root_id)) IS TRUE));"
+        "INSERT INTO document_stage VALUES(1,'{\"_id\":1}'); SELECT count(*) FROM document_stage;")
+    if stage_states != ['23514'] * 3 or stage_ok != '1':
+        raise RuntimeError('PGJT-88 staging identity guard regression')
     updated = document(db)
     previous = json.loads(json.dumps(updated))
     updated["label"] = "updated"

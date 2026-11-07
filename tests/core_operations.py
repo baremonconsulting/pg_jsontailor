@@ -132,6 +132,13 @@ WHERE _id=42;
 
     def concurrent(self, isolation: str, add_only: bool) -> tuple[str | None, float]:
         self.reset()
+        if isolation != 'READ COMMITTED':
+            before = self.document()
+            result = self.run(f'BEGIN ISOLATION LEVEL {isolation}; '
+                              'UPDATE shop.orders_dv SET data=data WHERE _id=42; COMMIT;', False)
+            if self.document() != before:
+                raise RuntimeError('unsupported isolation changed the document')
+            return self.state(result), 0.0
         base = json.loads(self.document())
         first = json.loads(json.dumps(base))
         second = json.loads(json.dumps(base))
@@ -177,13 +184,13 @@ WHERE _id=42;
         observations = []
         passed = True
         for isolation, expected in (("READ COMMITTED", "PT412"),
-                                    ("REPEATABLE READ", "40001"),
-                                    ("SERIALIZABLE", "40001")):
+                                    ("REPEATABLE READ", "0A000"),
+                                    ("SERIALIZABLE", "0A000")):
             for add_only in (False, True):
                 state, waited = self.concurrent(isolation, add_only)
                 observations.append(f"{isolation}/{'add' if add_only else 'status'}:{state}/{waited:.3f}s")
                 passed &= state == expected
-        self.record("4", "PT412 in RC; 40001 in RR/SERIALIZABLE", ";".join(observations), passed)
+        self.record("4", "PT412 in RC; 0A000 in RR/SERIALIZABLE", ";".join(observations), passed)
 
     def test5(self) -> None:
         observations = []

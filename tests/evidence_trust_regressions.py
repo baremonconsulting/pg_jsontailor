@@ -40,7 +40,8 @@ class EvidenceIndex(unittest.TestCase):
             suites = ci_files(major, run['event']) if kind == 'ci' else NIGHTLY_FILES
             for name, suite in suites.items():
                 field = 'id' if suite in {'core', 'validation', 'properties', 'mutations', 'stale_return',
-                                         'helper_acl', 'runtime_limits', 'postgrest', 'http_security', 'http_concurrency'} else 'name'
+                                         'helper_acl', 'runtime_limits', 'rc02_database', 'postgrest',
+                                         'http_security', 'http_concurrency'} else 'name'
                 rows = [{field: ident, 'status': 'PASS'} for ident in inventories()[suite]]
                 for row in rows:
                     if suite == 'standalone':

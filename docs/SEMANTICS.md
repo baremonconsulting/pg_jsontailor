@@ -23,9 +23,22 @@ an independently supplied client token; its predicate contract is described
 below. The write path locks and rechecks the visible document before changing
 data. A supplied missing or stale ETag fails atomically.
 
+Document writes require `READ COMMITTED` isolation. Statement guards and every
+row/RPC entrypoint reject `REPEATABLE READ` and `SERIALIZABLE` with `0A000`,
+including statements that match no document. This is enforced rather than a
+recommended default: a retained transaction snapshot cannot reliably recheck
+direct child insertions after waiting for locks. Document reads remain available
+at the caller's chosen isolation level.
+
 ## Insert
 
 An insert validates the complete document, creates the root row and then creates configured child rows. Database defaults and supported generated keys remain available when the corresponding document fields are omitted. The returned document contains generated identifiers and its current ETag.
+
+Before reporting insert or replacement success, the generated helper checks the
+materialised document against the replacement byte budget, including defaults,
+generated identifiers and ETag metadata. Excessive expansion raises `PT413` and
+rolls back the complete statement, rather than creating a document that cannot
+be submitted unchanged for its next replacement.
 
 Mapped JSON values must use the JSON type expected by the target PostgreSQL
 column: strings for character, date, timestamp, timestamp-with-time-zone and UUID columns; numbers for

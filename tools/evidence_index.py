@@ -22,6 +22,8 @@ from tools.verify_test_coverage import attest, MANIFEST
 CI_FILES = {
     'helper-acl-results.jsonl': 'helper_acl',
     'runtime-limits-results.jsonl': 'runtime_limits',
+    'rc02-database-results.jsonl': 'rc02_database',
+    'rc02-read-results.jsonl': 'rc02_read',
     'core-results.jsonl': 'core', 'validation-results.jsonl': 'validation',
     'integrity-results.jsonl': 'integrity', 'repeatability-results.jsonl': 'repeatability',
     'subtransaction-results.jsonl': 'subtransaction', 'merge-results.jsonl': 'merge',

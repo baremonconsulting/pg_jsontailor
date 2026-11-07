@@ -141,7 +141,7 @@ def coverage_manifest_checks() -> None:
                 rows[item["suite"]].append(row)
         paths = {}
         for suite in rows:
-            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "runtime_limits"}
+            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "runtime_limits", "rc02_database"}
                            else {"name": ident, "status": "PASS"}
                            for ident in inventories()[suite]]
         for suite, values in rows.items():

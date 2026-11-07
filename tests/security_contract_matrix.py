@@ -591,6 +591,11 @@ def array_rls(db: Database, record) -> None:
     changed_doc["items"][0]["label"] = "blocked"
     changed = as_role(db, update_sql(changed_doc))
     outcomes.append(("nonlockable-update", db.state(changed)))
+    root_only_doc = document(db)
+    root_only_doc['label'] = 'must-not-bypass-child-locks'
+    root_only = as_role(db, update_sql(root_only_doc))
+    outcomes.append(('nonlockable-root-only', db.state(root_only),
+                     db.value('SELECT label FROM jt46.root WHERE id=1;') == 'one'))
 
     setup(db)
     db.run("ALTER TABLE jt46.item ENABLE ROW LEVEL SECURITY;"
@@ -616,6 +621,7 @@ def array_rls(db: Database, record) -> None:
            outcomes == [("allow-active", 0, "1:inserted", 0, "updated", 0, "0"),
                         ("hidden-preserved", 0, 0, "ten", "root-only"),
                         ("nonlockable-update", "42501"),
+                        ('nonlockable-root-only', '42501', True),
                         ("insert-check", "42501"), ("delete-using", "42501")],
            repr(outcomes))
 

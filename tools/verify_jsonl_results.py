@@ -11,6 +11,8 @@ from tools.strict_results import result_rows, validate
 FILENAMES = {
     'helper-acl-results.jsonl': 'helper_acl',
     'runtime-limits-results.jsonl': 'runtime_limits',
+    'rc02-database-results.jsonl': 'rc02_database',
+    'rc02-read-results.jsonl': 'rc02_read',
     'http-security-results.jsonl': 'http_security',
     'http-concurrency-results.jsonl': 'http_concurrency',
     'core-results.jsonl': 'core', 'validation-results.jsonl': 'validation',

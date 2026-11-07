@@ -44,8 +44,11 @@ Message, details, hint and context are replaced by fixed safe fields; unknown
 codes become `BOUNDARY_ERROR`. All upstream error headers are discarded.
 Upstream connection, protocol and response-size failures produce a safe 502,
 never a pass-through response. Responses are fully buffered, with a default
-16 MiB bound. A response-limit failure may follow a committed write: clients
-must reconcile state before retrying. This is not an idempotency guarantee.
+16 MiB bound. A short upstream body relative to its declared length, invalid
+JSON success body or framing failure produces a safe 502, never a truncated
+2xx response. A response-limit failure, disconnect or timeout may follow a
+committed write: clients must reconcile state before retrying. This is not
+an idempotency guarantee.
 
 The default connection cap is 16 and the socket/upstream timeout is 10 seconds.
 Chunked/compressed request bodies and ambiguous framing are rejected. Only

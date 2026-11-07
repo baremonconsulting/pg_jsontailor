@@ -14,6 +14,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 
+from strict_results import loads as strict_json_loads
+
 
 SAFE_CODES = frozenset({'22023', '23502', '23503', '23505', '23514', '23P01',
                         '40001', '40P01', '42501', '57014', '55P03',
@@ -173,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             if length:
                 try:
                     json.loads(body, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-                except (ValueError, UnicodeError, RecursionError):
+                except (RuntimeError, ValueError, UnicodeError, RecursionError):
                     return self.reply(400, safe_error())
             headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
             for key in ('Authorization', 'Prefer', 'Range', 'Range-Unit'):
@@ -182,15 +184,31 @@ class Handler(BaseHTTPRequestHandler):
             upstream = UnixConnection(self.server.upstream, self.server.timeout_seconds)
             upstream.request(self.command, self.path, body=body, headers=headers)
             response = upstream.getresponse()
+            response_lengths = response.headers.get_all('Content-Length', [])
+            response_encodings = response.headers.get_all('Transfer-Encoding', [])
+            if (len(response_lengths) > 1 or response_encodings
+                    or response_lengths and not re.fullmatch(r'[0-9]+', response_lengths[0])
+                    ):
+                return self.reply(502, safe_error())
             # Buffer the final response: deferred COMMIT errors are sanitised too.
             raw = response.read(self.server.max_response_bytes + 1)
             if len(raw) > self.server.max_response_bytes:
                 return self.reply(502, safe_error())
+            # A bounded HTTPResponse.read() accepts premature EOF without raising
+            # IncompleteRead. Its remaining length must reach zero before a
+            # framed response can be presented as complete to the client.
+            if response.length not in (None, 0):
+                return self.reply(502, safe_error())
+            if self.command != 'HEAD' and response.status not in (204, 304) and raw:
+                try:
+                    strict_json_loads(raw.decode('utf-8'))
+                except (RuntimeError, ValueError, UnicodeError, RecursionError):
+                    return self.reply(502, safe_error())
             if response.status >= 300:
                 try:
-                    data = json.loads(raw)
+                    data = strict_json_loads(raw.decode('utf-8'))
                     code = data.get('code') if isinstance(data, dict) else None
-                except (ValueError, UnicodeError):
+                except (RuntimeError, ValueError, UnicodeError):
                     code = None
                 return self.reply(response.status, safe_error(code))
             return self.reply(response.status, raw, response.getheaders())

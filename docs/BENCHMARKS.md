@@ -93,6 +93,7 @@ python3 bench/duality_overhead.py \
   --database jsontailor_disposable_benchmark \
   --installation /evidence/installation-pg18/installation.json \
   --trusted-key /approved/benchmark-public.pem \
+  --measurement-key /protected/benchmark-signing.pem \
   --warmups 10 --repetitions 50 \
   --output /evidence/current-pg18 --drop-database-after
 ```
@@ -105,11 +106,26 @@ no publishable timing artifacts and cannot pass the full benchmark verifier.
 ## Evidence and release consumption
 
 Retain `measurements.csv`, `plans.json`, `semantics.json`, `summary.json`,
-`environment.json`, `installation.json`, `installation.log` and `manifest.json`
+`environment.json`, `installation.json`, `installation.log`, `manifest.json`
+and `measurement.json`
 together. The SHA-256 manifest has an exact artifact inventory. Environment
 metadata records the exact source SHA/clean state, invocation, timestamps,
 PostgreSQL version (including prerelease suffix), effective server settings,
 CPU, memory, storage, host load, Python, connection settings and session identities.
+
+The measurement operator signs the completed manifest with the protected
+Ed25519 key identified by the independently supplied `--trusted-key`.
+`measurement.json` binds the complete manifest, installation attestation,
+candidate SHA, run identity/timestamps and producer/workload/verifier hashes.
+It is outside the manifest to avoid a circular digest. A signature proves
+origin and integrity under the approved operator key, not that a dishonest
+operator measured truthfully; independent review and key custody remain
+mandatory. An installation signature alone is not measurement evidence.
+Missing, stale or changed completed-measurement signatures fail verification.
+
+The fixture creates the required `(order_id,item_id)` child index and must
+pass its generated `__check()` before any samples are collected. A timing
+run on an unhealthy fixture is not qualified evidence.
 
 ```sh
 python3 bench/verify_results.py /evidence/current-pg18 \

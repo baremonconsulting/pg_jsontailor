@@ -20,6 +20,9 @@ class Upstream(socketserver.UnixStreamServer):
     status = 400
     body = b''
     calls = 0
+    declared_length = None
+    extra_headers = ()
+    omit_length = False
 
 
 class RawHandler(BaseHTTPRequestHandler):
@@ -28,7 +31,11 @@ class RawHandler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get('Content-Length', '0')))
         self.send_response(self.server.status)
         self.send_header('X-Diagnostics', SENTINEL)
-        self.send_header('Content-Length', str(len(self.server.body)))
+        if not self.server.omit_length:
+            self.send_header('Content-Length', str(self.server.declared_length
+                             if self.server.declared_length is not None else len(self.server.body)))
+        for key, value in self.server.extra_headers:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(self.server.body)
 
@@ -136,6 +143,34 @@ class BoundaryTests(unittest.TestCase):
         self.raw.shutdown()
         self.raw.server_close()
         Path(self.raw.server_address).unlink()
+        self.assertEqual(502, self.request()[0])
+
+    def test_pgjt_95_truncated_success_fails_closed_and_recovers(self):
+        self.raw.status, self.raw.body = 200, b'[{"data":'
+        self.raw.declared_length = 200
+        status, _, body = self.request()
+        self.assertEqual(502, status)
+        self.assertEqual('BOUNDARY_ERROR', json.loads(body)['code'])
+        self.assertNotIn(self.raw.body, body)
+        # A complete JSON prefix is still incomplete HTTP framing.
+        self.raw.body = b'[]'
+        self.assertEqual(502, self.request()[0])
+        self.raw.declared_length = None
+        self.assertEqual((200, b'[]'), (lambda r: (r[0], r[2]))(self.request()))
+
+    def test_pgjt_95_invalid_json_success_fails_closed(self):
+        self.raw.status, self.raw.body = 200, b'[{"data":'
+        self.assertEqual(502, self.request()[0])
+        self.raw.body = b'[{"data":NaN}]'
+        self.assertEqual(502, self.request()[0])
+
+    def test_pgjt_95_ambiguous_upstream_framing_fails_closed(self):
+        self.raw.status, self.raw.body = 200, b'[]'
+        for headers in ((('Content-Length', '200'),), (('Transfer-Encoding', 'chunked'),)):
+            self.raw.extra_headers = headers
+            self.assertEqual(502, self.request()[0])
+        self.raw.extra_headers = (('Transfer-Encoding', 'chunked'),)
+        self.raw.omit_length = True
         self.assertEqual(502, self.request()[0])
 
     def test_insecure_socket_rejected(self):

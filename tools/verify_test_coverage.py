@@ -49,8 +49,8 @@ EXPECTED_SECTION_DIGESTS = {
     "requirements": "1278b3cce362429fd53d608b2cb72a1f383e3f68929c209f932c56773e256deb",
     "claims": "75956af0052559c996e51d1e00b455db83c4a5a8d37a8c9562fcde0525fb7e6e",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "supplemental_evidence": "987a5ac0729596ce36055bf17d97f6e370bd2e76473af6053e7eee7a40c3f12b",
-    "runtime_evidence": "00faaa371e47f29e72168e6dc141af3e236dd967153172d57861e41f36f0fb1a",
+    "supplemental_evidence": "912bfa4e1b74b10258737fa0f233540d2eac879ec4e19bd6f863f06a6f4a5988",
+    "runtime_evidence": "35c8187b9a30bf5ac59eab28ad8c84e1b72ddee7acdb5b0abd73b23d020e918e",
 }
 
 

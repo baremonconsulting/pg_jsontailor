@@ -25,6 +25,12 @@ that check is necessarily after PostgreSQL JSON parsing, and canonical byte
 counts can differ from the wire representation. Direct SQL does not have a
 pre-parse HTTP byte guarantee.
 
+The final materialised insert/replacement document must also fit
+`request_bytes`, including generated defaults, identifiers and `_metadata`.
+If expansion exceeds that budget, the complete statement rolls back with
+`PT413`. Leave space for the materialised output rather than treating the
+input byte ceiling as available business-payload space.
+
 `supplied_children` bounds the submitted array before element validation or
 reconciliation. `stored_children` bounds the RLS-visible rows attached to each
 root. A `LIMIT N+1` count precedes aggregation through an invoker cardinality

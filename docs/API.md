@@ -195,6 +195,7 @@ See [`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for limit configuration and migra
 ## Errors
 
 - `22023`: invalid specification or argument;
+- `0A000`: document write attempted outside `READ COMMITTED` isolation;
 - `PT412`: stale ETag;
 - `PT428`: required ETag missing;
 - `PT422`: invalid document or operation disabled by the specification;
