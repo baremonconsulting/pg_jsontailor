@@ -18,6 +18,49 @@ from verify_standalone_results import EXPECTED_IDS, verify as verify_results
 from source_provenance import archive_provenance, source_identity
 
 
+def api_contract(api: str, upgrading: str, boundary: str, sql: str) -> None:
+    """Bind public capability claims to the installed generator's API inventory."""
+    actual = re.findall(r"^CREATE FUNCTION jsontailor\.([a-z_]+)\(", sql, re.MULTILINE)
+    documented = re.findall(r"^jsontailor\.([a-z_]+)\(", api, re.MULTILINE)
+    assert len(actual) == 7 and len(set(actual)) == 7, "extension API inventory changed"
+    assert sorted(documented) == sorted(actual), "documented extension API differs"
+    assert "exposes seven functions" in api, "extension API count differs"
+    assert "api.orders_dv__bounded_array(bigint)" in api, "missing generated read gate"
+    assert "DROP FUNCTION api.orders_dv__bounded_array(bigint);" in upgrading, "recreation leaves read gate"
+    for content in (api, upgrading):
+        for marker in ("grant_array_reader", "grant_delete_rpc", "reviewed provenance",
+                       "owner-only", "PT413"):
+            assert marker in content, f"missing capability contract: {marker}"
+    assert "no helper EXECUTE grants except" not in boundary, "obsolete HTTP helper policy"
+    assert "reviewed array-reader" in boundary and "grant_array_reader" in boundary, "missing HTTP read capability"
+    assert "generated-function grants to other recipients" not in api, "blanket helper replay promised"
+    assert "view and generated-function grants" not in upgrading, "blanket upgrade replay promised"
+
+
+def capability_claim_negatives() -> None:
+    api = (ROOT / "docs/API.md").read_text()
+    upgrading = (ROOT / "docs/UPGRADING.md").read_text()
+    boundary = (ROOT / "docs/HTTP_BOUNDARY.md").read_text()
+    sql = (ROOT / "sql/pg_jsontailor--0.2.0.sql").read_text()
+    api_contract(api, upgrading, boundary, sql)
+    mutations = (
+        (api.replace("exposes seven functions", "exposes four functions"), upgrading, boundary, sql),
+        (api.replace("jsontailor.grant_array_reader(view_name", "jsontailor.missing(view_name"), upgrading, boundary, sql),
+        (api.replace("api.orders_dv__bounded_array(bigint)", "missing"), upgrading, boundary, sql),
+        (api, upgrading.replace("DROP FUNCTION api.orders_dv__bounded_array(bigint);", ""), boundary, sql),
+        (api, upgrading.replace("reviewed provenance", "all grants"), boundary, sql),
+        (api.replace("PT413", "OTHER"), upgrading, boundary, sql),
+        (api, upgrading, boundary.replace("reviewed array-reader", "unrestricted"), sql),
+        (api, upgrading, boundary, sql + "\nCREATE FUNCTION jsontailor.unreviewed() RETURNS void;"),
+    )
+    for mutation in mutations:
+        try:
+            api_contract(*mutation)
+        except AssertionError:
+            continue
+        raise AssertionError("invalid capability documentation was accepted")
+
+
 def claims() -> None:
     readme = (ROOT / "README.md").read_text()
     fixture = (ROOT / "examples/shop_schema.sql").read_text()
@@ -149,9 +192,11 @@ def archive_identity() -> None:
 
 if __name__ == "__main__":
     claims()
+    capability_claim_negatives()
     notices()
     standalone_attestation()
     archive_identity()
     print("PGJT-67/documentation-claims: PASS")
     print("PGJT-72/notice-packaging-negatives: PASS")
     print("PGJT-68/attestation-negatives: PASS")
+    print("PGJT-75/capability-documentation-negatives: PASS")

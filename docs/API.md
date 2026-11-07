@@ -2,16 +2,26 @@
 
 `pg_jsontailor` maps writable JSON documents to ordinary PostgreSQL tables. Its document model can support Oracle-to-PostgreSQL migration work, but it is not a drop-in implementation of every Oracle duality-view or ORDS feature.
 
-`pg_jsontailor` exposes four functions in the `jsontailor` schema.
+`pg_jsontailor` exposes seven functions in the `jsontailor` schema.
 
 ```sql
 jsontailor.duality_view_ddl(view_name text, spec jsonb) RETURNS text
 jsontailor.create_duality_view(view_name text, spec jsonb) RETURNS void
 jsontailor.duality_view_inventory() RETURNS TABLE (...)
 jsontailor.regenerate_duality_view(view_name text) RETURNS void
+jsontailor.grant_delete_rpc(view_name text, role_name text, grant_option boolean DEFAULT false) RETURNS void
+jsontailor.grant_array_reader(view_name text, role_name text, grant_option boolean DEFAULT false) RETURNS void
+jsontailor.review_helper_grant(view_name text, role_name text, helper_suffix text, grant_option boolean) RETURNS void
 ```
 
 `duality_view_ddl` validates the specification against PostgreSQL catalogues and returns a complete DDL script. `create_duality_view` executes the same script in the caller's transaction. `duality_view_inventory` reports generator provenance and evaluates catalogue health without executing discovered callbacks. `regenerate_duality_view` transactionally replaces a managed view from its stored specification. None of these functions is a security definer.
+
+`grant_delete_rpc` and `grant_array_reader` are owner-only review operations:
+they grant the named role its explicit delete or array-read capability and record
+the owner, recipient and grant-option provenance in managed-view metadata.
+`review_helper_grant` is their shared owner-only primitive and accepts only
+`delete_document` or `bounded_array` as `helper_suffix`. All seven functions use
+invoker privileges; calling a review operation does not confer view ownership.
 
 Both the view name and source table names must contain exactly two identifier parts, for example `api.orders_dv` and `shop.orders`.
 
@@ -107,6 +117,7 @@ For a view named `api.orders_dv`, the generator creates:
 - `api.orders_dv__guard()` and statement-level catalogue-guard triggers;
 - `api.orders_dv__delete_document(expected_id, expected_etag)`, using the root key type;
 - `api.orders_dv__check()`, a non-mutating catalogue health check;
+- `api.orders_dv__bounded_array(bigint)`, the owner-only cardinality gate used before array aggregation;
 - zero-row `api.orders_dv__root_binding` and optional `__object_binding` and `__array_binding` internal views;
 - a view comment containing the normalised specification, generator version and generator hash.
 
@@ -144,8 +155,12 @@ Only binding views for source roles configured in the stored specification are
 replaced. Objects using optional binding names for absent roles are left intact;
 an incompatible object at a configured binding name blocks regeneration.
 Direct relation and column grants issued by the owner to other recipients,
-including grant options, generated-function grants to other recipients and
-generated-function comments are restored. A non-default ACL entry for the
+including grant options, and generated-function comments are restored.
+Generated-function EXECUTE grants are restored only for the delete and array-read
+capabilities whose existing ACL entries still match recorded reviewed provenance;
+unreviewed, revoked, default or legacy helper grants are not replayed. Reapply
+approved capabilities through `grant_delete_rpc` and `grant_array_reader`, not a
+blanket function grant. A non-default ACL entry for the
 owner itself on the managed view, one of its columns or a managed generated
 function blocks regeneration with `2BP01` before any object is replaced. The
 regenerator does not guess whether an owner self-grant or self-revoke should be
@@ -166,12 +181,24 @@ the generated projection so their table or domain defaults remain effective.
 
 The caller needs `CREATE` on the target schema and the relevant privileges on source tables. Runtime users need privileges on the view and source tables for the operations they perform. Reads require `SELECT`; writes additionally require the corresponding `INSERT`, `UPDATE` or `DELETE` privileges. Root and array rows locked with `SELECT FOR UPDATE` require `UPDATE`. During replacement, MERGE UPDATE and delete, a referenced object included in the ETag is stabilised with `SELECT FOR SHARE`; PostgreSQL requires `SELECT` and `UPDATE` on at least one column of the referenced table for that lock. A column-level `UPDATE` grant is sufficient and does not permit other columns to be changed. Mappings with `object.etag=false` do not acquire this object lock. Row-level security policies must also permit every required read, lock and write.
 
+Generated functions default to owner-only EXECUTE. Array document projection
+also requires explicit execution of `__bounded_array(bigint)`; grant this as the
+view owner with `jsontailor.grant_array_reader('api.orders_dv','application_role',false)`.
+The explicit delete RPC separately requires
+`jsontailor.grant_delete_rpc('api.orders_dv','application_role',false)`.
+Neither capability grants source-table or view privileges. Trigger, guard and
+health-check helpers remain owner-only. Standalone generated SQL has no
+`jsontailor` runtime schema: apply reviewed exact-signature EXECUTE grants for
+the bounded-array and delete helpers directly, never `GRANT ... ON ALL FUNCTIONS`.
+See [`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for limit configuration and migration.
+
 ## Errors
 
 - `22023`: invalid specification or argument;
 - `PT412`: stale ETag;
 - `PT428`: required ETag missing;
 - `PT422`: invalid document or operation disabled by the specification;
+- `PT413`: document bytes, nesting depth or supplied/stored child count exceeds its configured resource limit;
 - `42501`: insufficient privilege or RLS coverage failure.
 
 `PT422` includes a mapped JSON value with the wrong JSON type, a numeric value

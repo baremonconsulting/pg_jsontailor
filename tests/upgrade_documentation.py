@@ -49,12 +49,14 @@ def main() -> int:
 CREATE FUNCTION api.orders_dv__check(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
 GRANT USAGE ON SCHEMA api,shop TO {role};
 GRANT SELECT ON api.orders_dv,shop.orders,shop.customers,shop.order_items TO {role};
+SELECT jsontailor.grant_array_reader('api.orders_dv','{role}',false);
 ALTER TABLE shop.orders ENABLE ROW LEVEL SECURITY;
 CREATE POLICY visible ON shop.orders FOR SELECT TO {role} USING(order_id=42);
 INSERT INTO shop.orders(order_id,status) VALUES(43,'hidden');
 ALTER TABLE shop.orders RENAME CONSTRAINT orders_pkey TO renamed_orders_key;
 SELECT jsontailor.regenerate_duality_view('api.orders_dv');""")
-        record(RESULT_IDS[0], commands.sql(db, "SELECT api.orders_dv__check()->>'status';") == "OK")
+        record(RESULT_IDS[0], commands.sql(db, "SELECT api.orders_dv__check()->>'status';") == "OK"
+               and commands.sql(db, f"SET ROLE {role}; SELECT data->>'status' FROM api.orders_dv;") == "SET\nnew")
         commands.sql(db, "CREATE VIEW api.consumer AS SELECT * FROM api.orders_dv;")
         spec["root"]["fields"]["status"] = "state"
         script = "\\set orders_dv_spec " + literal(json.dumps(spec)) + "\n" + recreation()
@@ -79,6 +81,7 @@ SELECT jsontailor.regenerate_duality_view('api.orders_dv');""")
         # Grants are a deployment manifest, reapplied before the acceptance/commit point.
         script = script.replace("COMMIT;", f"""
 GRANT SELECT ON api.orders_dv TO {role};
+SELECT jsontailor.grant_array_reader('api.orders_dv','{role}',false);
 COMMIT;""")
         commands.sql(db, script)
         column_rename_ok = (commands.sql(db, "SELECT data->>'status' FROM api.orders_dv WHERE _id=42;") == "new"
@@ -88,12 +91,13 @@ COMMIT;""")
         table_script = ("\\set orders_dv_spec " + literal(json.dumps(spec)) + "\n" + recreation()).replace(
             "ALTER TABLE shop.orders RENAME COLUMN status TO state;",
             "ALTER TABLE shop.orders RENAME TO purchases;")
-        table_script = table_script.replace("COMMIT;", f"GRANT SELECT ON api.orders_dv TO {role};COMMIT;")
+        table_script = table_script.replace("COMMIT;", f"""GRANT SELECT ON api.orders_dv TO {role};
+SELECT jsontailor.grant_array_reader('api.orders_dv','{role}',false);COMMIT;""")
         commands.sql(db, table_script)
         record(RESULT_IDS[1], column_rename_ok
                and commands.sql(db, "SELECT data->>'status' FROM api.orders_dv WHERE _id=42;") == "new"
                and commands.sql(db, "SELECT api.orders_dv__check()->>'status';") == "OK")
-        record(RESULT_IDS[3], commands.sql(db, f"SET ROLE {role}; SELECT count(*) FROM api.orders_dv;") == "SET\n1"
+        record(RESULT_IDS[3], commands.sql(db, f"SET ROLE {role}; SELECT data->>'status' FROM api.orders_dv;") == "SET\nnew"
                and commands.sql(db, "SELECT api.orders_dv__check(7);") == "7"
                and commands.sql(db, "SELECT count(*) FROM pg_policy WHERE polrelid='shop.purchases'::regclass;") == "1")
     finally:

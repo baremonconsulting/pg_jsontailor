@@ -177,6 +177,9 @@ GRANT USAGE ON SCHEMA api,shop TO {role};
 GRANT SELECT,UPDATE,DELETE ON api.orders_dv TO {role};
 GRANT SELECT ON shop.orders,shop.customers,shop.order_items TO {role};
 GRANT EXECUTE ON FUNCTION api.orders_dv__delete_document(bigint,text) TO {role};""")
+            # Standalone DDL has no review API: apply only the reviewed read capability.
+            failed_sql(commands, target, f"SET ROLE {role};SELECT data FROM api.orders_dv WHERE _id=42;", "42501")
+            commands.sql(target, f"GRANT EXECUTE ON FUNCTION api.orders_dv__bounded_array(bigint) TO {role};")
             failed_sql(commands, target, f"SET ROLE {role};UPDATE api.orders_dv SET data=data WHERE _id=42;", "42501")
             commands.sql(target, f"""GRANT UPDATE,DELETE ON shop.orders,shop.order_items TO {role};
 ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;

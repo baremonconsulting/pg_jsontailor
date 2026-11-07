@@ -30,7 +30,13 @@ Only explicitly named document view routes and their POST delete RPCs are
 forwarded. OpenAPI, the root endpoint, binding views and operational RPCs are
 not public routes. Set PostgREST's exposed schemas to the API schema only;
 keep `jsontailor` and source schemas outside it. Application roles must have
-no helper EXECUTE grants except the reviewed delete capability.
+only the reviewed array-reader and, when needed, delete EXECUTE capabilities.
+Array document projection requires the owner-only `__bounded_array(bigint)` gate;
+the view owner grants it through `jsontailor.grant_array_reader`. Keep trigger,
+guard and health-check helpers owner-only; never grant all functions. The
+cardinality helper remains inaccessible as a public RPC because the proxy routes
+only the named document view and delete RPC. See
+[`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for direct standalone grants and migration.
 
 For every error response, including a deferred failure at COMMIT, the proxy
 preserves the final HTTP status and an explicitly allow-listed SQLSTATE.

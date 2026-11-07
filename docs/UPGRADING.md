@@ -60,8 +60,8 @@ is a separate operational action that executes code owned by the managed-view
 owner and must be reviewed accordingly.
 
 For a view generated with provenance metadata, use the transactional
-regenerator. It preserves direct view and generated-function grants issued by
-the owner to other recipients and generated-function comments, rejects
+regenerator. It preserves direct view grants issued by the owner to other
+recipients and generated-function comments, rejects
 dependent relations and unmanaged triggers or rules, and never uses `CASCADE`.
 Direct relation and column grants to other recipients, including grant options,
 are preserved. A non-default owner ACL on the managed view, one of its columns
@@ -71,6 +71,16 @@ owner privileges. Delegated grant chains
 block regeneration before any object is replaced and must be reapplied through
 the reviewed deployment procedure. Application triggers and rules must be removed and
 explicitly recreated as reviewed deployment objects:
+
+Generated-function EXECUTE grants survive regeneration only when the existing
+delete or array-read ACL entry still matches its recorded reviewed provenance.
+Unreviewed, revoked, default and legacy helper grants are not restored. Review
+approved delete capabilities with `jsontailor.grant_delete_rpc` and array-read
+capabilities with `jsontailor.grant_array_reader` as the view owner. Array document
+reads now require the owner-only `__bounded_array(bigint)` capability in addition
+to source/view SELECT and RLS; otherwise PostgreSQL returns `42501`. Trigger,
+guard and health-check helpers remain owner-only. See
+[`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for migration and `PT413` resource limits.
 
 ```sql
 BEGIN;
@@ -121,6 +131,7 @@ DROP FUNCTION api.orders_dv__delete();
 DROP FUNCTION api.orders_dv__guard();
 DROP FUNCTION api.orders_dv__delete_document(bigint, text);
 DROP FUNCTION api.orders_dv__check();
+DROP FUNCTION api.orders_dv__bounded_array(bigint);
 
 -- For the mapped-column rename example only:
 ALTER TABLE shop.orders RENAME COLUMN status TO state;
@@ -139,7 +150,7 @@ SELECT jsontailor.create_duality_view(
 COMMIT;
 ```
 
-Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and the explicitly reviewed delete-function capability. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation. PostgreSQL stops on an unhandled dependency, and `ROLLBACK` restores the original objects, column names and grants. Run with `psql -X -v ON_ERROR_STOP=1`; do not commit a session after ignoring a failure.
+Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges, explicitly reviewed array-reader capability and, when used, delete-function capability. Reapply those through the owner-only review APIs after recreation, before deployment-role document reads. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation. PostgreSQL stops on an unhandled dependency, and `ROLLBACK` restores the original objects, column names and grants. Run with `psql -X -v ON_ERROR_STOP=1`; do not commit a session after ignoring a failure.
 
 Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement, primary-key constraint rename or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the binding check because it is resolved from restored per-role binding-view dependencies, constraint names and catalogue structure rather than stored numeric OIDs. Binding views for roles present in the reviewed mapping are generated implementation objects and must be dropped and recreated with the main view as shown above. Objects at optional binding names for absent roles are outside that mapping and must not be removed.
 
