@@ -22,6 +22,7 @@ from bench.verify_results import ARTIFACTS, FIELDS, verify_results, verify_seman
 from bench.workload import SIZES as REVIEWED_SIZES, OPERATIONS, IMPLEMENTATIONS, statements
 from bench.installation import canonical, require, sha256, verify_attestation
 from bench.attest_installation import PROBE_SCHEMA, catalogue_and_ddl, installed_files
+from bench.diagnostic_evidence import DiagnosticJournal
 from tools.strict_results import loads
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,19 +111,18 @@ class PersistentPsql:
         if rc: raise RuntimeError(f"persistent psql exited {rc}")
 
 
-def explain(session, statements):
-    script = ""
-    for statement in statements:
-        script += "EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON) " + statement + ";\n"
-    raw = session.execute(script)
-    decoder = json.JSONDecoder(); pos = 0; payloads = []
-    while pos < len(raw):
-        while pos < len(raw) and raw[pos].isspace(): pos += 1
-        if pos >= len(raw): break
-        value, pos = decoder.raw_decode(raw, pos)
-        payloads.append(value[0])
-    if len(payloads) != len(statements):
-        raise RuntimeError(f"expected {len(statements)} plans, got {len(payloads)}: {raw[:500]}")
+def explain(session, statements, observer=None):
+    payloads = []
+    for index, statement in enumerate(statements):
+        raw = session.execute(
+            "EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON) " + statement + ";")
+        try:
+            payload = json.loads(raw)[0]
+        except (json.JSONDecodeError, IndexError, TypeError) as error:
+            raise RuntimeError(f"invalid plan for statement {index}: {raw[:500]}") from error
+        payloads.append(payload)
+        if observer is not None:
+            observer(index, statement, payload)
     return {
         "execution_ms": sum(float(p["Execution Time"]) for p in payloads),
         "planning_ms": sum(float(p["Planning Time"]) for p in payloads),
@@ -166,6 +166,28 @@ verify_attestation(args.installation, repo=ROOT, candidate=source_commit,
 sql('DROP SCHEMA jt_install_probe CASCADE;')
 shutil.copyfile(args.installation, OUT / 'installation.json')
 shutil.copyfile(args.installation.with_name('installation.log'), OUT / 'installation.log')
+diagnostic_phase = {'phase': 'database-setup', 'interrupted': None}
+diagnostic = DiagnosticJournal(OUT, {
+    'source_commit': source_commit,
+    'source_dirty': source_dirty,
+    'installation_sha256': sha256((OUT / 'installation.json').read_bytes()),
+    'installation_log_sha256': sha256((OUT / 'installation.log').read_bytes()),
+    'workload_sha256': sha256((ROOT / 'bench/workload.py').read_bytes()),
+    'producer_sha256': sha256(Path(__file__).read_bytes()),
+    'command': [sys.executable, *sys.argv],
+    'started_at': STARTED,
+})
+original_excepthook = sys.excepthook
+def diagnostic_excepthook(error_type, error, traceback):
+    try:
+        restoration = ('failed' if diagnostic_phase['phase'] in {'rollback', 'restoration'}
+                       else 'not-reached')
+        diagnostic.fail(diagnostic_phase['phase'], error, restoration,
+                        diagnostic_phase['interrupted'])
+    except BaseException as diagnostic_error:
+        print(f'diagnostic finalisation failed: {diagnostic_error}', file=sys.stderr)
+    original_excepthook(error_type, error, traceback)
+sys.excepthook = diagnostic_excepthook
 sql("""
 CREATE SCHEMA bench_dv;
 CREATE TABLE bench_dv.customers(customer_id bigint PRIMARY KEY,name text NOT NULL);
@@ -222,9 +244,13 @@ def snapshot(session, size):
 
 
 rows, saved_plans, semantic_samples, states, backends = [], {}, {}, {}, []
+diagnostic_states = set()
 def intern(state):
     identity = sha256(canonical(state))
     states[identity] = state
+    if identity not in diagnostic_states:
+        diagnostic.append('semantic-state', {'sha256': identity, 'value': state})
+        diagnostic_states.add(identity)
     return identity
 
 
@@ -243,12 +269,25 @@ for session_number in range(1 if args.semantic_check_only else 3):
                     warmup = warmup_count is None
                     order = IMPLEMENTATIONS if repetition % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
                     for pair_order, implementation in enumerate(order):
+                        coordinates = {'session': session_number, 'size': size, 'operation': operation,
+                            'implementation': implementation, 'run': repetition, 'warmup': warmup,
+                            'pair_order': pair_order}
+                        diagnostic_phase.update(phase='constituent', interrupted=coordinates)
+                        diagnostic.append('constituent-start', coordinates)
                         session.execute('BEGIN;')
                         before = snapshot(session, size)
                         workload = statements(operation, implementation, size)
-                        result = explain(session, workload)
+                        def retain_statement(index, statement, plan):
+                            diagnostic_phase.update(phase='statement', interrupted={**coordinates,
+                                'statement': index})
+                            diagnostic.append('statement-complete', {**coordinates, 'statement': index,
+                                'sql': statement, 'plan': plan})
+                        result = explain(session, workload, retain_statement)
+                        diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
                         after = snapshot(session, size)
+                        diagnostic_phase.update(phase='rollback', interrupted=coordinates)
                         session.execute('ROLLBACK;')
+                        diagnostic_phase.update(phase='restoration', interrupted=coordinates)
                         restored = snapshot(session, size)
                         semantic = {'before': before, 'after': after, 'rollback': restored,
                             'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
@@ -260,6 +299,14 @@ for session_number in range(1 if args.semantic_check_only else 3):
                         rows.append({'session': session_number, 'size': size, 'operation': operation,
                             'implementation': implementation, 'run': repetition, 'warmup': warmup,
                             'pair_order': pair_order, **result, 'status': 'PASS'})
+                        diagnostic.append('constituent-complete', {**coordinates,
+                            'execution_ms': result['execution_ms'], 'planning_ms': result['planning_ms'],
+                            'shared_hit_blocks': result['shared_hit_blocks'],
+                            'shared_dirtied_blocks': result['shared_dirtied_blocks'],
+                            'wal_records': result['wal_records'],
+                            'before': semantic_samples[key]['before'], 'after': semantic_samples[key]['after'],
+                            'rollback': semantic_samples[key]['rollback'], 'restoration': 'verified'})
+                        diagnostic_phase.update(phase='between-arms', interrupted=coordinates)
                         if warmup:
                             warmup_values[implementation].append(result['execution_ms'])
                     repetition += 1
@@ -274,6 +321,7 @@ for session_number in range(1 if args.semantic_check_only else 3):
 if args.semantic_check_only:
     if args.drop_database_after:
         run([PG / 'dropdb', DB])
+    diagnostic.discard_after_success()
     print(json.dumps({'status': 'PASS', 'semantic_probes': len(rows), 'candidate': source_commit,
                       'purpose': 'semantic/installation smoke only; not performance evidence'}))
     raise SystemExit(0)
@@ -314,6 +362,9 @@ metadata = {'schema_version': 3, 'run_id': RUN_ID, 'postgresql': postgresql,
 verify_attestation(args.installation, repo=ROOT, candidate=source_commit, trusted_key=args.trusted_key)
 (OUT / 'manifest.json').write_text(json.dumps({'schema_version': 1,
     'files': {name: sha256((OUT / name).read_bytes()) for name in sorted(ARTIFACTS)}}, indent=2))
+verify_results(OUT, candidate=source_commit, trusted_key=args.trusted_key,
+               _producer_pre_discard=True)
+diagnostic.discard_after_success()
 verification = verify_results(OUT, candidate=source_commit, trusted_key=args.trusted_key)
 if args.drop_database_after:
     run([PG / 'dropdb', DB])

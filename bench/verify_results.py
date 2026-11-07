@@ -134,8 +134,13 @@ def verify_environment(environment, installation, candidate):
             and all(isinstance(v, str) and v for v in settings.values()), 'server settings incomplete/differ')
 
 
-def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT):
+def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT,
+                   _producer_pre_discard=False):
     folder = folder.resolve()
+    require(_producer_pre_discard or not any((folder / name).exists() for name in
+                    {'.diagnostic-events.jsonl', '.diagnostic-manifest.json',
+                     '.diagnostic-manifest.json.new'}),
+            'diagnostic evidence is never publishable benchmark evidence')
     manifest = loads((folder / 'manifest.json').read_text())
     require(isinstance(manifest, dict) and set(manifest) == {'schema_version', 'files'}
             and manifest['schema_version'] == 1 and isinstance(manifest['files'], dict)
