@@ -113,6 +113,9 @@ For a view named `api.orders_dv`, the generator creates:
 Generated objects have no runtime dependency on the `jsontailor` schema. Existing objects are not replaced automatically. For every configured source role the generator creates a zero-row `<view>__<role>_binding` view in the API schema. These internal views carry an unambiguous PostgreSQL dependency on that role's relation and mapped columns; they expose no rows, are intrinsically non-updatable, and receive no explicit application grants. The non-updatable property remains effective if deployment-wide default privileges or a later broad grant includes the helper views. If a configured source relation changes role, is renamed or replaced, mapped column names are renamed, reused or permuted, classic inheritance is added, or a required foreign key becomes invalid or not enforced, generated writes fail with `PT422` until the view is regenerated. The guard also checks the relative physical order of mapped attributes, the role's primary-key constraint identity and configured foreign-key direction. Adding or dropping an unmapped source column does not invalidate the binding. The guard remains valid after dump and restore and does not depend on rendered view definitions or `quote_all_identifiers`. Renaming a bound primary-key constraint therefore also requires regeneration.
 
 The generated SQL is copied into each generated object. Regenerate a view after upgrading the extension when the release notes identify a generated write-path change.
+Name-changing drift requires an updated source-controlled specification and
+transactional recreation, not a call to the name-preserving regenerator. See
+[`UPGRADING.md`](UPGRADING.md); regeneration never infers renamed tables or columns.
 
 Statement writes and the generated `__delete_document` helper take fixed-order
 `ACCESS SHARE` locks on configured source relations before validating their

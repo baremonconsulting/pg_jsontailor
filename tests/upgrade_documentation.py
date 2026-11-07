@@ -81,11 +81,21 @@ SELECT jsontailor.regenerate_duality_view('api.orders_dv');""")
 GRANT SELECT ON api.orders_dv TO {role};
 COMMIT;""")
         commands.sql(db, script)
-        record(RESULT_IDS[1], commands.sql(db, "SELECT data->>'status' FROM api.orders_dv WHERE _id=42;") == "new"
+        column_rename_ok = (commands.sql(db, "SELECT data->>'status' FROM api.orders_dv WHERE _id=42;") == "new"
+                            and commands.sql(db, "SELECT api.orders_dv__check()->>'status';") == "OK")
+        # A second specification-changing case: the root table's name changes.
+        spec["root"]["table"] = "shop.purchases"
+        table_script = ("\\set orders_dv_spec " + literal(json.dumps(spec)) + "\n" + recreation()).replace(
+            "ALTER TABLE shop.orders RENAME COLUMN status TO state;",
+            "ALTER TABLE shop.orders RENAME TO purchases;")
+        table_script = table_script.replace("COMMIT;", f"GRANT SELECT ON api.orders_dv TO {role};COMMIT;")
+        commands.sql(db, table_script)
+        record(RESULT_IDS[1], column_rename_ok
+               and commands.sql(db, "SELECT data->>'status' FROM api.orders_dv WHERE _id=42;") == "new"
                and commands.sql(db, "SELECT api.orders_dv__check()->>'status';") == "OK")
         record(RESULT_IDS[3], commands.sql(db, f"SET ROLE {role}; SELECT count(*) FROM api.orders_dv;") == "SET\n1"
                and commands.sql(db, "SELECT api.orders_dv__check(7);") == "7"
-               and commands.sql(db, "SELECT count(*) FROM pg_policy WHERE polrelid='shop.orders'::regclass;") == "1")
+               and commands.sql(db, "SELECT count(*) FROM pg_policy WHERE polrelid='shop.purchases'::regclass;") == "1")
     finally:
         commands.drop(db)
         commands.sql(args.maintenance_database, f"DROP ROLE IF EXISTS {role};")

@@ -1,4 +1,4 @@
-# PGJT-50 generated SQL property and mutation testing
+# Generated SQL property and mutation testing
 
 The scheduled PostgreSQL 18 job runs a bounded, reproducible test campaign outside
 the pull-request gate. `property_generated_sql.py` uses seed `50050` and 24 cases.
