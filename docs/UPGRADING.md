@@ -7,7 +7,7 @@ into generated objects.
 
 Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
 
-The current replacement path stabilizes ETag-included referenced objects with
+The current replacement path stabilises ETag-included referenced objects with
 `FOR SHARE`. Before regenerating, verify that replacement and MERGE roles have
 `SELECT` plus `UPDATE` on at least one referenced-table column and that RLS
 permits the required locks. A column-level `UPDATE` grant is sufficient.
@@ -16,7 +16,7 @@ Statement writes and explicit `__delete_document` calls also hold fixed-order
 `ACCESS SHARE` locks on all configured source relations. Schema migrations that
 need `ACCESS EXCLUSIVE` wait for those transactions; use a reviewed write-free
 window and deployment-appropriate `lock_timeout`. Missing source relations are
-reported as `PT422`. Regenerate existing helpers to obtain this behavior.
+reported as `PT422`. Regenerate existing helpers to obtain this behaviour.
 
 Any view generated from an untagged 0.2.0 development snapshot, including an
 earlier public `main` commit, must be regenerated from the eventual tagged
@@ -28,7 +28,8 @@ release before it is treated as a pilot deployment.
 |---|---|---|
 | Add or drop an unmapped column | Binding remains valid | No regeneration; run the health check |
 | Rename, replace or move a source table | Stored specification no longer identifies the same relation | Update the specification in source control and explicitly recreate the mapping |
-| Rename, reuse or permute a mapped column | Writes return `PT422` | Review the mapping and regenerate |
+| Rename a mapped column | Writes return `PT422`; the stored specification still uses the old name | Change the source-controlled specification and transactionally recreate the mapping |
+| Reuse or permute a mapped column without changing its name | Writes return `PT422` | Review the new meaning; regenerate only if the stored specification remains correct |
 | Change a mapped column type | PostgreSQL normally blocks the change while binding views depend on it | Regenerate through a reviewed migration using the updated specification |
 | Rename a bound primary-key constraint | Writes return `PT422` | Regenerate |
 | Change child primary-key deferrability | Existing generated code may use the previous explicit-key path | Quiesce writers and regenerate |
@@ -40,6 +41,10 @@ release before it is treated as a pilot deployment.
 
 Never use regeneration to guess a new table or column name. Update the
 source-controlled specification explicitly when names or mappings change.
+Name-preserving regeneration reuses the stored specification: it is suitable
+for a primary-key constraint rename or a generator upgrade, not a renamed
+mapped column or changed JSON field. Specification changes require transactional
+recreation, even if the view name stays the same.
 
 Keep every JSON mapping in source control. Before regeneration, inventory objects that depend on the generated view and confirm that no application writer is active. Inspect all managed views and their catalogue health first:
 
@@ -76,46 +81,57 @@ COMMIT;
 
 If a consumer depends on the view, PostgreSQL stops the operation instead of silently destroying that consumer. Failure rolls back all drops and creations. The function also accepts the legacy `pg_jsontailor duality view spec v1` comment written by earlier 0.2.0 development builds and replaces it with current provenance metadata.
 
-For a view whose metadata comment was removed or replaced, recover the mapping from source control and use the explicit procedure below. Record grants before starting. Recreate one mapping in a transaction so that failure restores the previous objects. Drop only the binding views for roles present in that reviewed mapping; the example includes all three roles:
+## Transactional recreation when the specification changes
+
+For example, renaming `shop.orders.status` to `state` requires changing
+`root.fields.status` from `status` to `state` in the source-controlled JSON.
+Do not call `regenerate_duality_view`: its stored specification still names
+`status`. The JSON field can remain `status` while its source column changes.
+
+For a view whose metadata comment was removed or replaced, recover the mapping
+and its original generated DDL from source control before attempting cleanup.
+Compare `pg_get_viewdef`, `pg_get_functiondef`, owner and exact function
+signatures with that reviewed export. If the mapping's ownership cannot be
+proved, stop and resolve it manually; a matching name alone is not provenance.
+
+Record view, column and function ACLs, grant options/grantors, comments,
+dependent-object definitions and RLS policies before starting. Source-table RLS
+policies are not dropped by this procedure. Reapply only the reviewed grants;
+never copy legacy or default `PUBLIC` helper grants indiscriminately. Test with
+the actual application role, not a superuser or an RLS-bypassing owner.
+
+The following exact identity list applies only to the complete shipped orders
+mapping with a `bigint` root key and all three source roles. Confirm those
+identities belong to the mapping before execution. It intentionally preserves
+unrelated overloads such as `orders_dv__check(integer)`; do not replace it with
+a function-name search or drop optional binding names absent from your mapping.
+For a mapped rename, include the `ALTER TABLE` after the drops and before
+creation, and supply the updated `orders_dv_spec`:
 
 ```sql
 BEGIN;
 
 DROP VIEW api.orders_dv;
-DROP VIEW IF EXISTS api.orders_dv__root_binding;
-DROP VIEW IF EXISTS api.orders_dv__object_binding;
-DROP VIEW IF EXISTS api.orders_dv__array_binding;
+DROP VIEW api.orders_dv__root_binding;
+DROP VIEW api.orders_dv__object_binding;
+DROP VIEW api.orders_dv__array_binding;
+DROP FUNCTION api.orders_dv__insert();
+DROP FUNCTION api.orders_dv__update();
+DROP FUNCTION api.orders_dv__delete();
+DROP FUNCTION api.orders_dv__guard();
+DROP FUNCTION api.orders_dv__delete_document(bigint, text);
+DROP FUNCTION api.orders_dv__check();
 
-DO $cleanup$
-DECLARE
-    item regprocedure;
-BEGIN
-    FOR item IN
-        SELECT p.oid::regprocedure
-        FROM pg_proc AS p
-        JOIN pg_namespace AS n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'api'
-          AND p.proname = ANY (ARRAY[
-              'orders_dv__insert',
-              'orders_dv__update',
-              'orders_dv__delete',
-              'orders_dv__guard',
-              'orders_dv__delete_document',
-              'orders_dv__check'
-          ])
-    LOOP
-        EXECUTE format('DROP FUNCTION %s', item);
-    END LOOP;
-END
-$cleanup$;
+-- For the mapped-column rename example only:
+ALTER TABLE shop.orders RENAME COLUMN status TO state;
 
 SELECT jsontailor.create_duality_view(
     'api.orders_dv',
     :'orders_dv_spec'::jsonb
 );
 
--- Reapply the deployment-specific grants recorded before regeneration.
-GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO application_role;
+-- Reapply deployment-specific view/column/function grants, comments and
+-- dependent objects from the reviewed manifest before acceptance testing.
 
 -- Run deployment-specific catalogue, read, privilege and RLS acceptance checks here.
 -- Exercise writes only against disposable test rows created inside this transaction.
@@ -123,7 +139,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO application_role;
 COMMIT;
 ```
 
-Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and `EXECUTE` on the generated delete function. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation.
+Pass `orders_dv_spec` as a `psql` variable or application parameter; do not interpolate untrusted text into the script. The runtime role also needs the documented source-table privileges and the explicitly reviewed delete-function capability. If dependent objects must be replaced, inventory their definitions, owners and grants first, then include their explicit drop and recreation in the same reviewed transaction. Do not substitute an unqualified `CASCADE` operation. PostgreSQL stops on an unhandled dependency, and `ROLLBACK` restores the original objects, column names and grants. Run with `psql -X -v ON_ERROR_STOP=1`; do not commit a session after ignoring a failure.
 
 Before committing, verify generated objects, grants, a representative read and row-level security with the deployment role. Perform an ETag-checked replacement and delete only against disposable rows created within the transaction, enclosing the write checks in a savepoint and using `ROLLBACK TO SAVEPOINT` before the final commit. After committing, run separate non-mutating smoke tests against the deployed view. A relation role change, rename, replacement, primary-key constraint rename or mapped-column identity change is detected by generated write paths and returns `PT422` until regeneration. PostgreSQL dump and restore preserve the binding check because it is resolved from restored per-role binding-view dependencies, constraint names and catalogue structure rather than stored numeric OIDs. Binding views for roles present in the reviewed mapping are generated implementation objects and must be dropped and recreated with the main view as shown above. Objects at optional binding names for absent roles are outside that mapping and must not be removed.
 
