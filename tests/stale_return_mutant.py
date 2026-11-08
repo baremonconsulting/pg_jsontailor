@@ -12,8 +12,8 @@ from pathlib import Path
 import sys
 from core_operations import Harness
 
-NEEDLE = "USING root_id INTO NEW.data;RETURN NEW;"
-REPLACEMENT = "USING root_id INTO cur;RETURN NEW;"
+NEEDLE = "EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING root_id INTO NEW.data;"
+REPLACEMENT = "EXECUTE format('SELECT data FROM %%s WHERE _id=$1',%L) USING root_id INTO cur;"
 WITNESS = "RETURNING document differs from fresh read-back"
 
 
