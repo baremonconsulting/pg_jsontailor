@@ -14,10 +14,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.diagnostic_evidence import DiagnosticJournal, MANIFEST, JOURNAL, _candidate_blob, verify_diagnostic
-from bench.verify_results import verify_results
+from bench.verify_results import expected_state, verify_results
 from bench.verify_results import stable
-from bench.installation import sha256
+from bench.installation import canonical, sha256
 from bench.benchmark_execution import explain
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PROTOCOL_VERSION,
+    TARGET_BATCH_MS, arm_order)
+from bench.workload import statements
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,8 +33,10 @@ def provenance(folder: Path) -> dict:
             "workload_sha256": sha256((ROOT / "bench/workload.py").read_bytes()),
             "producer_sha256": sha256((ROOT / "bench/duality_overhead.py").read_bytes()),
             "executor_sha256": sha256((ROOT / "bench/benchmark_execution.py").read_bytes()),
+            "batching_sha256": sha256((ROOT / "bench/batching_protocol.py").read_bytes()),
+            "diagnostic_verifier_sha256": sha256((ROOT / "bench/diagnostic_evidence.py").read_bytes()),
             "command": ["python3", "bench/duality_overhead.py"],
-            "started_at": "2026-11-07T00:00:00+00:00"}
+            "started_at": "2026-11-07T00:00:00+00:00", "semantic_check_only": False}
 
 def verify(folder: Path):
     def candidate_blob(repo, candidate, path):
@@ -53,10 +58,128 @@ def environment() -> dict:
             'pg_bin': '/test', 'python': sys.version, 'sizes': [0, 1, 10, 100, 1000],
             'operations': ['read', 'insert', 'root_update', 'update', 'delete', 'merge_insert',
                            'merge_update', 'merge_delete'], 'warmups': 10, 'maximum_warmups': 30,
-            'stability_threshold': .10, 'repetitions': 50, 'sessions': 3}
+            'stability_threshold': .10, 'repetitions': 50, 'sessions': 3,
+            'batching_protocol_version': PROTOCOL_VERSION, 'batch_sizes': list(BATCH_SIZES),
+            'calibration_batches': CALIBRATION_BATCHES, 'target_batch_ms': TARGET_BATCH_MS,
+            'semantic_check_only': False}
+
+def append_constituent(journal, *, phase='calibration', level=1, batch=0,
+                       constituent=0, pair_order=0, execution_ms=.001):
+    implementation = arm_order(batch, constituent)[pair_order]
+    coordinates = {'session': 0, 'size': 0, 'operation': 'read',
+        'implementation': implementation, 'phase': phase, 'level': level,
+        'batch': batch, 'constituent': constituent, 'batch_size': level,
+        'pair_order': pair_order}
+    journal.append('constituent-start', coordinates)
+    state = expected_state(0)
+    digest = sha256(canonical(state))
+    journal.append('semantic-state', {'sha256': digest, 'value': state})
+    journal.append('semantic-witness', {**coordinates, 'role': 'before', 'sha256': digest})
+    workload = statements('read', implementation, 0)
+    per_statement = execution_ms / len(workload)
+    for index, sql in enumerate(workload):
+        plan = {'Plan': {'Node Type': 'Result', 'Actual Rows': 1, 'Actual Loops': 1,
+                        'Shared Hit Blocks': 0, 'Shared Dirtied Blocks': 0, 'WAL Records': 0},
+                'Planning Time': 0.0, 'Execution Time': per_statement}
+        journal.append('statement-complete', {**coordinates, 'statement': index,
+                       'sql': sql, 'plan': plan})
+    journal.append('semantic-witness', {**coordinates, 'role': 'after', 'sha256': digest})
+    journal.append('semantic-witness', {**coordinates, 'role': 'rollback', 'sha256': digest})
+    journal.append('constituent-complete', {**coordinates, 'before': digest, 'after': digest,
+        'rollback': digest, 'execution_ms': execution_ms, 'planning_ms': 0.0,
+        'shared_hit_blocks': 0, 'shared_dirtied_blocks': 0, 'wal_records': 0,
+        'restoration': 'verified'})
 
 
 class DiagnosticTrust(unittest.TestCase):
+    def test_pgjt_78_durable_kind_is_visible_before_signal_unmask(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            journal = DiagnosticJournal(folder, provenance(folder))
+            observed = []
+            real_mask = signal.pthread_sigmask
+            def inspect_unmask(how, mask):
+                if how == signal.SIG_SETMASK:
+                    observed.append(journal.last_kind)
+                return real_mask(how, mask)
+            with mock.patch('bench.diagnostic_evidence.signal.pthread_sigmask',
+                            side_effect=inspect_unmask):
+                journal.append('environment', environment())
+            self.assertEqual(observed, ['environment'])
+
+    def test_pgjt_78_cap_exhaustion_is_a_valid_terminal_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            journal = DiagnosticJournal(folder, provenance(folder))
+            journal.append('environment', environment())
+            journal.append('session-start', {'session': 0, 'pid': 101,
+                           'backend_start': '2026-11-07T00:00:01+00:00'})
+            for level in BATCH_SIZES:
+                totals = {implementation: [] for implementation in ('direct', 'duality')}
+                for batch in range(CALIBRATION_BATCHES):
+                    for constituent in range(level):
+                        for pair_order in range(2):
+                            implementation = arm_order(batch, constituent)[pair_order]
+                            append_constituent(journal, level=level, batch=batch,
+                                               constituent=constituent,
+                                               pair_order=pair_order)
+                            if len(totals[implementation]) <= batch:
+                                totals[implementation].append(0.0)
+                            totals[implementation][batch] += .001
+                journal.append('calibration-level-complete', {'session': 0, 'size': 0,
+                    'operation': 'read', 'level': level, 'totals': totals})
+            journal.fail('database-setup', RuntimeError('calibration cap exhausted'),
+                         'not-reached', None)
+            result = verify(folder)
+            self.assertEqual(result['outcome'], 'TERMINAL_FAIL')
+            self.assertFalse(result['publishable'])
+
+    def test_pgjt_78_semantic_smoke_failure_is_a_valid_terminal_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            mode = provenance(folder); mode['semantic_check_only'] = True
+            journal = DiagnosticJournal(folder, mode)
+            smoke_environment = environment(); smoke_environment['semantic_check_only'] = True
+            journal.append('environment', smoke_environment)
+            journal.append('session-start', {'session': 0, 'pid': 101,
+                           'backend_start': '2026-11-07T00:00:01+00:00'})
+            append_constituent(journal, phase='measured')
+            journal.fail('between-arms', RuntimeError('forced semantic smoke failure'),
+                         'verified', None)
+            result = verify(folder)
+            self.assertEqual(result['outcome'], 'TERMINAL_FAIL')
+            self.assertTrue(result['restoration_verified'])
+
+    def test_pgjt_78_aggregate_cannot_reference_another_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            mode = provenance(folder); mode['semantic_check_only'] = True
+            journal = DiagnosticJournal(folder, mode)
+            smoke_environment = environment(); smoke_environment['semantic_check_only'] = True
+            journal.append('environment', smoke_environment)
+            journal.append('session-start', {'session': 0, 'pid': 101,
+                           'backend_start': '2026-11-07T00:00:01+00:00'})
+            append_constituent(journal, phase='measured', pair_order=0)
+            append_constituent(journal, phase='measured', pair_order=1)
+            journal.append('smoke-group-complete', {'session': 0, 'size': 1,
+                'operation': 'read', 'phase': 'measured', 'level': 1, 'batch': 0,
+                'totals': {'direct': .001, 'duality': .001}})
+            with self.assertRaisesRegex(RuntimeError, 'aggregate group differs'):
+                verify(folder)
+
+    def test_pgjt_78_signal_after_durable_completion_preserves_restoration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            journal = DiagnosticJournal(folder, provenance(folder))
+            journal.append('environment', environment())
+            journal.append('session-start', {'session': 0, 'pid': 101,
+                           'backend_start': '2026-11-07T00:00:01+00:00'})
+            append_constituent(journal)
+            journal.fail('restoration', KeyboardInterrupt(), 'verified', None)
+            result = verify(folder)
+            self.assertEqual(result['outcome'], 'TERMINAL_FAIL')
+            self.assertTrue(result['restoration_verified'])
+
     def test_protocol_binding_reads_declared_candidate_not_working_tree(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)

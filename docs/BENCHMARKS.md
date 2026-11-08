@@ -57,14 +57,15 @@ implementations `direct,duality`. Removing a size or operation is invalid even
 when all remaining artifacts agree. Statement text/count is checked against the
 reviewed workload, not the producer's declared inventory.
 
-Each sample checks operation preconditions and child cardinality, relational
+Each constituent checks operation preconditions and child cardinality, relational
 and document state after execution, the chosen MERGE branch and affected
 cardinality, and complete rollback restoration. These assertions run outside
-the timed statements. Each mutation is rolled back. Every sample retains its
+the timed statements. Each mutation is rolled back. Every constituent retains its
 `EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON)` plans. The independent
 verifier checks real plan roots/nodes, statement inventory, integer block/WAL
-counters, and both planning and execution reconciliation. Semantic snapshots
-are content-addressed to avoid duplicating large documents.
+counters, planning and execution reconciliation, calibration selection,
+constituent chronology and batch totals. Semantic snapshots are content-addressed
+to avoid duplicating large documents.
 
 The nightly six-mutation campaign requires successful compilation/application
 and passing control suites. A kill requires the named behavioural witness or
@@ -75,16 +76,32 @@ stale-return witness remains separately required.
 ## Sampling and statistics
 
 Each of three sessions starts a new persistent PostgreSQL backend, recording its
-PID and start time. Every group starts with ten paired warm-ups. After ten,
-compare the median of the last five with the preceding five, independently for
-each implementation. Both must differ by at most 10%. If either fails, add five
-pairs and check again, up to 30 warm-ups; continued instability is FAIL.
+PID and start time. Before warm-up, each group calibrates one shared batch size
+for both implementations. It tries the reviewed powers of two from 1 to 32 in
+order and retains three complete pilot batches per implementation at every
+visited level. The first level where both median batch totals reach 1 ms is
+frozen. Missing levels, unequal arms, invalid timings or cap exhaustion fail.
+Calibration is never repeated in response to a failed stability gate.
 
-Each accepted session/group then records at least 50 measured pairs. Within
-pairs, order alternates direct/duality then duality/direct, including warm-ups.
-No samples are trimmed. Report median, minimum, maximum and nearest-rank p95
-(`sorted[ceil(0.95*N)-1]`) separately for each session, size, operation and
-implementation. Diagnose variability; do not turn it into a production promise.
+Every constituent is a complete independent transaction: precondition snapshot,
+the exact reviewed `EXPLAIN ANALYZE` workload, resulting-state snapshot, rollback
+and restoration snapshot. Direct and duality constituents alternate within each
+batch. Plans, semantic witnesses and integer counters are retained per
+constituent; batching never repeats mutations against progressively changed state.
+
+Each group starts with ten paired warm-up batches. After ten, compare the median
+aggregate execution time of the last five with the preceding five,
+independently for each implementation. Both must differ by at most 10%. If
+either fails, add five batches and check again, up to 30; continued instability
+is FAIL. The threshold is unchanged, but the estimand is explicitly batch
+aggregate stability rather than individual-operation stability.
+
+Each accepted session/group then records at least 50 measured batches. No
+constituent is trimmed. Report median, minimum, maximum and nearest-rank p95
+(`sorted[ceil(0.95*N)-1]`) separately for raw individual operations and for
+per-operation batch means. A p95 of batch means is always labelled as such and
+is never presented as individual tail latency. The comparison ratio uses batch
+mean medians. Diagnose variability; do not turn it into a production promise.
 
 ```sh
 python3 bench/duality_overhead.py \

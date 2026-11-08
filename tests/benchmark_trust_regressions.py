@@ -12,9 +12,11 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.installation import canonical, candidate_files, sha256, sign, verify_attestation
-from bench.measurement_attestation import attest_measurement
+from bench.measurement_attestation import PROTOCOL_FILES, attest_measurement
 from bench.verify_results import ARTIFACTS, ENVIRONMENT_FIELDS, FIELDS, expected_state, statistics_for, verify_results
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PROTOCOL_VERSION,
+    TARGET_BATCH_MS, arm_order, evidence_key)
 from tools.verify_release_candidate import verify_benchmark_candidate
 
 
@@ -43,9 +45,11 @@ def fixture(folder, repo, candidate, private):
         'log_sha256': sha256((folder / 'installation.log').read_bytes())}
     write_json(folder / 'installation.json', sign(payload, private))
     environment = {name: 'fixture' for name in ENVIRONMENT_FIELDS}
-    environment.update(schema_version=3, source_commit=candidate, source_dirty=False,
+    environment.update(schema_version=4, source_commit=candidate, source_dirty=False,
         sizes=list(SIZES), operations=list(OPERATIONS), warmups=10, maximum_warmups=30,
         stability_threshold=.1, repetitions=50, sessions=3, postgresql='18.6 fixture', postgresql_major='18',
+        batching_protocol_version=PROTOCOL_VERSION, batch_sizes=list(BATCH_SIZES),
+        calibration_batches=CALIBRATION_BATCHES, target_batch_ms=TARGET_BATCH_MS,
         session_backends=[{'session': n, 'pid': 100 + n, 'backend_start': moment} for n in range(3)],
         started_at='2026-11-07T01:00:00+00:00', finished_at='2026-11-07T01:01:00+00:00',
         command=['fixture-only'], direct_contract='lower-contract direct SQL',
@@ -63,17 +67,32 @@ def fixture(folder, repo, candidate, private):
         for size in SIZES:
             for operation in OPERATIONS:
                 before, after = intern(expected_state(size)), intern(expected_state(size, operation))
-                for run in range(60):
-                    order = IMPLEMENTATIONS if run % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
-                    for position, impl in enumerate(order):
+                phases = ([('calibration', level, batch) for level in (1, 2)
+                           for batch in range(CALIBRATION_BATCHES)]
+                          + [('warmup', 2, batch) for batch in range(10)]
+                          + [('measured', 2, batch) for batch in range(10, 60)])
+                group_rows = []
+                for phase, level, batch in phases:
+                    for constituent in range(level):
+                      for position, impl in enumerate(arm_order(batch, constituent)):
                         workload = statements(operation, impl, size)
-                        execution = 1.0 if run < 10 else 1 + (run - 10) / 100
+                        if phase == 'calibration':
+                            execution = .4 if level == 1 else .6
+                        elif phase == 'warmup':
+                            execution = .5
+                        else:
+                            measured = batch - 10
+                            execution = (1 + measured / 100 if constituent == 0
+                                         else 3 + measured / 50)
                         row = {'session': session, 'size': size, 'operation': operation, 'implementation': impl,
-                            'run': run, 'warmup': run < 10, 'pair_order': position, 'execution_ms': execution,
+                            'phase': phase, 'level': level, 'batch': batch,
+                            'constituent': constituent, 'batch_size': level,
+                            'pair_order': position, 'execution_ms': execution,
                             'planning_ms': len(workload) * .01, 'shared_hit_blocks': 0,
                             'shared_dirtied_blocks': 0, 'wal_records': 0, 'status': 'PASS'}
-                        rows.append(row)
-                        key = f'{session}:{size}:{operation}:{impl}:{run}'
+                        rows.append(row); group_rows.append(row)
+                        key = evidence_key(session, size, operation, impl, phase, level,
+                                           batch, constituent)
                         captured = []
                         for index, _ in enumerate(workload):
                             node = {'Node Type': 'Result', 'Actual Rows': 1, 'Actual Loops': 1,
@@ -86,16 +105,28 @@ def fixture(folder, repo, candidate, private):
                         plans[key] = {'statements': workload, 'plans': captured}
                         semantics[key] = {'before': before, 'after': after, 'rollback': before,
                             'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
-                stats = statistics_for([1 + n / 100 for n in range(50)])
+                values = {}
+                for impl in IMPLEMENTATIONS:
+                    measured_rows = [row for row in group_rows if row['phase'] == 'measured'
+                                     and row['implementation'] == impl]
+                    batches = {}
+                    for row in measured_rows:
+                        batches.setdefault(row['batch'], []).append(row['execution_ms'])
+                    values[impl] = {
+                        'individual': statistics_for([row['execution_ms'] for row in measured_rows]),
+                        'batch_mean': statistics_for([sum(values) / len(values)
+                                                      for values in batches.values()]),
+                    }
                 summary.append({'session': session, 'size': size, 'operation': operation,
-                                'direct': stats, 'duality': stats, 'median_ratio': 1.0})
+                    **values, 'median_ratio': values['duality']['batch_mean']['median_ms']
+                                               / values['direct']['batch_mean']['median_ms']})
     with (folder / 'measurements.csv').open('w', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
     write_json(folder / 'plans.json', plans)
     write_json(folder / 'semantics.json', {'states': states, 'samples': semantics})
     write_json(folder / 'summary.json', summary)
     rehash(folder)
-    attest_measurement(folder, candidate, private)
+    attest_measurement(folder, candidate, private, repo)
 
 
 class BenchmarkTrust(unittest.TestCase):
@@ -104,8 +135,13 @@ class BenchmarkTrust(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix='pgjt-benchmark-trust-')
         cls.root = Path(cls.temporary.name)
         cls.repo = cls.root / 'repo'; cls.repo.mkdir(); (cls.repo / 'sql').mkdir()
+        (cls.repo / 'bench').mkdir()
         (cls.repo / 'pg_jsontailor.control').write_text("default_version = '0.2.0'\n")
         (cls.repo / 'sql/pg_jsontailor--0.2.0.sql').write_text('-- fixture only\n')
+        for name in PROTOCOL_FILES:
+            target = cls.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((Path(__file__).resolve().parents[1] / name).read_bytes())
         for cmd in [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']]:
             subprocess.run(['git', *cmd], cwd=cls.repo, check=True)
         cls.candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cls.repo, text=True).strip()
@@ -130,6 +166,12 @@ class BenchmarkTrust(unittest.TestCase):
         value = json.loads((self.folder / name).read_text()); change(value)
         write_json(self.folder / name, value); rehash(self.folder)
 
+    def resign(self):
+        path = self.folder / 'measurement.json'
+        if path.exists():
+            path.unlink()
+        attest_measurement(self.folder, self.candidate, self.private, self.repo)
+
     def rejected(self, change, message=None):
         change()
         for consumer in [verify_results, verify_benchmark_candidate]:
@@ -139,7 +181,7 @@ class BenchmarkTrust(unittest.TestCase):
     def test_valid_complete_current_fixture_both_consumers(self):
         for consumer in [verify_results, verify_benchmark_candidate]:
             result = self.verify(consumer)
-            self.assertEqual(result['measurements'], 14400)
+            self.assertEqual(result['measurements'], 30960)
         self.assertEqual(statistics_for(list(range(50)))['p95_ms'], 47)
 
     def test_pgjt_93_unsigned_completed_measurement_rejected(self):
@@ -155,25 +197,35 @@ class BenchmarkTrust(unittest.TestCase):
                     RuntimeError, 'completed measurement signature verification failed'):
                 self.verify(consumer)
 
+    def test_pgjt_78_working_protocol_must_match_candidate(self):
+        path = self.repo / 'bench/batching_protocol.py'
+        original = path.read_bytes()
+        self.addCleanup(path.write_bytes, original)
+        path.write_bytes(original + b'\n# altered fixture protocol\n')
+        (self.folder / 'measurement.json').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'working protocol differs'):
+            attest_measurement(self.folder, self.candidate, self.private, self.repo)
+
     def test_pgjt_93_coherent_timing_rewrite_rejected(self):
         def rewrite():
             with (self.folder / 'measurements.csv').open(newline='') as source:
                 rows = list(csv.DictReader(source))
             for row in rows:
-                if row['implementation'] == 'duality':
+                if row['implementation'] == 'duality' and row['phase'] == 'measured':
                     row['execution_ms'] = str(float(row['execution_ms']) * .01)
             with (self.folder / 'measurements.csv').open('w', newline='') as target:
                 writer = csv.DictWriter(target, fieldnames=FIELDS)
                 writer.writeheader(); writer.writerows(rows)
             plans = json.loads((self.folder / 'plans.json').read_text())
             for key, entry in plans.items():
-                if key.split(':')[3] == 'duality':
+                if key.split(':')[3] == 'duality' and key.split(':')[4] == 'measured':
                     for plan in entry['plans']:
                         plan['Execution Time'] *= .01
             write_json(self.folder / 'plans.json', plans)
             summaries = json.loads((self.folder / 'summary.json').read_text())
             for summary in summaries:
-                summary['duality'] = {key: value * .01 for key, value in summary['duality'].items()}
+                summary['duality'] = {channel: {key: value * .01 for key, value in values.items()}
+                                      for channel, values in summary['duality'].items()}
                 summary['median_ratio'] = .01
             write_json(self.folder / 'summary.json', summaries)
             rehash(self.folder)
@@ -211,6 +263,13 @@ class BenchmarkTrust(unittest.TestCase):
     def test_semantic_mutation_even_when_rehashed(self):
         self.rejected(lambda: self.mutate_json('semantics.json', lambda v: next(iter(v['samples'].values())).update(branch='insert')), 'MERGE branch')
 
+    def test_semantic_mutation_even_when_rehashed_and_resigned(self):
+        def change():
+            self.mutate_json('semantics.json',
+                lambda value: next(iter(value['samples'].values())).update(branch='insert'))
+            self.resign()
+        self.rejected(change, 'MERGE branch')
+
     def test_rollback_restoration(self):
         def change(v):
             sample = next(r for r in v['samples'].values() if r['before'] != r['after'])
@@ -220,11 +279,133 @@ class BenchmarkTrust(unittest.TestCase):
     def test_pair_order(self):
         self.rejected(lambda: self.csv_mutation(lambda r: r[0].update(pair_order='1')), 'pair order')
 
+    def test_pgjt_78_skipped_calibration_level_rejected(self):
+        def change():
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            removed = [row for row in rows if row['session'] == '0' and row['size'] == '0'
+                       and row['operation'] == 'read' and row['phase'] == 'calibration'
+                       and row['level'] == '1']
+            rows = [row for row in rows if row not in removed]
+            keys = {evidence_key(int(row['session']), int(row['size']), row['operation'],
+                    row['implementation'], row['phase'], int(row['level']), int(row['batch']),
+                    int(row['constituent'])) for row in removed}
+            with (self.folder / 'measurements.csv').open('w', newline='') as target:
+                writer = csv.DictWriter(target, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
+            for name in ['plans.json', 'semantics.json']:
+                value = json.loads((self.folder / name).read_text())
+                target = value['samples'] if name == 'semantics.json' else value
+                for key in keys: target.pop(key)
+                write_json(self.folder / name, value)
+            rehash(self.folder)
+        self.rejected(change, 'warm-up batch inventory differs|global constituent order differs')
+
+    def test_pgjt_78_missing_and_reordered_constituents_rejected(self):
+        self.rejected(lambda: self.csv_mutation(lambda rows: rows.__setitem__(slice(0, 2),
+            [rows[1], rows[0]])), 'global constituent order differs')
+
+    def test_pgjt_78_genuinely_missing_constituent_rejected(self):
+        def change():
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            removed = [row for row in rows if row['session'] == '0' and row['size'] == '0'
+                       and row['operation'] == 'read' and row['phase'] == 'measured'
+                       and row['batch'] == '10' and row['constituent'] == '1']
+            rows = [row for row in rows if row not in removed]
+            keys = {evidence_key(int(row['session']), int(row['size']), row['operation'],
+                    row['implementation'], row['phase'], int(row['level']), int(row['batch']),
+                    int(row['constituent'])) for row in removed}
+            with (self.folder / 'measurements.csv').open('w', newline='') as target:
+                writer = csv.DictWriter(target, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
+            for name in ['plans.json', 'semantics.json']:
+                value = json.loads((self.folder / name).read_text())
+                target = value['samples'] if name == 'semantics.json' else value
+                for key in keys: target.pop(key)
+                write_json(self.folder / name, value)
+            rehash(self.folder); self.resign()
+        self.rejected(change, 'global constituent order differs')
+
+    def test_pgjt_78_unequal_arm_inventory_rejected(self):
+        def change():
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            removed = next(row for row in rows if row['session'] == '0' and row['size'] == '0'
+                           and row['operation'] == 'read' and row['phase'] == 'calibration'
+                           and row['level'] == '1' and row['batch'] == '0'
+                           and row['implementation'] == 'duality')
+            rows.remove(removed)
+            key = evidence_key(0, 0, 'read', 'duality', 'calibration', 1, 0, 0)
+            with (self.folder / 'measurements.csv').open('w', newline='') as target:
+                writer = csv.DictWriter(target, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
+            plans = json.loads((self.folder / 'plans.json').read_text()); plans.pop(key)
+            semantics = json.loads((self.folder / 'semantics.json').read_text()); semantics['samples'].pop(key)
+            write_json(self.folder / 'plans.json', plans)
+            write_json(self.folder / 'semantics.json', semantics)
+            rehash(self.folder); self.resign()
+        self.rejected(change, 'global constituent order differs')
+
+    def test_pgjt_78_nonminimal_qualifying_batch_rejected(self):
+        def change():
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            plans = json.loads((self.folder / 'plans.json').read_text())
+            for row in rows:
+                if row['phase'] == 'calibration' and row['level'] == '1':
+                    row['execution_ms'] = '1.1'
+                    key = evidence_key(int(row['session']), int(row['size']), row['operation'],
+                        row['implementation'], row['phase'], 1, int(row['batch']), 0)
+                    count = len(plans[key]['plans'])
+                    for plan in plans[key]['plans']:
+                        plan['Execution Time'] = 1.1 / count
+            with (self.folder / 'measurements.csv').open('w', newline='') as target:
+                writer = csv.DictWriter(target, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
+            write_json(self.folder / 'plans.json', plans)
+            rehash(self.folder); self.resign()
+        self.rejected(change, 'warm-up batch inventory differs|global constituent order differs')
+
+    def test_pgjt_78_changed_frozen_batch_rejected(self):
+        def mutate(rows):
+            row = next(row for row in rows if row['phase'] == 'warmup')
+            row.update(level='1', batch_size='1')
+        self.rejected(lambda: self.csv_mutation(mutate),
+                      'sample lacks plan/semantic evidence|global constituent order differs')
+
+    def test_pgjt_78_batch_p95_cannot_replace_individual_tail(self):
+        def change(summaries):
+            summaries[0]['direct']['individual']['p95_ms'] = \
+                summaries[0]['direct']['batch_mean']['p95_ms']
+        self.rejected(lambda: self.mutate_json('summary.json', change), 'nearest-rank/raw statistics')
+
+    def test_pgjt_78_wrong_batch_mean_divisor_rejected(self):
+        def change():
+            summaries = json.loads((self.folder / 'summary.json').read_text())
+            with (self.folder / 'measurements.csv').open(newline='') as source:
+                rows = list(csv.DictReader(source))
+            summary = summaries[0]
+            for implementation in IMPLEMENTATIONS:
+                totals = {}
+                for row in rows:
+                    if (row['session'], row['size'], row['operation'], row['implementation'],
+                            row['phase']) == ('0', '0', 'read', implementation, 'measured'):
+                        totals.setdefault(row['batch'], 0.0)
+                        totals[row['batch']] += float(row['execution_ms'])
+                summary[implementation]['batch_mean'] = statistics_for(list(totals.values()))
+            summary['median_ratio'] = (summary['duality']['batch_mean']['median_ms']
+                                       / summary['direct']['batch_mean']['median_ms'])
+            write_json(self.folder / 'summary.json', summaries)
+            rehash(self.folder); self.resign()
+        self.rejected(change, 'nearest-rank/raw statistics')
+
+    def test_pgjt_78_boolean_protocol_metadata_rejected(self):
+        self.rejected(lambda: self.mutate_json('environment.json',
+            lambda value: value.update(batching_protocol_version=True)), 'batching protocol differs')
+
     def test_reused_session(self):
         self.rejected(lambda: self.mutate_json('environment.json', lambda v: v['session_backends'][1].update(pid=100)), 'restarted')
 
     def test_wrong_percentile(self):
-        self.rejected(lambda: self.mutate_json('summary.json', lambda v: v[0]['direct'].update(p95_ms=1.46)), 'nearest-rank')
+        self.rejected(lambda: self.mutate_json('summary.json',
+            lambda v: v[0]['direct']['individual'].update(p95_ms=1.46)), 'nearest-rank')
 
     def test_signature_tamper(self):
         self.rejected(lambda: self.mutate_json('installation.json', lambda v: v['payload'].update(signer='altered')), 'signature')
@@ -251,7 +432,7 @@ class BenchmarkTrust(unittest.TestCase):
     def test_duplicate_json_key(self):
         def change():
             path = self.folder / 'environment.json'
-            path.write_text(path.read_text().replace('"schema_version": 3', '"schema_version": 3, "schema_version": 3'))
+            path.write_text(path.read_text().replace('"schema_version": 4', '"schema_version": 4, "schema_version": 4'))
             rehash(self.folder)
         self.rejected(change, 'duplicate JSON key')
 

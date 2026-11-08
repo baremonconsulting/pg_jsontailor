@@ -15,6 +15,9 @@ from tools.strict_results import loads
 from bench.installation import canonical, require, sha256, verify_attestation
 from bench.measurement_attestation import verify_measurement
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PHASES,
+    PROTOCOL_VERSION, TARGET_BATCH_MS, arm_order, evidence_key, first_qualifying_level,
+    level_qualifies)
 
 ROOT = Path(__file__).resolve().parents[1]
 COUNTERS = {'shared_hit_blocks': 'Shared Hit Blocks',
@@ -23,10 +26,12 @@ ARTIFACTS = {'measurements.csv', 'plans.json', 'summary.json', 'environment.json
              'semantics.json', 'installation.json', 'installation.log'}
 ENVIRONMENT_FIELDS = {'schema_version', 'run_id', 'source_commit', 'source_dirty', 'sizes',
     'operations', 'warmups', 'maximum_warmups', 'stability_threshold', 'repetitions', 'sessions',
+    'batching_protocol_version', 'batch_sizes', 'calibration_batches', 'target_batch_ms',
     'session_backends', 'postgresql', 'postgresql_major', 'server_settings', 'platform', 'cpu',
     'memory', 'storage', 'load', 'database', 'pg_host', 'pg_port', 'pg_user', 'pg_bin', 'command',
     'started_at', 'finished_at', 'python', 'direct_contract', 'restart_policy'}
-FIELDS = ['session', 'size', 'operation', 'implementation', 'run', 'warmup', 'pair_order',
+FIELDS = ['session', 'size', 'operation', 'implementation', 'phase', 'level', 'batch',
+          'constituent', 'batch_size', 'pair_order',
           'execution_ms', 'planning_ms', *COUNTERS, 'status']
 
 
@@ -98,7 +103,7 @@ def verify_plan_node(node):
 
 def verify_environment(environment, installation, candidate):
     require(isinstance(environment, dict) and set(environment) == ENVIRONMENT_FIELDS
-            and environment['schema_version'] == 3, 'benchmark environment schema differs')
+            and environment['schema_version'] == 4, 'benchmark environment schema differs')
     require(environment['sizes'] == list(SIZES) and all(type(v) is int for v in environment['sizes'])
             and environment['operations'] == list(OPERATIONS), 'reviewed workload differs (shrink forbidden)')
     require(environment['source_dirty'] is False and candidate is not None
@@ -110,6 +115,15 @@ def verify_environment(environment, installation, candidate):
             and environment['maximum_warmups'] == 30 and environment['stability_threshold'] == .10
             and type(environment['repetitions']) is int and environment['repetitions'] >= 50
             and type(environment['sessions']) is int and environment['sessions'] == 3, 'sampling protocol differs')
+    require(type(environment['batching_protocol_version']) is int
+            and environment['batching_protocol_version'] == PROTOCOL_VERSION
+            and environment['batch_sizes'] == list(BATCH_SIZES)
+            and all(type(value) is int for value in environment['batch_sizes'])
+            and type(environment['calibration_batches']) is int
+            and environment['calibration_batches'] == CALIBRATION_BATCHES
+            and type(environment['target_batch_ms']) is float
+            and environment['target_batch_ms'] == TARGET_BATCH_MS,
+            'batching protocol differs')
     backends = environment['session_backends']
     require(isinstance(backends, list) and len(backends) == 3
             and all(isinstance(b, dict) and set(b) == {'session', 'pid', 'backend_start'}
@@ -167,20 +181,24 @@ def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT,
         reader = csv.DictReader(source)
         require(reader.fieldnames == FIELDS, 'measurement field inventory differs/duplicate')
         rows = list(reader)
-    groups, pairs, keys = collections.defaultdict(list), collections.defaultdict(list), set()
+    groups, keys, group_order, last_group = collections.defaultdict(list), set(), [], None
     for row in rows:
         require(None not in row and all(v is not None for v in row.values()), 'malformed CSV row')
-        for field in ['session', 'size', 'run', 'pair_order', *COUNTERS]:
+        for field in ['session', 'size', 'level', 'batch', 'constituent', 'batch_size',
+                      'pair_order', *COUNTERS]:
             require(re.fullmatch('0|[1-9][0-9]*', row[field]) is not None, 'non-integer measurement counter: ' + field)
-        session, size, run = int(row['session']), int(row['size']), int(row['run'])
+        session, size = int(row['session']), int(row['size'])
+        level, batch = int(row['level']), int(row['batch'])
+        constituent, batch_size = int(row['constituent']), int(row['batch_size'])
         operation, impl = row['operation'], row['implementation']
         require(session in range(3) and size in SIZES and operation in OPERATIONS
                 and impl in IMPLEMENTATIONS, 'unexpected measurement group')
-        require(row['status'] == 'PASS' and row['warmup'] in {'True', 'False'}, 'non-PASS/noncanonical measurement')
-        order = IMPLEMENTATIONS if run % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
+        require(row['status'] == 'PASS' and row['phase'] in PHASES
+                and level == batch_size and level in BATCH_SIZES
+                and constituent < batch_size, 'non-PASS/noncanonical measurement')
+        order = arm_order(batch, constituent)
         require(int(row['pair_order']) == order.index(impl), 'pair order does not alternate')
-        pairs[session, size, operation, run].append(impl)
-        key = f'{session}:{size}:{operation}:{impl}:{run}'
+        key = evidence_key(session, size, operation, impl, row['phase'], level, batch, constituent)
         require(key not in keys, 'duplicate measurement')
         keys.add(key)
         require(key in plans and key in semantics, 'sample lacks plan/semantic evidence')
@@ -217,28 +235,83 @@ def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT,
                 count = 1 if impl == 'duality' or index == (1 if operation == 'merge_delete' else 0) else size
                 require(root['Node Type'] == 'ModifyTable' and root.get('Operation') == 'Merge', 'MERGE plan root/branch differs')
                 require(type(root.get('Tuples ' + action)) is int and root['Tuples ' + action] == count, 'MERGE affected cardinality differs')
-        groups[session, size, operation, impl].append(row)
+        group = session, size, operation
+        if group != last_group:
+            group_order.append(group); last_group = group
+        groups[group].append(row)
     require(set(plans) == keys and set(semantics) == keys, 'extra/missing plan/semantic samples')
     require(set(states) == used_states, 'unreferenced semantic state')
-    require(set(groups) == {(s, n, op, impl) for s in range(3) for n in SIZES for op in OPERATIONS for impl in IMPLEMENTATIONS}, 'reviewed workload groups incomplete')
-    for (*_, run), positions in pairs.items():
-        require(tuple(positions) == (IMPLEMENTATIONS if run % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))), 'paired samples reordered/incomplete')
-    warmup_counts = {}
-    for key, samples in groups.items():
-        require([int(r['run']) for r in samples] == list(range(len(samples))), 'sample run sequence differs')
-        warmups, measured = [[r for r in samples if r['warmup'] == flag] for flag in ['True', 'False']]
-        count = len(warmups)
-        require(10 <= count <= 30 and count % 5 == 0 and len(measured) == environment['repetitions']
-                and samples == warmups + measured, 'warm-up/measured sample structure differs')
-        require(stable([float(r['execution_ms']) for r in warmups]), 'warm-up stability gate failed')
-        warmup_counts[key] = count
-    for session in range(3):
-        for size in SIZES:
-            for operation in OPERATIONS:
-                counts = [warmup_counts[session, size, operation, impl] for impl in IMPLEMENTATIONS]
-                require(counts[0] == counts[1], 'paired warm-up counts differ')
-                for earlier in range(10, counts[0], 5):
-                    require(not all(stable([float(r['execution_ms']) for r in groups[session, size, operation, impl][:earlier]]) for impl in IMPLEMENTATIONS), 'unnecessary extra warm-ups')
+    expected_groups = {(s, n, op) for s in range(3) for n in SIZES for op in OPERATIONS}
+    require(set(groups) == expected_groups, 'reviewed workload groups incomplete')
+    expected_group_order = [(s, n, op) for s in range(3) for n in SIZES for op in OPERATIONS]
+    require(group_order == expected_group_order, 'global workload group order differs')
+    derived = {}
+    def expect(row, *, phase, level, batch, constituent, impl, pair_order):
+        require(row['phase'] == phase and int(row['level']) == level
+                and int(row['batch_size']) == level and int(row['batch']) == batch
+                and int(row['constituent']) == constituent and row['implementation'] == impl
+                and int(row['pair_order']) == pair_order, 'global constituent order differs')
+    for group in sorted(expected_groups, key=lambda v: (v[0], SIZES.index(v[1]), OPERATIONS.index(v[2]))):
+        samples, position, calibration, selected = groups[group], 0, {}, None
+        for level in BATCH_SIZES:
+            totals = {impl: [] for impl in IMPLEMENTATIONS}
+            for batch in range(CALIBRATION_BATCHES):
+                aggregate = {impl: 0.0 for impl in IMPLEMENTATIONS}
+                for constituent in range(level):
+                    for pair_order, impl in enumerate(arm_order(batch, constituent)):
+                        require(position < len(samples), 'calibration inventory incomplete')
+                        row = samples[position]; position += 1
+                        expect(row, phase='calibration', level=level, batch=batch,
+                               constituent=constituent, impl=impl, pair_order=pair_order)
+                        aggregate[impl] += float(row['execution_ms'])
+                for impl in IMPLEMENTATIONS:
+                    totals[impl].append(aggregate[impl])
+            calibration[level] = totals
+            if level_qualifies(totals):
+                selected = level
+                break
+        require(selected is not None and first_qualifying_level(calibration) == selected,
+                'calibration selection differs')
+        batch_totals = {'warmup': {impl: [] for impl in IMPLEMENTATIONS},
+                        'measured': {impl: [] for impl in IMPLEMENTATIONS}}
+        measured_rows = {impl: [] for impl in IMPLEMENTATIONS}
+        batch = 0
+        while position < len(samples) and samples[position]['phase'] == 'warmup':
+            aggregate = {impl: 0.0 for impl in IMPLEMENTATIONS}
+            for constituent in range(selected):
+                for pair_order, impl in enumerate(arm_order(batch, constituent)):
+                    require(position < len(samples), 'warm-up batch incomplete')
+                    row = samples[position]; position += 1
+                    expect(row, phase='warmup', level=selected, batch=batch,
+                           constituent=constituent, impl=impl, pair_order=pair_order)
+                    aggregate[impl] += float(row['execution_ms'])
+            for impl in IMPLEMENTATIONS:
+                batch_totals['warmup'][impl].append(aggregate[impl])
+            batch += 1
+        warmup_count = batch
+        require(10 <= warmup_count <= 30 and warmup_count % 5 == 0,
+                'warm-up batch inventory differs')
+        for measured_index in range(environment['repetitions']):
+            aggregate = {impl: 0.0 for impl in IMPLEMENTATIONS}
+            for constituent in range(selected):
+                for pair_order, impl in enumerate(arm_order(batch, constituent)):
+                    require(position < len(samples), 'measured batch incomplete')
+                    row = samples[position]; position += 1
+                    expect(row, phase='measured', level=selected, batch=batch,
+                           constituent=constituent, impl=impl, pair_order=pair_order)
+                    aggregate[impl] += float(row['execution_ms'])
+                    measured_rows[impl].append(row)
+            for impl in IMPLEMENTATIONS:
+                batch_totals['measured'][impl].append(aggregate[impl])
+            batch += 1
+        require(position == len(samples), 'extra calibration/batch constituents')
+        require(all(stable(batch_totals['warmup'][impl]) for impl in IMPLEMENTATIONS),
+                'warm-up stability gate failed')
+        for earlier in range(10, warmup_count, 5):
+            require(not all(stable(batch_totals['warmup'][impl][:earlier])
+                            for impl in IMPLEMENTATIONS), 'unnecessary extra warm-ups')
+        derived[group] = {'selected': selected, 'measured_rows': measured_rows,
+                          'batch_totals': batch_totals}
     expected_summaries = {(s, n, op) for s in range(3) for n in SIZES for op in OPERATIONS}
     seen = set()
     for summary in summaries:
@@ -247,13 +320,31 @@ def verify_results(folder: Path, *, candidate=None, trusted_key=None, repo=ROOT,
         require(type(key[0]) is int and type(key[1]) is int and key in expected_summaries and key not in seen, 'duplicate/unexpected summary')
         seen.add(key)
         for impl in IMPLEMENTATIONS:
-            calculated = statistics_for([float(r['execution_ms']) for r in groups[key + (impl,)] if r['warmup'] == 'False'])
-            require(isinstance(summary[impl], dict) and set(summary[impl]) == set(calculated), 'summary statistics differ')
-            require(all(type(summary[impl][field]) in {int, float} and math.isclose(summary[impl][field], value, rel_tol=1e-12, abs_tol=1e-12) for field, value in calculated.items()), 'summary differs from nearest-rank/raw statistics')
-        require(summary['direct']['median_ms'] > 0 and type(summary['median_ratio']) in {int, float}
-                and math.isclose(summary['median_ratio'], summary['duality']['median_ms'] / summary['direct']['median_ms'], rel_tol=1e-12, abs_tol=1e-12), 'summary ratio differs')
+            evidence = derived[key]
+            calculated = {
+                'individual': statistics_for([float(r['execution_ms'])
+                    for r in evidence['measured_rows'][impl]]),
+                'batch_mean': statistics_for([value / evidence['selected']
+                    for value in evidence['batch_totals']['measured'][impl]]),
+            }
+            require(isinstance(summary[impl], dict) and set(summary[impl]) == set(calculated),
+                    'summary statistics differ')
+            for channel in calculated:
+                require(isinstance(summary[impl][channel], dict)
+                        and set(summary[impl][channel]) == set(calculated[channel])
+                        and all(type(summary[impl][channel][field]) in {int, float}
+                            and math.isclose(summary[impl][channel][field], value,
+                                             rel_tol=1e-12, abs_tol=1e-12)
+                            for field, value in calculated[channel].items()),
+                        'summary differs from nearest-rank/raw statistics')
+        require(summary['direct']['batch_mean']['median_ms'] > 0
+                and type(summary['median_ratio']) in {int, float}
+                and math.isclose(summary['median_ratio'],
+                    summary['duality']['batch_mean']['median_ms']
+                    / summary['direct']['batch_mean']['median_ms'],
+                    rel_tol=1e-12, abs_tol=1e-12), 'summary ratio differs')
     require(seen == expected_summaries, 'summary inventory differs')
-    verify_measurement(folder, candidate, trusted_key)
+    verify_measurement(folder, candidate, trusted_key, repo)
     return {'status': 'PASS', 'measurements': len(rows), 'groups': len(summaries), 'candidate': candidate}
 
 

@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 from typing import Any
 
 from bench.installation import canonical, sha256, verify_attestation, require
 from bench.verify_results import verify_plan_node, verify_semantics, stable
 from bench.workload import SIZES, OPERATIONS, IMPLEMENTATIONS, statements
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PROTOCOL_VERSION,
+    TARGET_BATCH_MS, PHASES, arm_order, evidence_key, level_qualifies)
 
 JOURNAL = ".diagnostic-events.jsonl"
 MANIFEST = ".diagnostic-manifest.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 def _candidate_blob(repo: Path, candidate: str, path: str) -> bytes:
     result = subprocess.run(['git', '-C', str(repo), 'show', f'{candidate}:{path}'],
@@ -54,6 +58,7 @@ class DiagnosticJournal:
         self.previous = "0" * 64
         self.journal_hash = hashlib.sha256()
         self.closed = False
+        self.last_kind = None
         self.folder.mkdir(parents=True, exist_ok=True)
         if self.path.exists() or self.manifest.exists():
             raise RuntimeError("diagnostic evidence already exists")
@@ -62,19 +67,25 @@ class DiagnosticJournal:
     def append(self, kind: str, payload: dict[str, Any]) -> None:
         if self.closed:
             raise RuntimeError("diagnostic journal is already terminal")
-        body = {"sequence": self.sequence, "previous": self.previous,
-                "kind": kind, "payload": payload}
-        digest = sha256(canonical(body))
-        event = {**body, "digest": digest}
-        encoded = canonical(event) + b"\n"
-        with self.path.open("ab", buffering=0) as stream:
-            if stream.write(encoded) != len(encoded):
-                raise OSError("short diagnostic journal write")
-            os.fsync(stream.fileno())
-        self.journal_hash.update(encoded)
-        self.sequence += 1
-        self.previous = digest
-        self._manifest("INCOMPLETE/UNFINALISED")
+        blocked = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            body = {"sequence": self.sequence, "previous": self.previous,
+                    "kind": kind, "payload": payload}
+            digest = sha256(canonical(body))
+            event = {**body, "digest": digest}
+            encoded = canonical(event) + b"\n"
+            with self.path.open("ab", buffering=0) as stream:
+                if stream.write(encoded) != len(encoded):
+                    raise OSError("short diagnostic journal write")
+                os.fsync(stream.fileno())
+            self.journal_hash.update(encoded)
+            self.sequence += 1
+            self.previous = digest
+            self._manifest("INCOMPLETE/UNFINALISED")
+            self.last_kind = kind
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
     def _manifest(self, status: str) -> None:
         _atomic_json(self.manifest, {
@@ -131,15 +142,20 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
         previous = event["digest"]
     header = events[0]
     required = {"source_commit", "source_dirty", "installation_sha256", "installation_log_sha256",
-                "workload_sha256", "producer_sha256", "executor_sha256", "command", "started_at"}
+                "workload_sha256", "producer_sha256", "executor_sha256", "batching_sha256",
+                "diagnostic_verifier_sha256",
+                "command", "started_at", "semantic_check_only"}
     if header["kind"] != "header" or not isinstance(header["payload"], dict) \
             or set(header["payload"]) != required or header["payload"]["source_dirty"] is not False:
         raise RuntimeError("invalid diagnostic provenance")
     provenance = header["payload"]
+    require(type(provenance['semantic_check_only']) is bool,
+            'invalid diagnostic execution mode')
     require(re.fullmatch('[0-9a-f]{40}', candidate) is not None
             and provenance['source_commit'] == candidate, 'diagnostic candidate differs')
     for name in ['installation_sha256', 'installation_log_sha256', 'workload_sha256',
-                 'producer_sha256', 'executor_sha256']:
+                 'producer_sha256', 'executor_sha256', 'batching_sha256',
+                 'diagnostic_verifier_sha256']:
         require(isinstance(provenance[name], str)
                 and re.fullmatch('[0-9a-f]{64}', provenance[name]), 'invalid diagnostic digest')
     installation = folder / 'installation.json'
@@ -150,21 +166,27 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             'diagnostic installation log differs')
     require(sha256(_candidate_blob(repo, candidate, 'bench/workload.py')) == provenance['workload_sha256']
             and sha256(_candidate_blob(repo, candidate, 'bench/duality_overhead.py')) == provenance['producer_sha256']
-            and sha256(_candidate_blob(repo, candidate, 'bench/benchmark_execution.py')) == provenance['executor_sha256'],
+            and sha256(_candidate_blob(repo, candidate, 'bench/benchmark_execution.py')) == provenance['executor_sha256']
+            and sha256(_candidate_blob(repo, candidate, 'bench/batching_protocol.py')) == provenance['batching_sha256']
+            and sha256(_candidate_blob(repo, candidate, 'bench/diagnostic_evidence.py')) == provenance['diagnostic_verifier_sha256'],
             'diagnostic protocol identity differs')
     attestation = verify_attestation(installation, repo=repo, candidate=candidate,
                                      trusted_key=trusted_key)
 
     environment_seen = False
     sessions, states, completed_coordinates, active = set(), {}, set(), None
+    completed_results = {}
     statement_plans = []
     witnesses = {}
     last_completed = None
-    expected_session = expected_size = expected_operation = expected_run = expected_pair = 0
-    expected_warmup = True
-    warmup_exhausted = False
-    configured_repetitions = None
-    warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
+    expected_session = 0
+    group_order = [(session, size, operation) for session in range(3)
+                   for size in SIZES for operation in OPERATIONS]
+    group_index = level_index = expected_batch = expected_constituent = expected_pair = 0
+    stage, selected_level, configured_repetitions = 'calibration', None, None
+    semantic_mode = provenance['semantic_check_only']
+    awaiting_aggregate = blocked = False
+    warmup_totals = {implementation: [] for implementation in IMPLEMENTATIONS}
     for event in events[1:]:
         kind, payload = event['kind'], event['payload']
         require(isinstance(payload, dict), 'invalid diagnostic payload')
@@ -174,11 +196,21 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
             required_environment = {'postgresql', 'postgresql_major', 'server_settings', 'platform',
                 'cpu', 'memory', 'storage', 'load', 'database', 'pg_host', 'pg_port', 'pg_user',
                 'pg_bin', 'python', 'sizes', 'operations', 'warmups', 'maximum_warmups',
-                'stability_threshold', 'repetitions', 'sessions'}
+                'stability_threshold', 'repetitions', 'sessions', 'batching_protocol_version',
+                'batch_sizes', 'calibration_batches', 'target_batch_ms', 'semantic_check_only'}
             require(set(payload) == required_environment and payload['sizes'] == list(SIZES)
                     and payload['operations'] == list(OPERATIONS) and payload['warmups'] == 10
                     and payload['maximum_warmups'] == 30 and payload['stability_threshold'] == .10
                     and payload['repetitions'] >= 50 and payload['sessions'] == 3
+                    and type(payload['batching_protocol_version']) is int
+                    and payload['batching_protocol_version'] == PROTOCOL_VERSION
+                    and payload['batch_sizes'] == list(BATCH_SIZES)
+                    and all(type(value) is int for value in payload['batch_sizes'])
+                    and type(payload['calibration_batches']) is int
+                    and payload['calibration_batches'] == CALIBRATION_BATCHES
+                    and type(payload['target_batch_ms']) is float
+                    and payload['target_batch_ms'] == TARGET_BATCH_MS
+                    and payload['semantic_check_only'] is semantic_mode
                     and payload['postgresql_major'] in {'17', '18', '19'}
                     and isinstance(payload['postgresql'], str)
                     and payload['postgresql'].startswith(payload['postgresql_major'])
@@ -197,6 +229,8 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     'invalid diagnostic environment')
             environment_seen = True
             configured_repetitions = payload['repetitions']
+            if semantic_mode:
+                stage, selected_level = 'measured', 1
         elif kind == 'session-start':
             require(environment_seen and active is None and set(payload) == {'session', 'pid', 'backend_start'}
                     and payload['session'] == expected_session and payload['session'] == len(sessions)
@@ -205,6 +239,7 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and isinstance(payload['backend_start'], str) and payload['backend_start'],
                     'invalid diagnostic backend identity/order')
             sessions.add(payload['session'])
+            expected_session += 1
         elif kind == 'semantic-state':
             require(active is not None and set(payload) == {'sha256', 'value'}
                     and sha256(canonical(payload['value'])) == payload['sha256'],
@@ -230,24 +265,34 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                         'diagnostic rollback witness order differs')
             witnesses[payload['role']] = payload['sha256']
         elif kind == 'constituent-start':
-            require(environment_seen and sessions and active is None and not warmup_exhausted,
-                    'overlapping or post-exhaustion diagnostic constituent')
-            required_coordinates = {'session', 'size', 'operation', 'implementation', 'run', 'warmup', 'pair_order'}
+            require(environment_seen and sessions and active is None and not awaiting_aggregate
+                    and not blocked and group_index < len(group_order),
+                    'overlapping diagnostic constituent')
+            required_coordinates = {'session', 'size', 'operation', 'implementation', 'phase',
+                'level', 'batch', 'constituent', 'batch_size', 'pair_order'}
             require(set(payload) == required_coordinates and payload['session'] in sessions
                     and payload['size'] in SIZES and payload['operation'] in OPERATIONS
-                    and payload['implementation'] in IMPLEMENTATIONS and type(payload['run']) is int
-                    and payload['run'] >= 0 and type(payload['warmup']) is bool
+                    and payload['implementation'] in IMPLEMENTATIONS and payload['phase'] in PHASES
+                    and payload['level'] in BATCH_SIZES and payload['batch_size'] == payload['level']
+                    and type(payload['batch']) is int and payload['batch'] >= 0
+                    and type(payload['constituent']) is int
+                    and 0 <= payload['constituent'] < payload['batch_size']
                     and payload['pair_order'] in {0, 1}, 'invalid diagnostic constituent coordinates')
-            order = IMPLEMENTATIONS if payload['run'] % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
+            order = arm_order(payload['batch'], payload['constituent'])
             require(order[payload['pair_order']] == payload['implementation'], 'diagnostic pair order differs')
-            expected_order = IMPLEMENTATIONS if expected_run % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
-            require(payload == {'session': expected_session, 'size': SIZES[expected_size],
-                    'operation': OPERATIONS[expected_operation],
-                    'implementation': expected_order[expected_pair], 'run': expected_run,
-                    'warmup': expected_warmup, 'pair_order': expected_pair},
-                    'diagnostic global sample order differs')
-            coordinate_key = tuple(payload[name] for name in
-                ['session', 'size', 'operation', 'implementation', 'run'])
+            expected_group = group_order[group_index]
+            expected_level = BATCH_SIZES[level_index] if stage == 'calibration' else selected_level
+            require((payload['session'], payload['size'], payload['operation']) == expected_group
+                    and payload['phase'] == stage and payload['level'] == expected_level
+                    and payload['batch'] == expected_batch
+                    and payload['constituent'] == expected_constituent
+                    and payload['pair_order'] == expected_pair
+                    and payload['implementation'] == arm_order(expected_batch,
+                        expected_constituent)[expected_pair],
+                    'diagnostic global constituent order differs')
+            coordinate_key = evidence_key(payload['session'], payload['size'], payload['operation'],
+                payload['implementation'], payload['phase'], payload['level'], payload['batch'],
+                payload['constituent'])
             require(coordinate_key not in completed_coordinates,
                     'duplicate diagnostic logical attempt')
             active, statement_plans, witnesses = payload, [], {}
@@ -288,32 +333,98 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                     and payload.get('shared_dirtied_blocks') == sum(p['Plan'].get('Shared Dirtied Blocks', 0) for p in statement_plans)
                     and payload.get('wal_records') == sum(p['Plan'].get('WAL Records', 0) for p in statement_plans),
                     'diagnostic plan/counter reconciliation differs')
-            completed_coordinates.add(tuple(active[name] for name in
-                ['session', 'size', 'operation', 'implementation', 'run']))
+            coordinate_key = evidence_key(active['session'], active['size'], active['operation'],
+                active['implementation'], active['phase'], active['level'], active['batch'],
+                active['constituent'])
+            completed_coordinates.add(coordinate_key)
+            completed_results[coordinate_key] = payload['execution_ms']
             last_completed, active = dict(active), None
-            if expected_warmup:
-                warmup_values[last_completed['implementation']].append(payload['execution_ms'])
             if expected_pair == 0:
                 expected_pair = 1
             else:
                 expected_pair = 0
-                expected_run += 1
-                if expected_warmup and expected_run >= 10 and expected_run % 5 == 0 \
-                        and all(stable(warmup_values[name]) for name in IMPLEMENTATIONS):
-                    expected_warmup = False
-                elif expected_warmup and expected_run == 30:
-                    warmup_exhausted = True
-                warmup_count = len(warmup_values[IMPLEMENTATIONS[0]])
-                if not expected_warmup and expected_run == warmup_count + configured_repetitions:
-                    expected_operation += 1
-                    expected_run, expected_warmup = 0, True
-                    warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
-                    if expected_operation == len(OPERATIONS):
-                        expected_operation = 0
-                        expected_size += 1
-                        if expected_size == len(SIZES):
-                            expected_size = 0
-                            expected_session += 1
+                expected_constituent += 1
+                if expected_constituent == last_completed['level']:
+                    expected_constituent = 0
+                    if stage == 'calibration' and expected_batch + 1 < CALIBRATION_BATCHES:
+                        expected_batch += 1
+                    else:
+                        awaiting_aggregate = True
+        elif kind in {'calibration-level-complete', 'batch-complete', 'smoke-group-complete'}:
+            require(active is None and environment_seen and awaiting_aggregate,
+                    'diagnostic aggregate overlaps constituent')
+            common = {'session', 'size', 'operation', 'level', 'totals'}
+            require(group_index < len(group_order)
+                    and (payload.get('session'), payload.get('size'), payload.get('operation'))
+                        == group_order[group_index],
+                    'diagnostic aggregate group differs')
+            if kind == 'calibration-level-complete':
+                require(set(payload) == common and payload['level'] in BATCH_SIZES
+                        and stage == 'calibration' and payload['level'] == BATCH_SIZES[level_index]
+                        and isinstance(payload['totals'], dict)
+                        and set(payload['totals']) == set(IMPLEMENTATIONS),
+                        'invalid diagnostic calibration aggregate')
+                for implementation in IMPLEMENTATIONS:
+                    expected_totals = []
+                    for batch in range(CALIBRATION_BATCHES):
+                        expected_totals.append(sum(completed_results[evidence_key(payload['session'],
+                            payload['size'], payload['operation'], implementation, 'calibration',
+                            payload['level'], batch, constituent)]
+                            for constituent in range(payload['level'])))
+                    require(len(payload['totals'][implementation]) == len(expected_totals)
+                            and all(math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12)
+                                    for observed, expected in zip(payload['totals'][implementation],
+                                                                  expected_totals)),
+                            'diagnostic calibration total differs')
+                awaiting_aggregate = False
+                if level_qualifies(payload['totals']):
+                    selected_level, stage = payload['level'], 'warmup'
+                    expected_batch = 0
+                    warmup_totals = {implementation: [] for implementation in IMPLEMENTATIONS}
+                else:
+                    level_index += 1
+                    if level_index == len(BATCH_SIZES):
+                        blocked = True
+                    else:
+                        expected_batch = 0
+            else:
+                require(set(payload) == common | {'phase', 'batch'}
+                        and payload['phase'] == stage and payload['level'] == selected_level
+                        and payload['batch'] == expected_batch
+                        and ((kind == 'smoke-group-complete') == semantic_mode)
+                        and isinstance(payload['totals'], dict)
+                        and set(payload['totals']) == set(IMPLEMENTATIONS),
+                        'invalid diagnostic batch aggregate')
+                for implementation in IMPLEMENTATIONS:
+                    expected_total = sum(completed_results[evidence_key(payload['session'],
+                        payload['size'], payload['operation'], implementation, payload['phase'],
+                        payload['level'], payload['batch'], constituent)]
+                        for constituent in range(payload['level']))
+                    require(math.isclose(payload['totals'][implementation], expected_total,
+                                         rel_tol=1e-12, abs_tol=1e-12),
+                            'diagnostic batch total differs')
+                awaiting_aggregate = False
+                if kind == 'smoke-group-complete':
+                    group_index += 1
+                    expected_batch = 0
+                elif stage == 'warmup':
+                    for implementation in IMPLEMENTATIONS:
+                        warmup_totals[implementation].append(payload['totals'][implementation])
+                    expected_batch += 1
+                    if expected_batch >= 10 and expected_batch % 5 == 0:
+                        if all(stable(warmup_totals[implementation])
+                               for implementation in IMPLEMENTATIONS):
+                            stage = 'measured'
+                        elif expected_batch == 30:
+                            blocked = True
+                else:
+                    expected_batch += 1
+                    warmup_count = len(warmup_totals[IMPLEMENTATIONS[0]])
+                    if expected_batch == warmup_count + configured_repetitions:
+                        group_index += 1
+                        stage, selected_level = 'calibration', None
+                        level_index = expected_batch = 0
+                        warmup_totals = {implementation: [] for implementation in IMPLEMENTATIONS}
         elif kind == 'terminal-failure':
             require(event is events[-1] and set(payload) == {'phase', 'error_type', 'error', 'restoration', 'interrupted'}
                     and payload['restoration'] in {'verified', 'failed', 'not-reached'},
@@ -329,8 +440,11 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                 if payload['phase'] == 'statement':
                     index = payload['interrupted'].get('statement')
                     expected = statements(active['operation'], active['implementation'], active['size'])
-                    require(type(index) is int and index == len(statement_plans) and index < len(expected)
-                            and payload['interrupted'].get('sql') == expected[index],
+                    require(type(index) is int and index in {len(statement_plans), len(statement_plans) - 1}
+                            and 0 <= index < len(expected)
+                            and payload['interrupted'].get('sql') == expected[index]
+                            and (index == len(statement_plans)
+                                 or statement_plans[index] is not None),
                             'diagnostic interrupted statement differs')
                     require(set(witnesses) == {'before'},
                             'diagnostic statement phase differs from semantic progress')
@@ -347,10 +461,12 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
                             'diagnostic restoration phase differs from progress')
             else:
                 require(payload['phase'] == 'database-setup'
-                        or (payload['phase'] == 'between-arms' and last_completed is not None),
+                        or (payload['phase'] in {'between-arms', 'restoration'}
+                            and last_completed is not None),
                         'diagnostic failure phase has no active constituent')
             if payload['restoration'] == 'verified':
-                require(active is None and last_completed is not None and payload['phase'] == 'between-arms',
+                require(active is None and last_completed is not None
+                        and payload['phase'] in {'between-arms', 'restoration'},
                         'diagnostic restoration is not witnessed')
         else:
             raise RuntimeError('unknown diagnostic event kind')
@@ -362,7 +478,7 @@ def verify_diagnostic(folder: Path, *, candidate: str, trusted_key: Path,
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("corrupt diagnostic manifest") from error
     expected = {"schema_version", "purpose", "status", "events", "last_event", "journal_sha256"}
-    if not isinstance(manifest, dict) or set(manifest) != expected or manifest["schema_version"] != 1 \
+    if not isinstance(manifest, dict) or set(manifest) != expected or manifest["schema_version"] != SCHEMA_VERSION \
             or manifest["purpose"] != "diagnostic-only; never publishable benchmark evidence" \
             or type(manifest["events"]) is not int or not 0 < manifest["events"] <= len(events):
         raise RuntimeError("diagnostic manifest binding differs")

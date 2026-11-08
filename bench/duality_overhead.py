@@ -27,6 +27,8 @@ from bench.fixture_health import CHILD_INDEX_SQL, assert_fixture_health
 from bench.attest_installation import PROBE_SCHEMA, catalogue_and_ddl, installed_files
 from bench.diagnostic_evidence import DiagnosticJournal
 from bench.benchmark_execution import explain
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PROTOCOL_VERSION,
+    TARGET_BATCH_MS, arm_order, evidence_key, level_qualifies)
 from tools.strict_results import loads
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,14 +166,18 @@ diagnostic = DiagnosticJournal(OUT, {
     'workload_sha256': sha256((ROOT / 'bench/workload.py').read_bytes()),
     'producer_sha256': sha256(Path(__file__).read_bytes()),
     'executor_sha256': sha256((ROOT / 'bench/benchmark_execution.py').read_bytes()),
+    'batching_sha256': sha256((ROOT / 'bench/batching_protocol.py').read_bytes()),
+    'diagnostic_verifier_sha256': sha256((ROOT / 'bench/diagnostic_evidence.py').read_bytes()),
     'command': [sys.executable, *sys.argv],
     'started_at': STARTED,
+    'semantic_check_only': args.semantic_check_only,
 })
 original_excepthook = sys.excepthook
 def diagnostic_excepthook(error_type, error, traceback):
     try:
         if not (isinstance(error, OSError) and error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO}):
             restoration = ('verified' if diagnostic_phase['phase'] == 'between-arms'
+                           or diagnostic.last_kind == 'constituent-complete'
                            else 'failed' if diagnostic_phase['phase'] in {'rollback', 'restoration'}
                            else 'not-reached')
             diagnostic.fail(diagnostic_phase['phase'], error, restoration,
@@ -236,6 +242,9 @@ diagnostic.append('environment', {
     'pg_bin': str(PG.resolve()), 'python': sys.version, 'sizes': list(SIZES),
     'operations': list(OPERATIONS), 'warmups': WARMUPS, 'maximum_warmups': 30,
     'stability_threshold': .10, 'repetitions': REPETITIONS, 'sessions': 3,
+    'batching_protocol_version': PROTOCOL_VERSION, 'batch_sizes': list(BATCH_SIZES),
+    'calibration_batches': CALIBRATION_BATCHES, 'target_batch_ms': TARGET_BATCH_MS,
+    'semantic_check_only': args.semantic_check_only,
 })
 
 
@@ -280,6 +289,61 @@ def intern(state):
     return identity
 
 
+def run_constituent(session, coordinates):
+    implementation = coordinates['implementation']
+    size, operation = coordinates['size'], coordinates['operation']
+    diagnostic_phase.update(phase='constituent', interrupted=coordinates)
+    diagnostic.append('constituent-start', coordinates)
+    session.execute('BEGIN;')
+    before = snapshot(session, size)
+    before_id = intern(before)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'before', 'sha256': before_id})
+    workload = statements(operation, implementation, size)
+    def retain_statement(index, statement, plan):
+        diagnostic.append('statement-complete', {**coordinates, 'statement': index,
+            'sql': statement, 'plan': plan})
+        if index + 1 < len(workload):
+            inject_diagnostic_fault('statement', coordinates,
+                                    next_statement=(index + 1, workload[index + 1]))
+    def identify_statement(index, statement):
+        diagnostic_phase.update(phase='statement', interrupted={**coordinates,
+            'statement': index, 'sql': statement})
+    result = explain(session, workload, retain_statement, identify_statement)
+    diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
+    inject_diagnostic_fault('semantic-read-back', coordinates)
+    after = snapshot(session, size)
+    after_id = intern(after)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'after', 'sha256': after_id})
+    diagnostic_phase.update(phase='rollback', interrupted=coordinates)
+    inject_diagnostic_fault('rollback', coordinates)
+    session.execute('ROLLBACK;')
+    diagnostic_phase.update(phase='restoration', interrupted=coordinates)
+    inject_diagnostic_fault('restoration', coordinates)
+    restored = snapshot(session, size)
+    restored_id = intern(restored)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'rollback', 'sha256': restored_id})
+    semantic = {'before': before, 'after': after, 'rollback': restored,
+        'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
+    verify_semantics(semantic, size, operation)
+    key = evidence_key(coordinates['session'], size, operation, implementation,
+                       coordinates['phase'], coordinates['level'], coordinates['batch'],
+                       coordinates['constituent'])
+    semantic_samples[key] = {'before': before_id, 'after': after_id,
+                             'rollback': restored_id, 'branch': semantic['branch']}
+    saved_plans[key] = {'statements': workload, 'plans': result.pop('plans')}
+    row = {**coordinates, **result, 'status': 'PASS'}
+    rows.append(row)
+    diagnostic.append('constituent-complete', {**coordinates,
+        'execution_ms': result['execution_ms'], 'planning_ms': result['planning_ms'],
+        'shared_hit_blocks': result['shared_hit_blocks'],
+        'shared_dirtied_blocks': result['shared_dirtied_blocks'],
+        'wal_records': result['wal_records'], 'before': before_id, 'after': after_id,
+        'rollback': restored_id, 'restoration': 'verified'})
+    diagnostic_phase.update(phase='between-arms', interrupted=coordinates)
+    inject_diagnostic_fault('between-arms', coordinates)
+    return result
+
+
 for session_number in range(1 if args.semantic_check_only else 3):
     session = PersistentPsql()
     try:
@@ -290,75 +354,65 @@ for session_number in range(1 if args.semantic_check_only else 3):
         diagnostic.append('session-start', {'session': session_number, **backend})
         for size in SIZES:
             for operation in OPERATIONS:
-                warmup_values = {impl: [] for impl in IMPLEMENTATIONS}
-                warmup_count, repetition = (0 if args.semantic_check_only else None), 0
-                while warmup_count is None or repetition < warmup_count + (1 if args.semantic_check_only else REPETITIONS):
-                    warmup = warmup_count is None
-                    order = IMPLEMENTATIONS if repetition % 2 == 0 else tuple(reversed(IMPLEMENTATIONS))
-                    for pair_order, implementation in enumerate(order):
-                        coordinates = {'session': session_number, 'size': size, 'operation': operation,
-                            'implementation': implementation, 'run': repetition, 'warmup': warmup,
-                            'pair_order': pair_order}
-                        diagnostic_phase.update(phase='constituent', interrupted=coordinates)
-                        diagnostic.append('constituent-start', coordinates)
-                        session.execute('BEGIN;')
-                        before = snapshot(session, size)
-                        before_id = intern(before)
-                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'before',
-                                                               'sha256': before_id})
-                        workload = statements(operation, implementation, size)
-                        def retain_statement(index, statement, plan):
-                            diagnostic.append('statement-complete', {**coordinates, 'statement': index,
-                                'sql': statement, 'plan': plan})
-                            if index + 1 < len(workload):
-                                inject_diagnostic_fault('statement', coordinates,
-                                    next_statement=(index + 1, workload[index + 1]))
-                        def identify_statement(index, statement):
-                            diagnostic_phase.update(phase='statement', interrupted={**coordinates,
-                                'statement': index, 'sql': statement})
-                        result = explain(session, workload, retain_statement, identify_statement)
-                        diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
-                        inject_diagnostic_fault('semantic-read-back', coordinates)
-                        after = snapshot(session, size)
-                        after_id = intern(after)
-                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'after',
-                                                               'sha256': after_id})
-                        diagnostic_phase.update(phase='rollback', interrupted=coordinates)
-                        inject_diagnostic_fault('rollback', coordinates)
-                        session.execute('ROLLBACK;')
-                        diagnostic_phase.update(phase='restoration', interrupted=coordinates)
-                        inject_diagnostic_fault('restoration', coordinates)
-                        restored = snapshot(session, size)
-                        restored_id = intern(restored)
-                        diagnostic.append('semantic-witness', {**coordinates, 'role': 'rollback',
-                                                               'sha256': restored_id})
-                        semantic = {'before': before, 'after': after, 'rollback': restored,
-                            'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
-                        verify_semantics(semantic, size, operation)
-                        key = f'{session_number}:{size}:{operation}:{implementation}:{repetition}'
-                        semantic_samples[key] = {'before': before_id, 'after': after_id,
-                                                 'rollback': restored_id, 'branch': semantic['branch']}
-                        saved_plans[key] = {'statements': workload, 'plans': result.pop('plans')}
-                        rows.append({'session': session_number, 'size': size, 'operation': operation,
-                            'implementation': implementation, 'run': repetition, 'warmup': warmup,
-                            'pair_order': pair_order, **result, 'status': 'PASS'})
-                        diagnostic.append('constituent-complete', {**coordinates,
-                            'execution_ms': result['execution_ms'], 'planning_ms': result['planning_ms'],
-                            'shared_hit_blocks': result['shared_hit_blocks'],
-                            'shared_dirtied_blocks': result['shared_dirtied_blocks'],
-                            'wal_records': result['wal_records'],
-                            'before': semantic_samples[key]['before'], 'after': semantic_samples[key]['after'],
-                            'rollback': semantic_samples[key]['rollback'], 'restoration': 'verified'})
-                        diagnostic_phase.update(phase='between-arms', interrupted=coordinates)
-                        inject_diagnostic_fault('between-arms', coordinates)
-                        if warmup:
-                            warmup_values[implementation].append(result['execution_ms'])
-                    repetition += 1
-                    if warmup and repetition >= 10 and repetition % 5 == 0:
+                if args.semantic_check_only:
+                    aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                    for pair_order, implementation in enumerate(arm_order(0, 0)):
+                        result = run_constituent(session, {'session': session_number, 'size': size,
+                            'operation': operation, 'implementation': implementation,
+                            'phase': 'measured', 'level': 1, 'batch': 0, 'constituent': 0,
+                            'batch_size': 1, 'pair_order': pair_order})
+                        aggregate[implementation] += result['execution_ms']
+                    diagnostic.append('smoke-group-complete', {'session': session_number,
+                        'size': size, 'operation': operation, 'level': 1, 'batch': 0,
+                        'phase': 'measured', 'totals': aggregate})
+                    continue
+                selected = None
+                for level in BATCH_SIZES:
+                    totals = {implementation: [] for implementation in IMPLEMENTATIONS}
+                    for batch in range(CALIBRATION_BATCHES):
+                        aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                        for constituent in range(level):
+                            for pair_order, implementation in enumerate(arm_order(batch, constituent)):
+                                result = run_constituent(session, {'session': session_number, 'size': size,
+                                    'operation': operation, 'implementation': implementation,
+                                    'phase': 'calibration', 'level': level, 'batch': batch,
+                                    'constituent': constituent, 'batch_size': level,
+                                    'pair_order': pair_order})
+                                aggregate[implementation] += result['execution_ms']
+                        for implementation in IMPLEMENTATIONS:
+                            totals[implementation].append(aggregate[implementation])
+                    diagnostic.append('calibration-level-complete', {'session': session_number,
+                        'size': size, 'operation': operation, 'level': level, 'totals': totals})
+                    if level_qualifies(totals):
+                        selected = level
+                        break
+                if selected is None:
+                    raise RuntimeError(f'calibration batch-size cap exhausted: {session_number}:{size}:{operation}')
+                warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
+                warmup_count, batch = None, 0
+                while warmup_count is None or batch < warmup_count + REPETITIONS:
+                    phase = 'warmup' if warmup_count is None else 'measured'
+                    aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                    for constituent in range(selected):
+                        for pair_order, implementation in enumerate(arm_order(batch, constituent)):
+                            result = run_constituent(session, {'session': session_number, 'size': size,
+                                'operation': operation, 'implementation': implementation,
+                                'phase': phase, 'level': selected, 'batch': batch,
+                                'constituent': constituent, 'batch_size': selected,
+                                'pair_order': pair_order})
+                            aggregate[implementation] += result['execution_ms']
+                    diagnostic.append('batch-complete', {'session': session_number, 'size': size,
+                        'operation': operation, 'phase': phase, 'level': selected,
+                        'batch': batch, 'totals': aggregate})
+                    if phase == 'warmup':
+                        for implementation in IMPLEMENTATIONS:
+                            warmup_values[implementation].append(aggregate[implementation])
+                    batch += 1
+                    if phase == 'warmup' and batch >= 10 and batch % 5 == 0:
                         if all(stable(values) for values in warmup_values.values()):
-                            warmup_count = repetition
-                        elif repetition == 30:
-                            raise RuntimeError(f'warm-up stability FAIL after 30 pairs: {session_number}:{size}:{operation}')
+                            warmup_count = batch
+                        elif batch == 30:
+                            raise RuntimeError(f'warm-up stability FAIL after 30 batches: {session_number}:{size}:{operation}')
     except BaseException:
         try:
             session.close()
@@ -385,18 +439,31 @@ summary = []
 for session_number in range(3):
     for size in SIZES:
         for operation in OPERATIONS:
-            values = {impl: statistics_for([r['execution_ms'] for r in rows if r['session'] == session_number
-                and r['size'] == size and r['operation'] == operation and r['implementation'] == impl
-                and not r['warmup']]) for impl in IMPLEMENTATIONS}
+            values = {}
+            for impl in IMPLEMENTATIONS:
+                measured = [r for r in rows if r['session'] == session_number and r['size'] == size
+                    and r['operation'] == operation and r['implementation'] == impl
+                    and r['phase'] == 'measured']
+                batches = {}
+                for row in measured:
+                    batches.setdefault(row['batch'], []).append(row['execution_ms'])
+                values[impl] = {
+                    'individual': statistics_for([r['execution_ms'] for r in measured]),
+                    'batch_mean': statistics_for([sum(group) / len(group)
+                                                  for group in batches.values()]),
+                }
             summary.append({'session': session_number, 'size': size, 'operation': operation, **values,
-                            'median_ratio': values['duality']['median_ms'] / values['direct']['median_ms']})
+                'median_ratio': values['duality']['batch_mean']['median_ms']
+                                / values['direct']['batch_mean']['median_ms']})
 (OUT / 'summary.json').write_text(json.dumps(summary, indent=2))
-metadata = {'schema_version': 3, 'run_id': RUN_ID, 'postgresql': postgresql,
+metadata = {'schema_version': 4, 'run_id': RUN_ID, 'postgresql': postgresql,
     'postgresql_major': postgresql_major,
     'platform': platform.platform(), 'cpu': Path('/proc/cpuinfo').read_text(),
     'memory': Path('/proc/meminfo').read_text(), 'storage': str(os.statvfs(OUT)), 'load': str(os.getloadavg()),
     'sizes': SIZES, 'operations': OPERATIONS, 'warmups': WARMUPS, 'maximum_warmups': 30,
     'stability_threshold': .10, 'repetitions': REPETITIONS, 'sessions': 3, 'session_backends': backends,
+    'batching_protocol_version': PROTOCOL_VERSION, 'batch_sizes': BATCH_SIZES,
+    'calibration_batches': CALIBRATION_BATCHES, 'target_batch_ms': TARGET_BATCH_MS,
     'server_settings': settings, 'database': DB, 'pg_host': args.pg_host, 'pg_port': str(args.pg_port),
     'pg_user': args.pg_user, 'pg_bin': str(PG.resolve()), 'command': [sys.executable, *sys.argv],
     'started_at': STARTED, 'finished_at': datetime.now(timezone.utc).isoformat(), 'python': sys.version,
