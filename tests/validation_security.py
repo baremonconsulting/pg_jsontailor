@@ -11,9 +11,10 @@ import argparse
 import json
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import time
-from concurrent_writer import held_writer
+from concurrent_writer import held_writer, require_commit, wait_for
 
 
 def lit(value: str) -> str:
@@ -159,7 +160,9 @@ class Runner:
         fdu=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items}',(data->'items')-0) WHERE _id=42;",False);fdd=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False);obs.append(f"f_child_delete={self.state(fdu)}/{self.state(fdd)}");passed &= self.state(fdu)=="42501" and self.state(fdd)=="42501"
         # e and g: hostile path; visible but non-lockable children.
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;CREATE SCHEMA IF NOT EXISTS rusive_schema;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
+        status_before=self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;")
         status=self.run("SET ROLE jt_test_data;SET search_path=rusive_schema,pg_catalog;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"ok\"') WHERE _id=42;",False)
+        status_after=self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;")
         self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
         changed=self.run("SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{items,0,qty}','3') WHERE _id=42;",False);deleted=self.run("SET ROLE jt_test_data;"+self.delete_sql(),False)
         # g1: an uncommitted direct child change must not make the view deletion wait.
@@ -171,18 +174,41 @@ class Runner:
         final = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
         expected.pop("_metadata"); final.pop("_metadata")
         passed &= final == expected and self.scalar("SELECT quantity FROM shop.order_items WHERE item_id=1;") == "9"
-        # g5: status-only update holds no child lock, so a direct child update does not wait.
-        self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(false);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
+        # g5: a root-only replacement locks the visible children contributing to its ETag.
+        self.reset();self.run("GRANT USAGE ON SCHEMA shop TO jt_test_data;GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA shop TO jt_test_data;GRANT SELECT,UPDATE,INSERT,DELETE ON shop.orders_dv TO jt_test_data;ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;CREATE POLICY g_sel ON shop.order_items FOR SELECT TO jt_test_data USING(true);CREATE POLICY g_upd ON shop.order_items FOR UPDATE TO jt_test_data USING(true) WITH CHECK(true);CREATE POLICY g_del ON shop.order_items FOR DELETE TO jt_test_data USING(true);")
         expected = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        initial_etag = expected["_metadata"]["etag"]
         expected["status"] = "held"; expected["items"][0]["qty"] = 8
-        with held_writer(self.cmd(), self.scalar,
-                         "SET ROLE jt_test_data;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"held\"') WHERE _id=42;", "shop.orders"):
-            started=time.monotonic();g5=self.run("SET statement_timeout='2s';UPDATE shop.order_items SET quantity=8 WHERE item_id=1;",False);elapsed5=time.monotonic()-started
+        contender_name = "jt_rls_contender_" + secrets.token_hex(6)
+        contender = None
+        started=time.monotonic()
+        try:
+            with held_writer(self.cmd(), self.scalar,
+                             "SET ROLE jt_test_data;SET search_path=rusive_schema,pg_catalog;UPDATE shop.orders_dv SET data=jsonb_set(data,'{status}','\"held\"') WHERE _id=42;", "shop.orders"):
+                contender = subprocess.Popen(self.cmd(), stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                contender.stdin.write("\\set VERBOSITY verbose\n"
+                    f"SET application_name='{contender_name}';SET statement_timeout='10s';"
+                    "BEGIN;UPDATE shop.order_items SET quantity=8 WHERE item_id=1;COMMIT;\n")
+                contender.stdin.flush()
+                wait_for(self.scalar, contender,
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity c "
+                    "CROSS JOIN LATERAL unnest(pg_blocking_pids(c.pid)) blocker_pid "
+                    "JOIN pg_stat_activity b ON b.pid=blocker_pid "
+                    f"WHERE c.application_name='{contender_name}' "
+                    "AND b.application_name LIKE 'jt_writer_%');", "RLS contender")
+            require_commit(contender, timeout=10)
+            g5_state = "committed"
+        finally:
+            if contender is not None and contender.poll() is None:
+                contender.terminate();contender.communicate(timeout=5)
+        elapsed5=time.monotonic()-started
         final = json.loads(self.scalar("SELECT data FROM shop.orders_dv WHERE _id=42;"))
+        final_etag = final["_metadata"]["etag"]
         expected.pop("_metadata"); final.pop("_metadata")
-        passed &= final == expected and self.scalar("SELECT status||':'||(SELECT quantity FROM shop.order_items WHERE item_id=1) FROM shop.orders WHERE order_id=42;") == "held:8"
-        obs.append(f"e_g={status.returncode}/{self.state(changed)}/{self.state(deleted)};g1={self.state(g1)}/{elapsed1:.3f};g5={g5.returncode}/{elapsed5:.3f}")
-        passed &= status.returncode==0 and self.state(changed)=="42501" and self.state(deleted)=="42501" and self.state(g1)=="42501" and g5.returncode==0
+        passed &= final == expected and initial_etag != final_etag and self.scalar("SELECT status||':'||(SELECT quantity FROM shop.order_items WHERE item_id=1) FROM shop.orders WHERE order_id=42;") == "held:8"
+        obs.append(f"e_g={self.state(status)}/{self.state(changed)}/{self.state(deleted)};g1={self.state(g1)}/{elapsed1:.3f};g5={g5_state}/{elapsed5:.3f}")
+        passed &= self.state(status)=="42501" and status_before==status_after and self.state(changed)=="42501" and self.state(deleted)=="42501" and self.state(g1)=="42501" and g5_state=="committed"
         self.add(10,"V1/RLS","PASS" if passed else "FAIL","permissions, hidden rows/object, hostile path and non-lockable rows",";".join(obs),"RLS policy matrices are recreated between subcases; two-session races are covered by test 5 and the isolation suite.")
 
     def test12(self):
