@@ -6,9 +6,18 @@ Demonstrate successful and stale-token UPDATE/DELETE from a clean psql session.
 
 ## Prerequisites
 
-Recipes 01–05 in a disposable database, run as the reviewed application role.
-Start `psql -X -v ON_ERROR_STOP=1 -d generator`; no token variables are supplied.
+The retained README quick-start fixture or recipe 1, followed by recipe 5, in a
+disposable database, run as the reviewed application role. Recipes 3–4 are the
+separate generator path and are not prerequisites for this walkthrough.
+Start `psql -X -v ON_ERROR_STOP=1 -d pgjt_cookbook`; no token variables are supplied.
 The transaction rolls all demonstration data back.
+In that session run `SET ROLE app_role;` and verify
+`SELECT current_user;` returns `app_role` before executing the block below.
+
+`\gset` stores a one-row SELECT's named columns as psql variables. For example,
+the SELECT below stores `replacement` and `etag`; `:'replacement'` and `:'etag'`
+then quote those values as SQL literals. These are psql syntax, not server
+parameters; applications bind their own parameters. No external `-v` token is needed.
 
 ## Steps
 

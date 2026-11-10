@@ -6,7 +6,8 @@ Rehearse a supported name-preserving migration atomically.
 
 ## Prerequisites
 
-Disposable database after recipes 01–05, owner session, no active writers,
+Disposable retained quick-start/recipe 1 database with recipe 5 grants, owner
+session, no active writers,
 reviewed current spec/SQL, deployed manifest, grants and tested backup/restore.
 Use `psql -X -v ON_ERROR_STOP=1`. This example rolls back; it is not approval
 to apply production DDL.
@@ -35,6 +36,12 @@ inside a savepoint, roll that data back, capture post-change catalogue evidence
 and COMMIT only after approval. Reapply only reviewed capabilities if recreation
 is required. Mapped-name/specification changes use the explicit recreation
 procedure in UPGRADING, not this stored-spec regenerator.
+Dropping or changing the type of a mapped column is normally blocked by binding
+view dependencies. In the reviewed write-free transaction, inventory dependants,
+drop the exact generated mapping objects, apply the relational change, recreate
+from the updated specification, restore reviewed grants and run acceptance
+before COMMIT. First rehearse this order on a matching disposable schema; do not
+try to regenerate an unchanged specification before a mapped-column rename.
 
 ## Expected result
 

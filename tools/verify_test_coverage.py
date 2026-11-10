@@ -46,11 +46,11 @@ EXPECTED_CLAIMS = {
     "PGJT-72/CLAIM-GENERATED-SQL-NOTICES",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "44f0a9243350ea2b65a290759d3194459db84227b73a8b3117d7f36a5526e8a7",
-    "claims": "755a614ab37d460ba2f636f9cfa177b2efac78e078bf0004f204793527c4f11b",
+    "requirements": "a9c06c516f26963fa1208e8abb92df01fa872e0edad9ba4b9cf3df5a899cc1f4",
+    "claims": "e5395cfd3eaa0615a6a8e8013b12f4c5302fe7e2255291f3679c7a001fe95dca",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "supplemental_evidence": "e7216a712b846ee927daf3d0d05c4bf703ea4e64e6aa3c4cbe2778c224534174",
-    "runtime_evidence": "390672679d189786504efb399e413872088cd4b462d06f230b0b802bbe4a7538",
+    "supplemental_evidence": "5822951d3a5faaa2a41170eb95ed8d1a60cb70018b76f6963493fb8fdd46f5f5",
+    "runtime_evidence": "e2b7e7c42dd8e8b3288000cea867792c7b8cad2214d846063728977ed4521fda",
 }
 
 
@@ -80,6 +80,10 @@ def source(entry: dict, *, label: str) -> str:
 
 
 def verify(manifest: dict) -> None:
+    # A changed DDL hash or removed behavioural statement is a coverage failure.
+    sys.path.insert(0, str(ROOT / "tests"))
+    from documentation_regressions import documentation_statement_negatives
+    documentation_statement_negatives()
     require(manifest.get("schema_version") == 1, "unsupported coverage schema")
     supported = manifest.get("supported_postgresql")
     require(supported == ["17", "18", "19"], "supported PostgreSQL matrix differs")
@@ -120,7 +124,8 @@ def verify(manifest: dict) -> None:
         source(item, label=jira)
 
     expected = ({f"PGJT-{number}" for number in range(2, 39)}
-                | {f"PGJT-{number}" for number in range(111, 131)})
+                | {f"PGJT-{number}" for number in range(111, 131)}
+                | {"PGJT-134", "PGJT-142", "PGJT-146"})
     require(jira_ids == expected,
             "reviewed Jira coverage differs: missing="
             + repr(sorted(expected - jira_ids)) + ", extra="

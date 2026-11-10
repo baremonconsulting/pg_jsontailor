@@ -455,6 +455,124 @@ def insert_column_identity_matrix(db: Database, record) -> None:
            repr(outcomes))
 
 
+def column_identity_statement(shape: str, path: str, column_id: int | None,
+                              document: dict) -> str:
+    """Use the real SQL entry points, including COPY's text protocol."""
+    target = f"jt_shape_{shape}.documents"
+    column = "NULL::bigint" if column_id is None else str(column_id) + "::bigint"
+    payload = quote(json.dumps(document)) + "::jsonb"
+    if path == "merge_insert":
+        return (f"MERGE INTO {target} d USING (VALUES ({column},{payload})) s(id,data) "
+                "ON false WHEN NOT MATCHED THEN INSERT(_id,data) VALUES(s.id,s.data);")
+    if path == "copy":
+        field = json.dumps(document).replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+        copy_id = "\\N" if column_id is None else str(column_id)
+        return f"COPY {target} (_id,data) FROM STDIN;\n{copy_id}\t{field}\n\\.\n"
+    if path == "update":
+        return f"UPDATE {target} SET _id={column},data={payload} WHERE _id=1;"
+    if path == "merge_update":
+        return (f"MERGE INTO {target} d USING (VALUES (1,{column},{payload})) s(id,new_id,data) "
+                "ON d._id=s.id WHEN MATCHED THEN UPDATE SET _id=s.new_id,data=s.data;")
+    raise ValueError("unsupported column identity path: " + path)
+
+
+def column_identity_paths(db: Database, record) -> None:
+    """PGJT-146: INSERT-column semantics also apply to MERGE/COPY; IDs are immutable."""
+    outcomes, mutations = [], []
+    missing_guard = ("IF NEW._id IS NOT NULL AND NOT (doc?'_id') THEN RAISE EXCEPTION "
+                     "USING ERRCODE='PT422',MESSAGE='_id column requires _id in the document';END IF;")
+    for shape in SHAPES:
+        setup(db, shape)
+        schema = f"jt_shape_{shape}"
+        tables = ["root"] + (["detail"] if has_object(shape) else []) + (
+            ["item"] if has_array(shape) else [])
+
+        def snapshot():
+            return db.value("SELECT jsonb_build_object(" + ",".join(
+                f"{quote(table)},(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM {schema}.{table} t)"
+                for table in tables) + ")::text;")
+
+        for path_index, path in enumerate(("merge_insert", "copy")):
+            base = 6000 + 100 * path_index
+            cases = (
+                ("column-only", base, new_document(shape, None, populated=False), False),
+                ("different", base + 1, new_document(shape, base + 2, populated=False), False),
+                ("null-document", base + 3,
+                 {**new_document(shape, None, populated=False), "_id": None}, False),
+                ("matching", base + 4, new_document(shape, base + 4, populated=False), True),
+                ("generated", None, new_document(shape, None, populated=False), True),
+                ("null-column", None, new_document(shape, base + 5, populated=False), True),
+            )
+            for name, identity, document, allowed in cases:
+                before = snapshot()
+                result = db.run(column_identity_statement(shape, path, identity, document), False)
+                if allowed:
+                    prior_ids = {row["id"] for row in json.loads(before)["root"]}
+                    added = [row for row in json.loads(snapshot())["root"] if row["id"] not in prior_ids]
+                    ok = (result.returncode == 0 and len(added) == 1
+                          and added[0]["label"] == "root-default"
+                          and (added[0]["id"] == document["_id"] if "_id" in document else
+                               type(added[0]["id"]) is int and 100 < added[0]["id"] < 6000))
+                else:
+                    ok = db.state(result) == "PT422" and before == snapshot()
+                outcomes.append((shape, path, name, ok, db.state(result)))
+
+            # A two-row statement must not retain its first valid row when the
+            # second row has an unconfirmed column identity.
+            valid = new_document(shape, base + 20, populated=False)
+            invalid = new_document(shape, None, populated=False)
+            if path == "merge_insert":
+                statement = (f"MERGE INTO {schema}.documents d USING (VALUES "
+                    f"({base + 20},{quote(json.dumps(valid))}::jsonb),"
+                    f"({base + 21},{quote(json.dumps(invalid))}::jsonb)) s(id,data) "
+                    "ON false WHEN NOT MATCHED THEN INSERT(_id,data) VALUES(s.id,s.data);")
+            else:
+                statement = (f"COPY {schema}.documents (_id,data) FROM STDIN;\n"
+                             f"{base + 20}\t{json.dumps(valid)}\n"
+                             f"{base + 21}\t{json.dumps(invalid)}\n\\.\n")
+            before = snapshot()
+            result = db.run(statement, False)
+            outcomes.append((shape, path, "multirow-atomic", db.state(result) == "PT422"
+                             and before == snapshot(), db.state(result)))
+
+        for path in ("update", "merge_update"):
+            for name, identity, document_id, allowed in (
+                    ("same", 1, 1, True), ("column-changed", 9000, 1, False),
+                    ("column-null", None, 1, False), ("both-changed", 9000, 9000, False)):
+                document = read(db, shape, 1)
+                document["_id"], document["label"] = document_id, path + "-" + name
+                before = snapshot()
+                result = db.run(column_identity_statement(shape, path, identity, document), False)
+                ok = (result.returncode == 0 and read(db, shape, 1)["label"] == document["label"]) \
+                    if allowed else db.state(result) == "PT422" and before == snapshot()
+                outcomes.append((shape, path, name, ok, db.state(result)))
+
+        definition = db.value(f"SELECT encode(convert_to(pg_get_functiondef("
+                              f"'{schema}.documents__insert()'::regprocedure),'UTF8'),'hex');")
+        original = bytes.fromhex(definition).decode()
+        if original.count(missing_guard) != 1:
+            raise RuntimeError("PGJT-146 INSERT identity mutation target differs")
+        mutant = original.replace(missing_guard, "")
+        mutant_ddl = mutant.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1).rstrip().rstrip(";") + ";"
+        for path in ("merge_insert", "copy"):
+            before = snapshot()
+            # Confine the generated-function mutation and its unsafe write to
+            # one rolled-back transaction; no product source is edited.
+            result = db.run("BEGIN;\n" + mutant_ddl
+                            + "\n" + column_identity_statement(shape, path, 9900,
+                                new_document(shape, None, populated=False))
+                            + "\nSELECT 'PGJT-146-MUTANT-ACCEPTED';\nROLLBACK;", False)
+            mutations.append((shape, path, result.returncode == 0
+                              and "PGJT-146-MUTANT-ACCEPTED" in result.stdout.splitlines()
+                              and before == snapshot()
+                              and db.value(f"SELECT encode(convert_to(pg_get_functiondef("
+                                  f"'{schema}.documents__insert()'::regprocedure),'UTF8'),'hex');") == definition))
+    record("PGJT-146/column-identity-paths", len(outcomes) == len(SHAPES) * 22
+           and all(row[3] for row in outcomes), repr(outcomes))
+    record("PGJT-146/insert-identity-mutation", len(mutations) == len(SHAPES) * 2
+           and all(row[2] for row in mutations), repr(mutations))
+
+
 def deferrable_merge_matrix(db: Database, record) -> None:
     schema = "jt_shape_deferrable"
     db.run(f"DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
@@ -552,6 +670,7 @@ def main() -> int:
     atomicity_matrix(db, record)
     deferrable_merge_matrix(db, record)
     insert_column_identity_matrix(db, record)
+    column_identity_paths(db, record)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n"
                                    for row in results))
     for row in results:

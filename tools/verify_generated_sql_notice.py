@@ -12,26 +12,44 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[1]
 # Independently pinned legal text: prose normalisation must never rewrite it.
 LICENCE_SHA256 = "c1406d6bfc8c4c415ebd744ac412dcf890c8c40a59eba13aeaf8d2c8aafeb791"
+# Reviewed installed pg_get_functiondef hashes, not values learned from a bundle
+# or its exporting database. A changed generator requires deliberate re-review.
+EXPECTED_GENERATOR_SHA256 = {
+    ("0.2.0", major): "1d2fd5ab071a8c9c76a1170a9440667dd6619ee266bbacc05e3ccf9311b38e53"
+    for major in (17, 18, 19)
+}
 RUNTIME_REFERENCE = re.compile(r'(?i)(?<![a-z0-9_])"?jsontailor"?\s*\.')
 BUNDLE_HEADER = re.compile(
     r'\A-- pg_jsontailor standalone bundle\n'
     r'-- Generator version: ([0-9]+\.[0-9]+\.[0-9]+)\n'
     r'-- Generator PostgreSQL major: ([0-9]+)\n'
-    r'-- Target view: ("[^\n]*")\n')
+    r'-- Target view: ("[^\n]*")\n'
+    r'-- Generator SHA-256: ([0-9a-f]{64})\n')
 
 
-def bundle_preamble(version: str, major: int, view: str, notice: str) -> str:
+def verify_generator(version: str, major: int, generator_hash: str) -> None:
+    """Reject unknown versions/majors and stale or altered installed generators."""
+    expected = EXPECTED_GENERATOR_SHA256.get((version, major))
+    if expected is None or generator_hash != expected:
+        raise RuntimeError("standalone generator hash differs from the reviewed candidate")
+
+
+def bundle_preamble(version: str, major: int, view: str, notice: str,
+                    generator_hash: str) -> str:
     """Canonical self-contained transaction envelope, shared with the exporter."""
     if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
         raise RuntimeError("invalid standalone generator version")
     if type(major) is not int or major < 10 or not isinstance(view, str) or not view:
         raise RuntimeError("invalid standalone generator major or target view")
+    if not isinstance(generator_hash, str) or re.fullmatch(r'[0-9a-f]{64}', generator_hash) is None:
+        raise RuntimeError("invalid standalone generator hash")
     commented_notice = ''.join('-- ' + line + '\n' for line in notice.splitlines())
     return (
         '-- pg_jsontailor standalone bundle\n'
         f'-- Generator version: {version}\n'
         f'-- Generator PostgreSQL major: {major}\n'
         f'-- Target view: {json.dumps(view, ensure_ascii=True)}\n'
+        f'-- Generator SHA-256: {generator_hash}\n'
         '-- BEGIN GENERATED_SQL_NOTICE\n' + commented_notice +
         '-- END GENERATED_SQL_NOTICE\n\n'
         'BEGIN;\n'
@@ -68,13 +86,14 @@ def verify_bundle(bundle: Path) -> None:
         raise RuntimeError("standalone SQL contains a runtime jsontailor reference")
     header = BUNDLE_HEADER.match(script)
     if header is None:
-        raise RuntimeError("standalone SQL lacks the generator/version/target header")
-    version, major, encoded_view = header.groups()
+        raise RuntimeError("standalone SQL lacks the generator/version/target/hash header")
+    version, major, encoded_view, generator_hash = header.groups()
+    verify_generator(version, int(major), generator_hash)
     try:
         view = json.loads(encoded_view)
     except ValueError as error:
         raise RuntimeError("standalone SQL has an invalid target-view header") from error
-    preamble = bundle_preamble(version, int(major), view, notice.decode('utf-8'))
+    preamble = bundle_preamble(version, int(major), view, notice.decode('utf-8'), generator_hash)
     if not script.startswith(preamble):
         raise RuntimeError("standalone SQL lacks the complete embedded notice, transaction, version guard or pinned search_path")
     if not script.endswith('\nCOMMIT;\n') or not script[len(preamble):-len('\nCOMMIT;\n')].strip():

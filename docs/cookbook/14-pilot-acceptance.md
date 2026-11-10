@@ -54,4 +54,6 @@ written pilot access, retention deadline and deletion owner; they are not copied
 to release evidence. Release evidence follows [EVIDENCE](../EVIDENCE.md) and
 [release authority](../RELEASE_AUTHORITY.md), including two-year restricted
 diagnostic retention. See [deployment record](../DEPLOYMENT_RECORD.md).
+Use [pilot readiness](../PILOT_READINESS.md) for the agreement, fit and owner gate;
+none of the commands here completes those external approvals.
 

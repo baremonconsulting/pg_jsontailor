@@ -292,12 +292,12 @@ def mixed_type_matrix(db: Database, record) -> None:
     pairs = list(combinations(EXPECTED_FIELD_NAMES, 2))
     all_types = tuple(EXPECTED_FIELD_NAMES)
 
-    def run_cases(test_id, cases, modes):
+    def run_cases(test_id, cases, modes, only_operations=None):
         outcomes = []
         for names in cases:
             for mode in modes:
-                operations = (MIXED_OPERATIONS if mode != "multirow"
-                              else ("insert", "replacement"))
+                operations = only_operations or (MIXED_OPERATIONS if mode != "multirow"
+                                                 else ("insert", "replacement"))
                 for operation in operations:
                     for reverse in ((False,) if mode == "isolated" else (False, True)):
                         result = db.run(mixed_script(operation, names, mode, reverse), False)
@@ -305,8 +305,10 @@ def mixed_type_matrix(db: Database, record) -> None:
                                   and "PGJT-MIXED-OK" in result.stdout.splitlines())
                         outcomes.append((names, operation, mode, reverse, passed,
                                          "" if passed else result.stderr[-700:]))
-        expected = len(cases) * sum(4 if mode == "isolated" else
-                                   4 if mode == "multirow" else 8 for mode in modes)
+        expected = len(cases) * sum(
+            len(only_operations or (MIXED_OPERATIONS if mode != "multirow"
+                                   else ("insert", "replacement")))
+            * (1 if mode == "isolated" else 2) for mode in modes)
         failures = [row for row in outcomes if not row[4]]
         record(test_id, bool(cases) and len(outcomes) == expected and not failures,
                f"cases={len(cases)},executions={len(outcomes)}/{expected},failures={failures!r}")
@@ -318,6 +320,8 @@ def mixed_type_matrix(db: Database, record) -> None:
     run_cases("PGJT-112/type-pairs-isolated", pairs, ("isolated",))
     run_cases("PGJT-112/transaction-order-matrix", pairs, ("transaction",))
     run_cases("PGJT-112/multirow-mixed-types", pairs, ("multirow",))
+    run_cases("PGJT-146/multirow-merge", pairs + [all_types], ("multirow",),
+              ("merge_insert", "merge_update"))
 
 
 def mixed_invalid_matrix(db: Database, record) -> None:

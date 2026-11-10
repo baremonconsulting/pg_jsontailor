@@ -8,7 +8,9 @@ Create a reviewed mapping and retain observed catalogue evidence.
 
 Complete recipe 03; retain approval and keep schema, generator and specification
 unchanged. Bind `spec` from the reviewed file. Run as deployment owner with
-stop-on-error.
+stop-on-error. This is a separate creation path: do not run it against the
+already-created mapping in `pgjt_cookbook`. Use a fresh `generator` database
+with the extension, matching source schema and empty `api` schema, as in recipe 03.
 
 ## Steps
 

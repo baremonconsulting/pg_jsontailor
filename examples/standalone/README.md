@@ -46,5 +46,9 @@ themselves confer release authority or authenticate the declaring actor.
 The bundle embeds the complete `GENERATED_SQL_NOTICE`, a major-version guard,
 a fixed search path and its own transaction. Retain its copyright, permission
 and disclaimer text. It gives no warranty, support commitment or SLA.
+Keep the complete notice with every copy of `generated.sql`, and hand over the
+whole bundle for deployment, contractor access and backups. The notice lives
+in the script, not in generated database objects; a database backup alone does
+not preserve the script notice. Packagers include `LICENSE` with their package.
 Because the bundle owns its `BEGIN` and `COMMIT`, do not use it to enclose other
 migration files in one larger transaction.

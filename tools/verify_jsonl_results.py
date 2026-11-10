@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.strict_results import result_rows, validate
 
 FILENAMES = {
+    'minimum-grants-results.jsonl': 'minimum_grants',
     'helper-acl-results.jsonl': 'helper_acl',
     'runtime-limits-results.jsonl': 'runtime_limits',
     'rc02-database-results.jsonl': 'rc02_database',

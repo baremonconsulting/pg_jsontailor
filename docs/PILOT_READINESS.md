@@ -3,6 +3,18 @@
 This checklist defines the minimum evidence for a controlled `pg_jsontailor`
 pilot. It is not a production certification.
 
+Before accepting any customer material, including a schema-only dump, execute
+the separate written pilot agreement. Do not send customer-facing bundles,
+documentation or access until the named owner records the pre-send gate below.
+Synthetic internal rehearsals do not waive these conditions.
+
+The agreement names the generator environment and its owner; use the customer's
+environment by default and do not transfer material to a consultant environment
+without written permission. The customer decides anonymisation in writing;
+unless that decision and its effective controls are recorded, treat material as
+personal data. Do not submit customer material to third-party AI tools or online
+services unless the agreement explicitly permits it.
+
 ## 1. Fit assessment
 
 Use synthetic definitions by default. If a schema-only dump or representative
@@ -27,10 +39,12 @@ Generate DDL in a disposable database restored from the schema dump. Run the
 generated `__check()` function and inspect `duality_view_inventory()`. Exercise
 INSERT, complete replacement, ETag-checked DELETE and each intended MERGE
 action using synthetic rows. If representative values are needed to validate
-conversion semantics, use only an irreversibly anonymised sample covered by a
-written customer agreement; a schema dump alone cannot demonstrate application
-data quality. Record the approved fields, environment, recipients, retention
-deadline and deletion owner before receiving the sample.
+conversion semantics, receive them only under the written customer agreement
+and the customer's written data decision. Do not assume a sample is
+irreversibly anonymised: unless the customer confirms that treatment in writing, handle it
+as personal data. A schema dump alone cannot demonstrate application data quality.
+Record the approved fields, environment, recipients, retention deadline and
+deletion owner before receiving the sample.
 
 ## 2. Pilot scope record
 
@@ -43,7 +57,8 @@ implementation and attach or reference its agreed Pilot scope record. Record:
 - target p50 and p95 latency, throughput and concurrency;
 - RLS, roles, PostgREST and network boundary;
 - acceptance dataset and rollback owner;
-- private support channel, response expectations and pilot end date;
+- named pilot contact and backup, private support channel, response expectations and pilot end date;
+- vulnerability-reporting route, including the verified private security-reporting link;
 - permitted diagnostic data, storage location, access list, retention deadline
   and verified deletion owner.
 
@@ -98,3 +113,36 @@ Before a pilot, complete the [deployment record](DEPLOYMENT_RECORD.md), confirm
 private security reporting, named operational ownership, backups, monitoring,
 RTO/RPO and a tested rollback window. A named support contact and pilot terms
 are owner actions outside this repository.
+
+The record must include pilot-gate approver/date and PG17/18 CI run URLs,
+candidate archive and per-customer bundle SHA-256, generator hash and installed
+extension SQL SHA-256 verified before export, plus ingress header/body deadline,
+request buffering and rate limit. Rehearse recipe 8 on the same managed-service
+type before the customer session; this is not provider qualification.
+
+## 5. Pre-send owner gate (external evidence required)
+
+Record each item as DONE with date, named owner and private evidence reference
+in PGJT-132. The signed agreement and customer-material/data-handling
+prerequisites are mandatory and cannot be waived. Any permitted waiver of
+another operational item must identify its scope, rationale, approving owner
+and compensating controls; it cannot waive legal requirements. Blank, pending
+or synthetic test output is not approval. No item is marked complete by this
+repository:
+
+- signed agreement: purpose/scope, confidentiality, data-protection roles,
+  licence-consistent as-is terms, lawful liability limits, feedback licence,
+  duration/end, confirmed deletion and written-consent-only public reference;
+  qualified legal review or written owner acceptance of the unreviewed-template risk;
+- contact, backup, private channel, response expectations and personal-data decision;
+- verify private vulnerability reporting is enabled and its link works;
+- record the CRA position for time-limited pre-release testing;
+- record D1/D5 in PGJT-120: pilot functional/security gate versus publication
+  tag/benchmark gate, tested released 17/18 and pre-release 19 until GA, exact
+  source SHA, CI URLs, approver/date and where review actually occurred;
+- archive/bundle/generator hashes and managed-service internal rehearsal;
+- consultant-led first session, one customer first; next only after success;
+- capacity and pilot economics explicitly reviewed or dispositioned by their owners.
+
+At PostgreSQL 19 GA, review and update version wording and the pinned CI build;
+passing a pre-release test is not automatic GA qualification.

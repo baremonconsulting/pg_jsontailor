@@ -7,13 +7,15 @@ import hashlib
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from verify_generated_sql_notice import bundle_preamble, verify_archive, verify_bundle, verify_notice, verify_source
+from verify_generated_sql_notice import (EXPECTED_GENERATOR_SHA256, bundle_preamble,
+                                       verify_archive, verify_bundle, verify_notice, verify_source)
 from verify_standalone_results import EXPECTED_IDS, verify as verify_results
 from source_provenance import archive_provenance, source_identity
 
@@ -33,6 +35,9 @@ def api_contract(api: str, upgrading: str, boundary: str, sql: str) -> None:
             assert marker in content, f"missing capability contract: {marker}"
     assert "no helper EXECUTE grants except" not in boundary, "obsolete HTTP helper policy"
     assert "reviewed array-reader" in boundary and "grant_array_reader" in boundary, "missing HTTP read capability"
+    for marker in ("`db-max-rows` is the enforcing row bound", "no `limit`",
+                   "`Range` larger than", "Before every REST pilot"):
+        assert marker in boundary, "missing HTTP row-bound contract: " + marker
     assert "generated-function grants to other recipients" not in api, "blanket helper replay promised"
     assert "view and generated-function grants" not in upgrading, "blanket upgrade replay promised"
 
@@ -51,6 +56,7 @@ def capability_claim_negatives() -> None:
         (api, upgrading.replace("reviewed provenance", "all grants"), boundary, sql),
         (api.replace("PT413", "OTHER"), upgrading, boundary, sql),
         (api, upgrading, boundary.replace("reviewed array-reader", "unrestricted"), sql),
+        (api, upgrading, boundary.replace("`db-max-rows` is the enforcing row bound", "row limit unknown"), sql),
         (api, upgrading, boundary, sql + "\nCREATE FUNCTION jsontailor.unreviewed() RETURNS void;"),
     )
     for mutation in mutations:
@@ -105,7 +111,8 @@ def pilot_readiness_documents() -> None:
         "SECURITY_MODEL.md": ("Residual risks", "Minimum capabilities"),
         "DEPLOYMENT_RECORD.md": ("RPO and RTO", "Raw PostgREST exposure"),
         "cookbook/08-no-extension.md": ("same PostgreSQL major", "No provider"),
-        "cookbook/10-postgrest-proxy.md": ("exactly one `_id=eq.<value>`", "Raw PostgREST"),
+        "cookbook/10-postgrest-proxy.md": ("exactly one `_id=eq.<value>`", "Raw PostgREST",
+                                             "actual enforcing control for collection row count"),
         "cookbook/troubleshooting.md": ("PT412", "PT428", "42501", "unknown `limits` key"),
         "cookbook/generated-ddl-outline.md": ("four views, seven functions and six", "inspection-only"),
     }
@@ -116,10 +123,11 @@ def pilot_readiness_documents() -> None:
     troubleshooting = (ROOT / "docs/cookbook/troubleshooting.md").read_text()
     assert "| 40P01 deadlock |" in troubleshooting
     assert "| 500 (tested PostgREST contract) |" in troubleshooting
-    assert "| 0A000 isolation | Writes are not READ COMMITTED | Use READ COMMITTED | 400 |" in troubleshooting
+    assert "| 0A000 `document writes require READ COMMITTED isolation` |" in troubleshooting
     assert "| 401 anonymous / 403 authenticated |" in troubleshooting
     assert "unknown `limits` key" in troubleshooting
-    assert troubleshooting.count("N/A — generator") == 6
+    # PGJT-143 deliberately adds three exact specification-error rows.
+    assert troubleshooting.count("N/A — generator") == 9
     assert "409/503" not in troubleshooting
     required_messages = (
         "document value cannot be converted to the mapped SQL type",
@@ -130,6 +138,18 @@ def pilot_readiness_documents() -> None:
         "permission denied for function orders_dv__bounded_array",
         "resource limit must be a supported integer",
         "_id column requires _id in the document",
+        "stored child limit exceeded", "document byte limit exceeded",
+        "source relation role changed; regenerate the duality view",
+        "source relation or column binding changed; regenerate the duality view",
+        "root.key is not a single-column primary key", "root.table must have two parts",
+        "unknown key root.typo", "invalid mapping root.fields.x",
+        "delete RPC requires DELETE on the duality view",
+        "row-level security prevents locking root", "document writes require READ COMMITTED isolation",
+        "root insert is disabled", "root update is disabled", "root delete is disabled",
+        "array insert is disabled", "array update is disabled", "array delete is disabled",
+        "object fields do not match referenced row",
+        "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+        'null value in column "order_id" of relation "order_items" violates not-null constraint',
     )
     for message in required_messages:
         assert message in troubleshooting, "missing exact troubleshooting diagnostic: " + message
@@ -169,7 +189,7 @@ def pilot_readiness_documents() -> None:
     security_words = " ".join(security_policy.split())
     assert "best-effort basis" in security_words and "without a warranty" in security_words
     readme = (ROOT / "README.md").read_text()
-    assert "PostgreSQL 17 and 18 are the supported released majors" in readme
+    assert "PostgreSQL 17 and 18 are tested released majors" in readme
     assert "high-contention write-heavy" in readme.lower()
     assert "protected standalone bundle" in readme
     assert "preliminary figures" not in readme.lower()
@@ -203,7 +223,8 @@ def pilot_closure_contract(documents: dict[str, str]) -> None:
     assert "upstream URL" not in proxy
     for marker in ("--upstream-socket", "--view orders_dv", "server-unix-socket-mode",
                    "0700", "0600", "RAW_POSTGREST_HOST", "RAW_POSTGREST_PORT",
-                   "actual customer network", "NOT_RUN"):
+                   "actual customer network", "actual enforcing control for collection row count",
+                   "without `limit`", "oversized `Range`", "statement timeout"):
         assert marker in proxy, "missing private-socket gate: " + marker
     pilot = documents["docs/cookbook/14-pilot-acceptance.md"]
     for marker in ("All three majors remain required", "release-candidate qualification",
@@ -242,6 +263,175 @@ def pilot_closure_negatives() -> None:
         raise AssertionError("pilot closure mutation accepted: " + path + "/" + old)
 
 
+REVIEW_DOCUMENT_MARKERS = {
+    "README.md": ("## Who it is for", "## What gets created", "ddl-review-smoke:start",
+                  "INSERT ignores edited non-key object", "Packagers", "must include `LICENSE`",
+                  "Oracle, ORDS, PostgreSQL, PostgREST and other names belong to their owners",
+                  "used only descriptively; no affiliation or endorsement is implied",
+                  "notice lives in the SQL script, not in the generated database objects",
+                  "PostgreSQL 17 and 18 are tested released majors"),
+    "docs/PILOT_READINESS.md": (
+        "Before accepting any customer material, including a schema-only dump",
+        "generator environment and its owner", "customer decides anonymisation in writing",
+        "treat material as personal data", "third-party AI tools or online services",
+        "unless the agreement explicitly permits it", "vulnerability-reporting route",
+        "pilot-gate approver/date and PG17/18 CI run URLs", "installed extension SQL SHA-256",
+        "request buffering and rate limit", "signed agreement and customer-material/data-handling prerequisites are mandatory",
+        "cannot waive legal requirements",
+        "No item is marked complete by this repository", "At PostgreSQL 19 GA"),
+    "docs/DEPLOYMENT_RECORD.md": (
+        "Pilot-gate approver, date and PG17/18 CI run URLs", "Per-customer standalone bundle SHA-256",
+        "Generator hash verified before each export", "Installed extension SQL SHA-256 verified before each export",
+        "Generator environment and named owner", "Ingress header/body deadline, request buffering and rate limit",
+        "Customer security contact and Baremon security contact", "vulnerability-reporting route"),
+    "docs/cookbook/08-no-extension.md": (
+        "### Managed service", "consultant runbook", "Python 3", "checkout of the pinned candidate",
+        "administrative role must be allowed to `SET ROLE target_owner`",
+        "Defer the provider's automatic major-version upgrades", "After a planned PostgreSQL-major upgrade",
+        "Generator SHA-256", "installed extension SQL file", "Expected output: each statement reports `GRANT`",
+        "complete notice with every copy of `generated.sql`", "whole bundle", "script, not in database objects"),
+    "docs/cookbook/15-rls.md": (
+        "Source privileges remain necessary", "visibility-relative", "Hidden children",
+        "42501 row-level security prevents locking root", "grant_delete_rpc",
+        "tenant_a_rpc_deleted", "tenant_b_rpc_deleted", "tenant_a_document", "tenant_b_document"),
+    "docs/cookbook/10-postgrest-proxy.md": (
+        "header and body timeouts", "whole-request deadline", "request buffering",
+        "authenticated rate limits", "verified in CI only", "tests/run_postgrest.py",
+        "tests/http_security_contract.py", "# Read: 200", "# Complete-document PATCH",
+        "# Rejected upsert: 400", "# RPC delete: 200", "HTTP 428 / PT428",
+        "actual enforcing control for collection row count", "without `limit`",
+        "oversized `Range`", "before every REST pilot"),
+    "docs/cookbook/02-map-tables.md": (
+        "CREATE SCHEMA recipe_mapping", "CREATE TABLE recipe_mapping.jobs", "recipe_mapping.documents",
+        "nullable child `parent_fk`", "NO ACTION", "invalid or unsupported root.fields.x"),
+    "docs/cookbook/README.md": (
+        "## Reading order and databases", "Separate `generator`", "SET ROLE app_role",
+        "generated-ddl-outline.md", "Independent reader trial", "reader who did not author it",
+        "without outside help", "passed an independent PostgreSQL 18.6 reader trial"),
+    "docs/cookbook/07-write-etags.md": ("`\\gset` stores a one-row SELECT's named columns as psql variables",),
+    "docs/cookbook/06-read-list-filter.md": ("JOIN api.orders_dv AS document", "WHERE status='approved'",),
+    "docs/cookbook/13-limits.md": ("Set `stored_children` to the agreed pilot maximum",),
+    "docs/cookbook/14-pilot-acceptance.md": ("../PILOT_READINESS.md", "../DEPLOYMENT_RECORD.md"),
+    "docs/RESOURCE_LIMITS.md": (
+        "One oversized root aborts an entire document-materialising collection query",
+        "point read of another root", "SELECT child_count,count(*) AS roots", "monitor it against",
+        "`stored_children` limit"),
+    "docs/cookbook/11-schema-change.md": (
+        "Dropping or changing the type of a mapped column is normally blocked by binding",
+        "drop the exact generated mapping objects", "apply the relational change", "restore reviewed grants"),
+    "docs/SECURITY_MODEL.md": ("Only the schema owner should hold `CREATE` on the API schema",),
+    "docs/cookbook/troubleshooting.md": (
+        "complete server message and SQLSTATE in the customer environment only",
+        "redact DETAIL lines and values", "agreed private channel", "oversized-source-data"),
+    "SUPPORT.md": (
+        "Keep full server messages in the customer environment", "redact DETAIL lines and values",
+        "agreed private channel", "not raw customer diagnostics"),
+    "examples/standalone/README.md": (
+        "complete notice with every copy of `generated.sql`", "whole bundle",
+        "deployment, contractor access and backups", "script, not in generated database objects",
+        "Packagers include `LICENSE`"),
+    "docs/GLOSSARY.md": ("INSERT ignores edited non-key object fields", "**Binding view**",
+                         "**Bundle**", "**Capability**", "**Regeneration**", "**Invoker rights**"),
+    "CHANGELOG.md": ("This unreleased version", "separately signed written pilot terms", "pinned pre-release build"),
+}
+
+
+def review_documents_contract(documents: dict[str, str]) -> None:
+    for path, markers in REVIEW_DOCUMENT_MARKERS.items():
+        content = " ".join(documents[path].split())
+        for marker in markers:
+            assert marker in content, f"{path}: missing reviewed pilot requirement: {marker}"
+    readme = documents["README.md"]
+    assert readme.index("## Install") < readme.index("## Quick start") < readme.index("## Status")
+    assert "supported released majors" not in readme
+    assert "P0:" not in documents["docs/cookbook/README.md"]
+    assert "P1:" not in documents["docs/cookbook/README.md"]
+
+
+def review_documents_negatives() -> None:
+    """PGJT-133/136-145: each new operational/legal marker is independently required."""
+    documents = {path: (ROOT / path).read_text() for path in REVIEW_DOCUMENT_MARKERS}
+    review_documents_contract(documents)
+    normalised = {path: " ".join(value.split()) for path, value in documents.items()}
+    for path, markers in REVIEW_DOCUMENT_MARKERS.items():
+        for marker in markers:
+            changed = dict(normalised)
+            changed[path] = changed[path].replace(marker, "REMOVED_REQUIREMENT")
+            try:
+                review_documents_contract(changed)
+            except AssertionError:
+                continue
+            raise AssertionError("removed reviewed requirement accepted: " + path + "/" + marker)
+    # All Markdown documents reachable directly from README/cookbook appear in the map.
+    def targets(path: Path) -> set[Path]:
+        links = re.findall(r"\]\(([^)]+)\)", path.read_text())
+        return {(path.parent / link.split("#", 1)[0]).resolve()
+                for link in links if "://" not in link and link.split("#", 1)[0].endswith(".md")}
+    mapped = targets(ROOT / "docs/README.md") | {(ROOT / "docs/README.md").resolve()}
+    for path in [ROOT / "README.md", *sorted((ROOT / "docs/cookbook").glob("*.md"))]:
+        for target in targets(path):
+            assert target.is_file(), f"broken documentation link from {path}: {target}"
+            assert target in mapped, f"documentation map omits {target.relative_to(ROOT)}"
+        for script in re.findall(r"^```sh\n(.*?)^```[ \t]*$", path.read_text(), re.MULTILINE | re.DOTALL):
+            result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+            assert result.returncode == 0, f"invalid shell block in {path}: {result.stderr}"
+
+
+DOCUMENT_STATEMENTS = {
+    "docs/SEMANTICS.md": (
+        "On insert, non-key object fields are ignored rather than written.",
+        "with object.etag=false, non-key object fields are ignored.",
+        "mapped child parent_fk must therefore be nullable; a NOT NULL foreign key produces native SQLSTATE 23502.",
+    ),
+    "docs/PILOT_READINESS.md": (
+        "creation may succeed without it, but __check() then reports PT422.",
+    ),
+}
+
+
+def documentation_statement_contract(documents: dict[str, str], expected_hashes: dict[str, str]) -> None:
+    outline = documents["docs/cookbook/generated-ddl-outline.md"]
+    recorded = re.search(r"`([0-9a-f]{64})`\s+on PostgreSQL 17,.*?"
+                         r"`([0-9a-f]{64})`\s+on PostgreSQL 18 and 19", outline, re.DOTALL)
+    assert recorded is not None, "outline major-specific hash inventory differs"
+    actual = {"17": recorded[1], "18": recorded[2], "19": recorded[2]}
+    assert actual == expected_hashes, "outline hashes differ from independently pinned DDL hashes"
+    for path, statements in DOCUMENT_STATEMENTS.items():
+        words = " ".join(documents[path].replace("`", "").split())
+        for statement in statements:
+            assert statement in words, path + ": removed behavioural statement: " + statement
+
+
+def documentation_statement_negatives() -> None:
+    """PGJT-146/documentation-statements: shared with the coverage verifier."""
+    from documentation_smoke import ORDERS_DDL_SHA256
+    paths = ["docs/cookbook/generated-ddl-outline.md", *DOCUMENT_STATEMENTS]
+    documents = {path: (ROOT / path).read_text() for path in paths}
+    documentation_statement_contract(documents, ORDERS_DDL_SHA256)
+    for old_hash in set(ORDERS_DDL_SHA256.values()):
+        changed = dict(documents)
+        path = "docs/cookbook/generated-ddl-outline.md"
+        changed[path] = changed[path].replace(old_hash, "0" * 64)
+        try:
+            documentation_statement_contract(changed, ORDERS_DDL_SHA256)
+        except AssertionError:
+            continue
+        raise AssertionError("outline hash mutation accepted")
+    normalised = {path: " ".join(text.replace("`", "").split())
+                  for path, text in documents.items()}
+    for path, statements in DOCUMENT_STATEMENTS.items():
+        for statement in statements:
+            changed = dict(normalised)
+            # Keep Markdown code ticks in the outline, whose hashes are parsed as code spans.
+            changed["docs/cookbook/generated-ddl-outline.md"] = documents["docs/cookbook/generated-ddl-outline.md"]
+            changed[path] = changed[path].replace(statement, "REMOVED_STATEMENT")
+            try:
+                documentation_statement_contract(changed, ORDERS_DDL_SHA256)
+            except AssertionError:
+                continue
+            raise AssertionError("behavioural statement mutation accepted: " + statement)
+
+
 def rejected(callback) -> None:
     try:
         callback()
@@ -266,9 +456,13 @@ def notices() -> None:
         rejected(lambda: verify_bundle(folder))
         shutil.copyfile(ROOT / "GENERATED_SQL_NOTICE", folder / "GENERATED_SQL_NOTICE")
         rejected(lambda: verify_bundle(folder))
-        script = bundle_preamble('0.2.0', 18, 'api.orders_dv', notice.decode()) + 'SELECT 1;\n\nCOMMIT;\n'
+        generator_hash = EXPECTED_GENERATOR_SHA256[('0.2.0', 18)]
+        script = bundle_preamble('0.2.0', 18, 'api.orders_dv', notice.decode(), generator_hash) + 'SELECT 1;\n\nCOMMIT;\n'
         (folder / "generated.sql").write_text(script)
         verify_bundle(folder)
+        # PGJT-135: a correctly framed bundle with an altered generator hash is rejected.
+        (folder / "generated.sql").write_text(script.replace(generator_hash, '0' * 64))
+        rejected(lambda: verify_bundle(folder))
         for fragment in ('-- pg_jsontailor standalone bundle\n',
                          '-- Copyright (c) 2026, Baremon s.r.o.\n',
                          'BEGIN;\n', 'SET LOCAL search_path = pg_catalog, pg_temp;\n',
@@ -280,7 +474,7 @@ def notices() -> None:
         # Keeping only the legal paragraphs must not omit the surrounding notice.
         (folder / "GENERATED_SQL_NOTICE").write_bytes(licence)
         (folder / "generated.sql").write_text(
-            bundle_preamble('0.2.0', 18, 'api.orders_dv', licence.decode()) + 'SELECT 1;\n\nCOMMIT;\n')
+            bundle_preamble('0.2.0', 18, 'api.orders_dv', licence.decode(), generator_hash) + 'SELECT 1;\n\nCOMMIT;\n')
         rejected(lambda: verify_bundle(folder))
         for omitted in (None, "GENERATED_SQL_NOTICE", "LICENSE", "examples/standalone/README.md"):
             archive_path = folder / "source.tar.gz"
@@ -362,6 +556,8 @@ if __name__ == "__main__":
     claims()
     pilot_readiness_documents()
     pilot_closure_negatives()
+    review_documents_negatives()
+    documentation_statement_negatives()
     capability_claim_negatives()
     notices()
     standalone_attestation()
@@ -372,3 +568,5 @@ if __name__ == "__main__":
     print("PGJT-75/capability-documentation-negatives: PASS")
     print("PGJT-116-125/pilot-documentation-contract: PASS")
     print("PGJT-126-130/pilot-closure-negatives: PASS")
+    print("PGJT-133-145/reviewed-pilot-documents: PASS")
+    print("PGJT-146/documentation-statements: PASS")

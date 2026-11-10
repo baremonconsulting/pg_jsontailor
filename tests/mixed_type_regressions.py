@@ -104,13 +104,35 @@ class MixedTypeHarnessTests(unittest.TestCase):
         db = FakeDatabase()
         rows = []
         mixed_type_matrix(db, lambda *row: rows.append(row))
-        self.assertEqual(1073, len(db.scripts))  # DDL + 16 full + 264/528/264 pair cases.
-        self.assertEqual(5, len(rows))
+        self.assertEqual(("insert", "replacement", "merge_insert", "merge_update"),
+                         tuple(MIXED_OPERATIONS))
+        pairs = len(list(combinations(EXPECTED_FIELD_NAMES, 2)))
+        directions = 2
+        operations = len(MIXED_OPERATIONS)
+        direct_operations = len(("insert", "replacement"))
+        merge_operations = len(("merge_insert", "merge_update"))
+        expected = {
+            "PGJT-112/all-types-document": (1, operations * (1 + directions)
+                                           + direct_operations * directions),
+            "PGJT-112/type-pairs-isolated": (pairs, pairs * operations),
+            "PGJT-112/transaction-order-matrix": (pairs, pairs * operations * directions),
+            "PGJT-112/multirow-mixed-types": (pairs, pairs * direct_operations * directions),
+            "PGJT-146/multirow-merge": (pairs + 1, (pairs + 1) * merge_operations * directions),
+        }
+        self.assertEqual(["PGJT-111/mixed-type-ddl-lint", *expected],
+                         [row[0] for row in rows])
+        self.assertEqual(1 + sum(count for _, count in expected.values()), len(db.scripts))
         self.assertTrue(all(row[1] for row in rows))
-        self.assertIn("executions=16/16", rows[1][2])
-        for row, count in zip(rows[2:], (264, 528, 264)):
-            self.assertIn("cases=66", row[2])
+        for row in rows[1:]:
+            cases, count = expected[row[0]]
+            self.assertIn(f"cases={cases},", row[2])
             self.assertIn(f"executions={count}/{count}", row[2])
+        merge_scripts = db.scripts[-expected["PGJT-146/multirow-merge"][1]:]
+        self.assertTrue(all(script.count("MERGE INTO jt_type_matrix.documents") == 1
+                            for script in merge_scripts))
+        for action in ("WHEN NOT MATCHED THEN INSERT", "WHEN MATCHED THEN UPDATE"):
+            self.assertEqual((pairs + 1) * directions,
+                             sum(action in script for script in merge_scripts))
 
     def test_zero_exit_without_the_completion_witness_is_not_a_pass(self):
         rows = []

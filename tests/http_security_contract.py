@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import socket
 import sys
+import time
 
 from run_postgrest import request
 from security_contract_matrix import Database
@@ -139,6 +140,36 @@ def main():
                and db.value("SELECT has_function_privilege('jt_postgrest_anon',"
                    "'api.fresh_acl_dv__delete_document(bigint,text)','EXECUTE');") == 'f'
                and db.value('SELECT count(*) FROM shop.orders WHERE order_id=42;') == '1')
+
+        # PGJT-142: force fresh pool connections to inherit a deterministic
+        # statement timeout, then prove that the public boundary preserves only
+        # the allow-listed SQLSTATE and no server diagnostic.
+        db.run("ALTER ROLE jt_postgrest_authenticator SET statement_timeout='1ms'; "
+               "ALTER ROLE jt_postgrest_anon SET statement_timeout='1ms'; "
+               "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+               "WHERE usename='jt_postgrest_authenticator' AND pid<>pg_backend_pid();")
+        timeout_status = None; timeout_raw = ''
+        try:
+            for _ in range(30):
+                timeout_status, _, timeout_raw = request(
+                    args.base, 'GET', '/orders_dv?_id=gte.10000&order=_id')
+                if timeout_status not in (502, 503):
+                    break
+                time.sleep(0.2)
+            try:
+                timeout_body = json.loads(timeout_raw)
+            except json.JSONDecodeError:
+                timeout_body = {}
+        finally:
+            db.run("ALTER ROLE jt_postgrest_authenticator SET statement_timeout='30s'; "
+                   "ALTER ROLE jt_postgrest_anon SET statement_timeout='30s'; "
+                   "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                   "WHERE usename='jt_postgrest_authenticator' AND pid<>pg_backend_pid();")
+        record('PGJT-142/postgrest-statement-timeout', timeout_status == 500
+               and timeout_body.get('code') == '57014'
+               and timeout_body.get('message') == 'Request rejected.'
+               and all(token not in timeout_raw.lower() for token in
+                       ('statement timeout', 'shop.', 'orders')))
     finally:
         db.run('DROP TRIGGER reject_deferred ON shop.orders; DROP FUNCTION shop.reject_deferred(); '
                'ALTER TABLE shop.orders DROP CONSTRAINT internal_secret_check; '
