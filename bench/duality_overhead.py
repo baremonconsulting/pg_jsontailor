@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -12,11 +14,22 @@ import re
 import shutil
 import statistics
 import subprocess
+import sys
 import time
 import uuid
 
-from verify_results import verify_results
-from product_fingerprint import PRODUCT_INPUTS, SCHEMA_VERSION, working_tree_hashes
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bench.verify_results import ARTIFACTS, FIELDS, verify_results, verify_semantics, stable, statistics_for
+from bench.workload import SIZES as REVIEWED_SIZES, OPERATIONS, IMPLEMENTATIONS, statements
+from bench.installation import canonical, require, sha256, verify_attestation
+from bench.measurement_attestation import attest_measurement
+from bench.fixture_health import CHILD_INDEX_SQL, assert_fixture_health
+from bench.attest_installation import PROBE_SCHEMA, catalogue_and_ddl, installed_files
+from bench.diagnostic_evidence import DiagnosticJournal
+from bench.benchmark_execution import explain
+from bench.batching_protocol import (BATCH_SIZES, CALIBRATION_BATCHES, PROTOCOL_VERSION,
+    TARGET_BATCH_MS, arm_order, evidence_key, level_qualifies)
+from tools.strict_results import loads
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -26,8 +39,17 @@ parser.add_argument("--pg-bin", type=Path,
                     else Path(shutil.which("pg_config") or "/usr/bin/pg_config").parent)
 parser.add_argument("--database", default="jsontailor_duality_benchmark")
 parser.add_argument("--sizes", default="0,1,10,100,1000")
-parser.add_argument("--warmups", type=int, default=3)
-parser.add_argument("--repetitions", type=int, default=30)
+parser.add_argument("--warmups", type=int, default=10)
+parser.add_argument("--repetitions", type=int, default=50)
+parser.add_argument('--installation', type=Path, required=True)
+parser.add_argument('--trusted-key', type=Path, required=True)
+parser.add_argument('--measurement-key', type=Path,
+                    help='protected Ed25519 operator key for the completed measurement')
+parser.add_argument('--semantic-check-only', action='store_true',
+                    help='run each semantic/plan probe once; never emit publishable timing evidence')
+parser.add_argument('--diagnostic-fault', choices=['between-arms', 'statement',
+                    'semantic-read-back', 'rollback', 'restoration'],
+                    help=argparse.SUPPRESS)
 parser.add_argument("--output", type=Path)
 parser.add_argument("--pg-host", default=os.environ.get("PGHOST", str(ROOT / ".run" / "socket")))
 parser.add_argument("--pg-port", default=os.environ.get("PGPORT", "55433"))
@@ -44,21 +66,19 @@ except ValueError as error:
     parser.error(f"--sizes must be a comma-separated integer list: {error}")
 WARMUPS = args.warmups
 REPETITIONS = args.repetitions
-OPERATIONS = ("read", "insert", "root_update", "update", "delete",
-              "merge_insert", "merge_update", "merge_delete")
 RUN_ID = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 OUT = args.output or ROOT / "results" / f"duality-benchmark-{RUN_ID}"
 ENV = {**os.environ, "PGHOST": args.pg_host, "PGPORT": str(args.pg_port), "PGUSER": args.pg_user}
-ARTIFACTS = ("measurements.csv", "plans.json", "summary.json", "environment.json")
+STARTED = datetime.now(timezone.utc).isoformat()
 
-if not SIZES or any(size < 0 for size in SIZES) or len(set(SIZES)) != len(SIZES):
-    parser.error("--sizes must contain distinct non-negative integers")
-if WARMUPS < 0:
-    parser.error("--warmups must be non-negative")
-if REPETITIONS <= 0:
-    parser.error("--repetitions must be positive")
+if SIZES != REVIEWED_SIZES:
+    parser.error('--sizes must exactly match the reviewed workload 0,1,10,100,1000')
+if WARMUPS != 10 or REPETITIONS < 50:
+    parser.error('current evidence requires 10 warm-ups and at least 50 paired measured samples')
 if not DB or DB in {"postgres", "template0", "template1"}:
     parser.error("--database must name a dedicated disposable database")
+if not args.semantic_check_only and args.measurement_key is None:
+    parser.error('--measurement-key is required for publishable timing evidence')
 
 
 def run(args, input_text=None, check=True):
@@ -76,10 +96,6 @@ def sql(text, tuples=False):
 
 def lit(value):
     return "'" + value.replace("'", "''") + "'"
-
-
-def product_hashes():
-    return working_tree_hashes(ROOT)
 
 
 class PersistentPsql:
@@ -108,30 +124,6 @@ class PersistentPsql:
         if rc: raise RuntimeError(f"persistent psql exited {rc}")
 
 
-def explain(session, statements):
-    script = "SET jit=off; SET max_parallel_workers_per_gather=0; BEGIN;\n"
-    for statement in statements:
-        script += "EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON) " + statement + ";\n"
-    script += "ROLLBACK;\n"
-    raw = session.execute(script)
-    decoder = json.JSONDecoder(); pos = 0; payloads = []
-    while pos < len(raw):
-        while pos < len(raw) and raw[pos].isspace(): pos += 1
-        if pos >= len(raw): break
-        value, pos = decoder.raw_decode(raw, pos)
-        payloads.append(value[0])
-    if len(payloads) != len(statements):
-        raise RuntimeError(f"expected {len(statements)} plans, got {len(payloads)}: {raw[:500]}")
-    return {
-        "execution_ms": sum(float(p["Execution Time"]) for p in payloads),
-        "planning_ms": sum(float(p["Planning Time"]) for p in payloads),
-        "shared_hit_blocks": sum(int(p["Plan"].get("Shared Hit Blocks", 0)) for p in payloads),
-        "shared_dirtied_blocks": sum(int(p["Plan"].get("Shared Dirtied Blocks", 0)) for p in payloads),
-        "wal_records": sum(int(p["Plan"].get("WAL Records", 0)) for p in payloads),
-        "plans": payloads,
-    }
-
-
 if OUT.exists() and not OUT.is_dir():
     parser.error(f"--output exists and is not a directory: {OUT}")
 git_head = run(["git", "-C", ROOT, "rev-parse", "HEAD"], check=False).stdout.strip() or None
@@ -144,23 +136,65 @@ if not source_commit:
 if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
     parser.error("source commit must be a full 40-character lowercase Git SHA-1")
 source_dirty = bool(git_status_result.stdout) if git_head else None
+require(source_dirty is False, 'benchmark source must be an immutable clean Git checkout')
+installation = verify_attestation(args.installation, repo=ROOT, candidate=source_commit,
+                                  trusted_key=args.trusted_key)
+require(Path(installation['pg_config']).parent.resolve() == PG.resolve(),
+        'benchmark binaries differ from the attested installation')
 
 OUT.mkdir(parents=True, exist_ok=True)
-collisions = [name for name in ARTIFACTS if (OUT / name).exists()]
+collisions = [name for name in ARTIFACTS | {'manifest.json'} if (OUT / name).exists()]
 if collisions:
     parser.error("--output already contains benchmark artifacts: " + ", ".join(collisions))
 run([PG / "dropdb", "--if-exists", DB])
 run([PG / "createdb", DB])
+sql('CREATE EXTENSION pg_jsontailor;\n' + PROBE_SCHEMA)
+def live_installation():
+    return {'installed_files': installed_files(PG / 'pg_config', installation['source_files']),
+            **catalogue_and_ddl(lambda text: sql(text, tuples=True))}
+verify_attestation(args.installation, repo=ROOT, candidate=source_commit,
+                   trusted_key=args.trusted_key, live=live_installation)
+sql('DROP SCHEMA jt_install_probe CASCADE;')
+shutil.copyfile(args.installation, OUT / 'installation.json')
+shutil.copyfile(args.installation.with_name('installation.log'), OUT / 'installation.log')
+diagnostic_phase = {'phase': 'database-setup', 'interrupted': None}
+diagnostic = DiagnosticJournal(OUT, {
+    'source_commit': source_commit,
+    'source_dirty': source_dirty,
+    'installation_sha256': sha256((OUT / 'installation.json').read_bytes()),
+    'installation_log_sha256': sha256((OUT / 'installation.log').read_bytes()),
+    'workload_sha256': sha256((ROOT / 'bench/workload.py').read_bytes()),
+    'producer_sha256': sha256(Path(__file__).read_bytes()),
+    'executor_sha256': sha256((ROOT / 'bench/benchmark_execution.py').read_bytes()),
+    'batching_sha256': sha256((ROOT / 'bench/batching_protocol.py').read_bytes()),
+    'diagnostic_verifier_sha256': sha256((ROOT / 'bench/diagnostic_evidence.py').read_bytes()),
+    'command': [sys.executable, *sys.argv],
+    'started_at': STARTED,
+    'semantic_check_only': args.semantic_check_only,
+})
+original_excepthook = sys.excepthook
+def diagnostic_excepthook(error_type, error, traceback):
+    try:
+        if not (isinstance(error, OSError) and error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO}):
+            restoration = ('verified' if diagnostic_phase['phase'] == 'between-arms'
+                           or diagnostic.last_kind == 'constituent-complete'
+                           else 'failed' if diagnostic_phase['phase'] in {'rollback', 'restoration'}
+                           else 'not-reached')
+            diagnostic.fail(diagnostic_phase['phase'], error, restoration,
+                            diagnostic_phase['interrupted'])
+    except BaseException as diagnostic_error:
+        print(f'diagnostic finalisation failed: {diagnostic_error}', file=sys.stderr)
+    original_excepthook(error_type, error, traceback)
+sys.excepthook = diagnostic_excepthook
 sql("""
-CREATE EXTENSION pg_jsontailor;
 CREATE SCHEMA bench_dv;
 CREATE TABLE bench_dv.customers(customer_id bigint PRIMARY KEY,name text NOT NULL);
 CREATE TABLE bench_dv.orders(order_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,customer_id bigint REFERENCES bench_dv.customers,status text NOT NULL,created_at date NOT NULL);
 CREATE TABLE bench_dv.items(item_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,order_id bigint NOT NULL REFERENCES bench_dv.orders,product text NOT NULL,quantity integer NOT NULL CHECK(quantity>0),unit_price numeric(12,2) NOT NULL);
-CREATE INDEX ON bench_dv.items(order_id);
 CREATE TABLE bench_dv.payloads(size integer PRIMARY KEY,source_id bigint NOT NULL,insert_id bigint NOT NULL,root_doc jsonb,update_doc jsonb,insert_doc jsonb);
 INSERT INTO bench_dv.customers VALUES(1,'Benchmark customer');
 """)
+sql(CHILD_INDEX_SQL)
 for size in SIZES:
     source_id = 1000 + size
     insert_id = 100000 + size
@@ -172,6 +206,7 @@ spec = json.dumps({
     "array":{"name":"items","table":"bench_dv.items","key":"item_id","parent_fk":"order_id","order_by":"item_id","fields":{"itemId":"item_id","product":"product","qty":"quantity","price":"unit_price"},"insert":True,"update":True,"delete":True}
 })
 sql(f"SELECT jsontailor.create_duality_view('bench_dv.orders_dv',{lit(spec)}::jsonb);")
+assert_fixture_health(lambda statement: sql(statement, tuples=True))
 for size in SIZES:
     source_id = 1000 + size; insert_id = 100000 + size
     sql(f"""
@@ -188,114 +223,261 @@ FROM bench_dv.orders_dv v WHERE v._id={source_id};
 """)
 sql("ANALYZE bench_dv.orders; ANALYZE bench_dv.items; ANALYZE bench_dv.payloads;")
 
-
-def statements(operation, implementation, size):
-    source_id=1000+size; insert_id=100000+size
-    if operation == "read":
-        if implementation == "duality":
-            return [f"SELECT pg_column_size(data) FROM bench_dv.orders_dv WHERE _id={source_id}"]
-        return [f"""SELECT pg_column_size(jsonb_build_object('_id',o.order_id,'status',o.status,'created',o.created_at,'customer',jsonb_build_object('customerId',c.customer_id,'name',c.name),'items',COALESCE((SELECT jsonb_agg(jsonb_build_object('itemId',i.item_id,'product',i.product,'qty',i.quantity,'price',i.unit_price) ORDER BY i.item_id) FROM bench_dv.items i WHERE i.order_id=o.order_id),'[]'::jsonb))) FROM bench_dv.orders o LEFT JOIN bench_dv.customers c ON c.customer_id=o.customer_id WHERE o.order_id={source_id}"""]
-    if operation == "update":
-        if implementation == "duality":
-            return [f"UPDATE bench_dv.orders_dv SET data=(SELECT update_doc FROM bench_dv.payloads WHERE size={size}) WHERE _id={source_id}"]
-        return [f"UPDATE bench_dv.orders o SET status=p.update_doc->>'status',created_at=(p.update_doc->>'created')::date,customer_id=(p.update_doc#>>'{{customer,customerId}}')::bigint FROM bench_dv.payloads p WHERE p.size={size} AND o.order_id={source_id}",
-                f"UPDATE bench_dv.items i SET product=x.product,quantity=x.qty,unit_price=x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.update_doc->'items') x(\"itemId\" bigint,product text,qty integer,price numeric) WHERE p.size={size} AND i.order_id={source_id} AND i.item_id=x.\"itemId\""]
-    if operation == "root_update":
-        if implementation == "duality":
-            return [f"UPDATE bench_dv.orders_dv SET data=(SELECT root_doc FROM bench_dv.payloads WHERE size={size}) WHERE _id={source_id}"]
-        return [f"UPDATE bench_dv.orders o SET status=p.root_doc->>'status' FROM bench_dv.payloads p WHERE p.size={size} AND o.order_id={source_id}"]
-    if operation == "insert":
-        if implementation == "duality":
-            return [f"INSERT INTO bench_dv.orders_dv(data) SELECT insert_doc FROM bench_dv.payloads WHERE size={size}"]
-        return [f"INSERT INTO bench_dv.orders(order_id,customer_id,status,created_at) SELECT insert_id,(insert_doc#>>'{{customer,customerId}}')::bigint,insert_doc->>'status',(insert_doc->>'created')::date FROM bench_dv.payloads WHERE size={size}",
-                f"INSERT INTO bench_dv.items(item_id,order_id,product,quantity,unit_price) SELECT x.\"itemId\",p.insert_id,x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.insert_doc->'items') x(\"itemId\" bigint,product text,qty integer,price numeric) WHERE p.size={size}"]
-    if operation == "delete":
-        if implementation == "duality":
-            return [f"SELECT bench_dv.orders_dv__delete_document({source_id},(SELECT data#>>'{{_metadata,etag}}' FROM bench_dv.orders_dv WHERE _id={source_id}))"]
-        return [f"DELETE FROM bench_dv.items WHERE order_id={source_id}",f"DELETE FROM bench_dv.orders WHERE order_id={source_id}"]
-    if operation == "merge_insert":
-        if implementation == "duality":
-            return [f"""MERGE INTO bench_dv.orders_dv AS target
-USING (SELECT insert_id AS root_id,insert_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
-ON target._id=source.root_id
-WHEN NOT MATCHED THEN INSERT(data) VALUES(source.doc)"""]
-        return [f"""MERGE INTO bench_dv.orders AS target
-USING (SELECT insert_id,insert_doc FROM bench_dv.payloads WHERE size={size}) AS source
-ON target.order_id=source.insert_id
-WHEN NOT MATCHED THEN INSERT(order_id,customer_id,status,created_at)
-VALUES(source.insert_id,(source.insert_doc#>>'{{customer,customerId}}')::bigint,source.insert_doc->>'status',(source.insert_doc->>'created')::date)""",
-                f"""MERGE INTO bench_dv.items AS target
-USING (SELECT x."itemId",p.insert_id,x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.insert_doc->'items') x("itemId" bigint,product text,qty integer,price numeric) WHERE p.size={size}) AS source
-ON target.item_id=source."itemId"
-WHEN NOT MATCHED THEN INSERT(item_id,order_id,product,quantity,unit_price)
-VALUES(source."itemId",source.insert_id,source.product,source.qty,source.price)"""]
-    if operation == "merge_update":
-        if implementation == "duality":
-            return [f"""MERGE INTO bench_dv.orders_dv AS target
-USING (SELECT source_id AS root_id,update_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
-ON target._id=source.root_id
-WHEN MATCHED THEN UPDATE SET data=source.doc"""]
-        return [f"""MERGE INTO bench_dv.orders AS target
-USING (SELECT source_id,update_doc FROM bench_dv.payloads WHERE size={size}) AS source
-ON target.order_id=source.source_id
-WHEN MATCHED THEN UPDATE SET status=source.update_doc->>'status',created_at=(source.update_doc->>'created')::date,customer_id=(source.update_doc#>>'{{customer,customerId}}')::bigint""",
-                f"""MERGE INTO bench_dv.items AS target
-USING (SELECT p.source_id,x."itemId",x.product,x.qty,x.price FROM bench_dv.payloads p CROSS JOIN LATERAL jsonb_to_recordset(p.update_doc->'items') x("itemId" bigint,product text,qty integer,price numeric) WHERE p.size={size}) AS source
-ON target.order_id=source.source_id AND target.item_id=source."itemId"
-WHEN MATCHED THEN UPDATE SET product=source.product,quantity=source.qty,unit_price=source.price"""]
-    if operation == "merge_delete":
-        if implementation == "duality":
-            return [f"""MERGE INTO bench_dv.orders_dv AS target
-USING (SELECT source_id AS root_id,root_doc AS doc FROM bench_dv.payloads WHERE size={size}) AS source
-ON target._id=source.root_id
-WHEN MATCHED AND target.data#>>'{{_metadata,etag}}'=source.doc#>>'{{_metadata,etag}}' THEN DELETE"""]
-        return [f"""MERGE INTO bench_dv.items AS target
-USING (SELECT source_id FROM bench_dv.payloads WHERE size={size}) AS source
-ON target.order_id=source.source_id
-WHEN MATCHED THEN DELETE""",
-                f"""MERGE INTO bench_dv.orders AS target
-USING (SELECT source_id FROM bench_dv.payloads WHERE size={size}) AS source
-ON target.order_id=source.source_id
-WHEN MATCHED THEN DELETE"""]
-    raise ValueError(operation)
+settings = loads(sql("SELECT jsonb_object_agg(name,setting) FROM pg_settings WHERE name IN "
+    "('shared_buffers','work_mem','synchronous_commit','fsync','full_page_writes','server_version_num',"
+    "'max_connections','effective_cache_size','checkpoint_timeout','wal_level','default_transaction_isolation',"
+    "'TimeZone','lc_collate','lc_ctype');", tuples=True))
+database_locale = loads(sql("SELECT jsonb_build_object('lc_collate',datcollate,'lc_ctype',datctype) "
+                            "FROM pg_database WHERE datname=current_database();", tuples=True))
+settings.update(database_locale)
+settings.update(jit='off', max_parallel_workers_per_gather='0')
+postgresql = sql('SHOW server_version;', tuples=True).strip()
+postgresql_major = str(int(sql('SHOW server_version_num;', tuples=True).strip()) // 10000)
+diagnostic.append('environment', {
+    'postgresql': postgresql, 'postgresql_major': postgresql_major,
+    'server_settings': settings, 'platform': platform.platform(),
+    'cpu': Path('/proc/cpuinfo').read_text(), 'memory': Path('/proc/meminfo').read_text(),
+    'storage': str(os.statvfs(OUT)), 'load': str(os.getloadavg()), 'database': DB,
+    'pg_host': args.pg_host, 'pg_port': str(args.pg_port), 'pg_user': args.pg_user,
+    'pg_bin': str(PG.resolve()), 'python': sys.version, 'sizes': list(SIZES),
+    'operations': list(OPERATIONS), 'warmups': WARMUPS, 'maximum_warmups': 30,
+    'stability_threshold': .10, 'repetitions': REPETITIONS, 'sessions': 3,
+    'batching_protocol_version': PROTOCOL_VERSION, 'batch_sizes': list(BATCH_SIZES),
+    'calibration_batches': CALIBRATION_BATCHES, 'target_batch_ms': TARGET_BATCH_MS,
+    'semantic_check_only': args.semantic_check_only,
+})
 
 
-rows=[]; saved_plans={}; session=PersistentPsql()
-try:
+
+
+def snapshot(session, size):
+    def relational(identity):
+        return f"""(SELECT jsonb_build_object('_id',o.order_id,'status',o.status,'created',o.created_at,
+          'customer',jsonb_build_object('customerId',c.customer_id,'name',c.name),
+          'items',coalesce((SELECT jsonb_agg(jsonb_build_object('itemId',i.item_id,'product',i.product,
+          'qty',i.quantity,'price',i.unit_price) ORDER BY i.item_id) FROM bench_dv.items i
+          WHERE i.order_id=o.order_id),'[]'::jsonb)) FROM bench_dv.orders o LEFT JOIN
+          bench_dv.customers c ON c.customer_id=o.customer_id WHERE o.order_id={identity})"""
+    def document(identity):
+        return f"(SELECT data-'_metadata' FROM bench_dv.orders_dv WHERE _id={identity})"
+    source, inserted = 1000 + size, 100000 + size
+    return loads(session.execute("SELECT jsonb_build_object('relational',jsonb_build_object('source'," +
+        relational(source) + ",'inserted'," + relational(inserted) +
+        "),'documents',jsonb_build_object('source'," + document(source) + ",'inserted'," + document(inserted) + '));'))
+
+
+rows, saved_plans, semantic_samples, states, backends = [], {}, {}, {}, []
+diagnostic_states = set()
+diagnostic_fault_used = False
+def inject_diagnostic_fault(phase, coordinates, *, next_statement=None):
+    global diagnostic_fault_used
+    if args.diagnostic_fault != phase or diagnostic_fault_used:
+        return
+    diagnostic_fault_used = True
+    interrupted = dict(coordinates)
+    if next_statement is not None:
+        interrupted.update(statement=next_statement[0], sql=next_statement[1])
+    diagnostic_phase.update(phase=phase, interrupted=interrupted)
+    raise RuntimeError('forced producer diagnostic fault: ' + phase)
+
+def intern(state):
+    identity = sha256(canonical(state))
+    states[identity] = state
+    if identity not in diagnostic_states:
+        diagnostic.append('semantic-state', {'sha256': identity, 'value': state})
+        diagnostic_states.add(identity)
+    return identity
+
+
+def run_constituent(session, coordinates):
+    implementation = coordinates['implementation']
+    size, operation = coordinates['size'], coordinates['operation']
+    diagnostic_phase.update(phase='constituent', interrupted=coordinates)
+    diagnostic.append('constituent-start', coordinates)
+    session.execute('BEGIN;')
+    before = snapshot(session, size)
+    before_id = intern(before)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'before', 'sha256': before_id})
+    workload = statements(operation, implementation, size)
+    def retain_statement(index, statement, plan):
+        diagnostic.append('statement-complete', {**coordinates, 'statement': index,
+            'sql': statement, 'plan': plan})
+        if index + 1 < len(workload):
+            inject_diagnostic_fault('statement', coordinates,
+                                    next_statement=(index + 1, workload[index + 1]))
+    def identify_statement(index, statement):
+        diagnostic_phase.update(phase='statement', interrupted={**coordinates,
+            'statement': index, 'sql': statement})
+    result = explain(session, workload, retain_statement, identify_statement)
+    diagnostic_phase.update(phase='semantic-read-back', interrupted=coordinates)
+    inject_diagnostic_fault('semantic-read-back', coordinates)
+    after = snapshot(session, size)
+    after_id = intern(after)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'after', 'sha256': after_id})
+    diagnostic_phase.update(phase='rollback', interrupted=coordinates)
+    inject_diagnostic_fault('rollback', coordinates)
+    session.execute('ROLLBACK;')
+    diagnostic_phase.update(phase='restoration', interrupted=coordinates)
+    inject_diagnostic_fault('restoration', coordinates)
+    restored = snapshot(session, size)
+    restored_id = intern(restored)
+    diagnostic.append('semantic-witness', {**coordinates, 'role': 'rollback', 'sha256': restored_id})
+    semantic = {'before': before, 'after': after, 'rollback': restored,
+        'branch': operation.removeprefix('merge_') if operation.startswith('merge_') else 'not_merge'}
+    verify_semantics(semantic, size, operation)
+    key = evidence_key(coordinates['session'], size, operation, implementation,
+                       coordinates['phase'], coordinates['level'], coordinates['batch'],
+                       coordinates['constituent'])
+    semantic_samples[key] = {'before': before_id, 'after': after_id,
+                             'rollback': restored_id, 'branch': semantic['branch']}
+    saved_plans[key] = {'statements': workload, 'plans': result.pop('plans')}
+    row = {**coordinates, **result, 'status': 'PASS'}
+    rows.append(row)
+    diagnostic.append('constituent-complete', {**coordinates,
+        'execution_ms': result['execution_ms'], 'planning_ms': result['planning_ms'],
+        'shared_hit_blocks': result['shared_hit_blocks'],
+        'shared_dirtied_blocks': result['shared_dirtied_blocks'],
+        'wal_records': result['wal_records'], 'before': before_id, 'after': after_id,
+        'rollback': restored_id, 'restoration': 'verified'})
+    diagnostic_phase.update(phase='between-arms', interrupted=coordinates)
+    inject_diagnostic_fault('between-arms', coordinates)
+    return result
+
+
+for session_number in range(1 if args.semantic_check_only else 3):
+    session = PersistentPsql()
+    try:
+        session.execute('SET jit=off; SET max_parallel_workers_per_gather=0; SET statement_timeout=60000;')
+        backend = loads(session.execute("SELECT jsonb_build_object('pid',pg_backend_pid(),"
+            "'backend_start',(SELECT backend_start::text FROM pg_stat_activity WHERE pid=pg_backend_pid()));"))
+        backends.append({'session': session_number, **backend})
+        diagnostic.append('session-start', {'session': session_number, **backend})
+        for size in SIZES:
+            for operation in OPERATIONS:
+                if args.semantic_check_only:
+                    aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                    for pair_order, implementation in enumerate(arm_order(0, 0)):
+                        result = run_constituent(session, {'session': session_number, 'size': size,
+                            'operation': operation, 'implementation': implementation,
+                            'phase': 'measured', 'level': 1, 'batch': 0, 'constituent': 0,
+                            'batch_size': 1, 'pair_order': pair_order})
+                        aggregate[implementation] += result['execution_ms']
+                    diagnostic.append('smoke-group-complete', {'session': session_number,
+                        'size': size, 'operation': operation, 'level': 1, 'batch': 0,
+                        'phase': 'measured', 'totals': aggregate})
+                    continue
+                selected = None
+                for level in BATCH_SIZES:
+                    totals = {implementation: [] for implementation in IMPLEMENTATIONS}
+                    for batch in range(CALIBRATION_BATCHES):
+                        aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                        for constituent in range(level):
+                            for pair_order, implementation in enumerate(arm_order(batch, constituent)):
+                                result = run_constituent(session, {'session': session_number, 'size': size,
+                                    'operation': operation, 'implementation': implementation,
+                                    'phase': 'calibration', 'level': level, 'batch': batch,
+                                    'constituent': constituent, 'batch_size': level,
+                                    'pair_order': pair_order})
+                                aggregate[implementation] += result['execution_ms']
+                        for implementation in IMPLEMENTATIONS:
+                            totals[implementation].append(aggregate[implementation])
+                    diagnostic.append('calibration-level-complete', {'session': session_number,
+                        'size': size, 'operation': operation, 'level': level, 'totals': totals})
+                    if level_qualifies(totals):
+                        selected = level
+                        break
+                if selected is None:
+                    raise RuntimeError(f'calibration batch-size cap exhausted: {session_number}:{size}:{operation}')
+                warmup_values = {implementation: [] for implementation in IMPLEMENTATIONS}
+                warmup_count, batch = None, 0
+                while warmup_count is None or batch < warmup_count + REPETITIONS:
+                    phase = 'warmup' if warmup_count is None else 'measured'
+                    aggregate = {implementation: 0.0 for implementation in IMPLEMENTATIONS}
+                    for constituent in range(selected):
+                        for pair_order, implementation in enumerate(arm_order(batch, constituent)):
+                            result = run_constituent(session, {'session': session_number, 'size': size,
+                                'operation': operation, 'implementation': implementation,
+                                'phase': phase, 'level': selected, 'batch': batch,
+                                'constituent': constituent, 'batch_size': selected,
+                                'pair_order': pair_order})
+                            aggregate[implementation] += result['execution_ms']
+                    diagnostic.append('batch-complete', {'session': session_number, 'size': size,
+                        'operation': operation, 'phase': phase, 'level': selected,
+                        'batch': batch, 'totals': aggregate})
+                    if phase == 'warmup':
+                        for implementation in IMPLEMENTATIONS:
+                            warmup_values[implementation].append(aggregate[implementation])
+                    batch += 1
+                    if phase == 'warmup' and batch >= 10 and batch % 5 == 0:
+                        if all(stable(values) for values in warmup_values.values()):
+                            warmup_count = batch
+                        elif batch == 30:
+                            raise RuntimeError(f'warm-up stability FAIL after 30 batches: {session_number}:{size}:{operation}')
+    except BaseException:
+        try:
+            session.close()
+        except BaseException as close_error:
+            print(f'persistent psql close after failure also failed: {close_error}', file=sys.stderr)
+        raise
+    else:
+        session.close()
+
+if args.semantic_check_only:
+    if args.drop_database_after:
+        run([PG / 'dropdb', DB])
+    diagnostic.discard_after_success()
+    print(json.dumps({'status': 'PASS', 'semantic_probes': len(rows), 'candidate': source_commit,
+                      'purpose': 'semantic/installation smoke only; not performance evidence'}))
+    raise SystemExit(0)
+
+with (OUT / 'measurements.csv').open('w', newline='') as handle:
+    writer = csv.DictWriter(handle, fieldnames=FIELDS)
+    writer.writeheader(); writer.writerows(rows)
+(OUT / 'plans.json').write_text(json.dumps(saved_plans))
+(OUT / 'semantics.json').write_text(json.dumps({'states': states, 'samples': semantic_samples}))
+summary = []
+for session_number in range(3):
     for size in SIZES:
         for operation in OPERATIONS:
-            total=WARMUPS+REPETITIONS
-            for repetition in range(total):
-                order=("direct","duality") if repetition%2==0 else ("duality","direct")
-                for implementation in order:
-                    result=explain(session,statements(operation,implementation,size))
-                    rows.append({"size":size,"operation":operation,"implementation":implementation,
-                                 "run":repetition,"warmup":repetition<WARMUPS,
-                                 "execution_ms":result["execution_ms"],"planning_ms":result["planning_ms"],
-                                 "shared_hit_blocks":result["shared_hit_blocks"],
-                                 "shared_dirtied_blocks":result["shared_dirtied_blocks"],
-                                 "wal_records":result["wal_records"],"status":"PASS"})
-                    if repetition==WARMUPS: saved_plans[f"{size}:{operation}:{implementation}"]=result["plans"]
-finally:
-    session.close()
-
-with (OUT/"measurements.csv").open("w",newline="") as handle:
-    writer=csv.DictWriter(handle,fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(rows)
-(OUT/"plans.json").write_text(json.dumps(saved_plans,indent=2))
-
-summary=[]
-for size in SIZES:
-    for operation in OPERATIONS:
-        values={}
-        for implementation in ("direct","duality"):
-            xs=[r["execution_ms"] for r in rows if r["size"]==size and r["operation"]==operation and r["implementation"]==implementation and not r["warmup"]]
-            xs.sort(); values[implementation]={"median_ms":statistics.median(xs),"p95_ms":xs[int(.95*(len(xs)-1))],"min_ms":min(xs),"max_ms":max(xs)}
-        summary.append({"size":size,"operation":operation,**values,
-                        "median_ratio":values["duality"]["median_ms"]/values["direct"]["median_ms"]})
-(OUT/"summary.json").write_text(json.dumps(summary,indent=2))
-metadata={"run_id":RUN_ID,"postgresql":sql("SHOW server_version;",tuples=True).strip(),"platform":platform.platform(),"cpu_count":os.cpu_count(),"sizes":SIZES,"operations":OPERATIONS,"warmups":WARMUPS,"repetitions":REPETITIONS,"jit":"off","parallel_gather_workers":0,"database":DB,"pg_host":args.pg_host,"pg_port":str(args.pg_port),"pg_user":args.pg_user,"backend_mode":"one persistent psql backend for all measurements","source_commit":source_commit,"source_dirty":source_dirty,"product_fingerprint_schema":SCHEMA_VERSION,"product_hashes":product_hashes()}
-(OUT/"environment.json").write_text(json.dumps(metadata,indent=2))
-verification = verify_results(OUT)
+            values = {}
+            for impl in IMPLEMENTATIONS:
+                measured = [r for r in rows if r['session'] == session_number and r['size'] == size
+                    and r['operation'] == operation and r['implementation'] == impl
+                    and r['phase'] == 'measured']
+                batches = {}
+                for row in measured:
+                    batches.setdefault(row['batch'], []).append(row['execution_ms'])
+                values[impl] = {
+                    'individual': statistics_for([r['execution_ms'] for r in measured]),
+                    'batch_mean': statistics_for([sum(group) / len(group)
+                                                  for group in batches.values()]),
+                }
+            summary.append({'session': session_number, 'size': size, 'operation': operation, **values,
+                'median_ratio': values['duality']['batch_mean']['median_ms']
+                                / values['direct']['batch_mean']['median_ms']})
+(OUT / 'summary.json').write_text(json.dumps(summary, indent=2))
+metadata = {'schema_version': 4, 'run_id': RUN_ID, 'postgresql': postgresql,
+    'postgresql_major': postgresql_major,
+    'platform': platform.platform(), 'cpu': Path('/proc/cpuinfo').read_text(),
+    'memory': Path('/proc/meminfo').read_text(), 'storage': str(os.statvfs(OUT)), 'load': str(os.getloadavg()),
+    'sizes': SIZES, 'operations': OPERATIONS, 'warmups': WARMUPS, 'maximum_warmups': 30,
+    'stability_threshold': .10, 'repetitions': REPETITIONS, 'sessions': 3, 'session_backends': backends,
+    'batching_protocol_version': PROTOCOL_VERSION, 'batch_sizes': BATCH_SIZES,
+    'calibration_batches': CALIBRATION_BATCHES, 'target_batch_ms': TARGET_BATCH_MS,
+    'server_settings': settings, 'database': DB, 'pg_host': args.pg_host, 'pg_port': str(args.pg_port),
+    'pg_user': args.pg_user, 'pg_bin': str(PG.resolve()), 'command': [sys.executable, *sys.argv],
+    'started_at': STARTED, 'finished_at': datetime.now(timezone.utc).isoformat(), 'python': sys.version,
+    'direct_contract': 'lower-contract direct SQL', 'restart_policy': 'new persistent backend per session',
+    'source_commit': source_commit, 'source_dirty': source_dirty}
+(OUT / 'environment.json').write_text(json.dumps(metadata, indent=2))
+verify_attestation(args.installation, repo=ROOT, candidate=source_commit, trusted_key=args.trusted_key)
+(OUT / 'manifest.json').write_text(json.dumps({'schema_version': 1,
+    'files': {name: sha256((OUT / name).read_bytes()) for name in sorted(ARTIFACTS)}}, indent=2))
+attest_measurement(OUT, source_commit, args.measurement_key)
+verify_results(OUT, candidate=source_commit, trusted_key=args.trusted_key,
+               _producer_pre_discard=True)
+diagnostic.discard_after_success()
+verification = verify_results(OUT, candidate=source_commit, trusted_key=args.trusted_key)
 if args.drop_database_after:
-    run([PG / "dropdb", DB])
-print(json.dumps({"run_id":RUN_ID,"output":str(OUT),**verification},indent=2))
+    run([PG / 'dropdb', DB])
+print(json.dumps({'run_id': RUN_ID, 'output': str(OUT), **verification}, indent=2))

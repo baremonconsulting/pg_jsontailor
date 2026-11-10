@@ -80,6 +80,7 @@ CREATE TABLE jt46.root(id integer PRIMARY KEY,detail_id integer REFERENCES jt46.
  label text NOT NULL DEFAULT 'default');
 CREATE TABLE jt46.item(id integer PRIMARY KEY,parent integer NOT NULL REFERENCES jt46.root(id),
  label text NOT NULL DEFAULT 'default');
+CREATE INDEX item_parent_order ON jt46.item(parent,id);
 INSERT INTO jt46.detail VALUES(7,'seven'),(8,'eight');
 INSERT INTO jt46.root VALUES(1,7,'one'),(2,8,'two');
 INSERT INTO jt46.item VALUES(10,1,'ten'),(20,2,'twenty');
@@ -98,6 +99,8 @@ def grant_full(db: Database, role: str) -> None:
 GRANT SELECT,INSERT,UPDATE,DELETE ON jt46.documents,jt46.documents_nocheck TO {role};
 GRANT EXECUTE ON FUNCTION jt46.documents__delete_document(integer,text),
  jt46.documents_nocheck__delete_document(integer,text) TO {role};
+SELECT jsontailor.grant_array_reader('jt46.documents',{quote(role)},false);
+SELECT jsontailor.grant_array_reader('jt46.documents_nocheck',{quote(role)},false);
 GRANT SELECT,INSERT,UPDATE,DELETE ON jt46.root,jt46.item TO {role};
 GRANT SELECT ON jt46.detail TO {role};
 GRANT UPDATE(name) ON jt46.detail TO {role};""")
@@ -588,6 +591,11 @@ def array_rls(db: Database, record) -> None:
     changed_doc["items"][0]["label"] = "blocked"
     changed = as_role(db, update_sql(changed_doc))
     outcomes.append(("nonlockable-update", db.state(changed)))
+    root_only_doc = document(db)
+    root_only_doc['label'] = 'must-not-bypass-child-locks'
+    root_only = as_role(db, update_sql(root_only_doc))
+    outcomes.append(('nonlockable-root-only', db.state(root_only),
+                     db.value('SELECT label FROM jt46.root WHERE id=1;') == 'one'))
 
     setup(db)
     db.run("ALTER TABLE jt46.item ENABLE ROW LEVEL SECURITY;"
@@ -613,6 +621,7 @@ def array_rls(db: Database, record) -> None:
            outcomes == [("allow-active", 0, "1:inserted", 0, "updated", 0, "0"),
                         ("hidden-preserved", 0, 0, "ten", "root-only"),
                         ("nonlockable-update", "42501"),
+                        ('nonlockable-root-only', '42501', True),
                         ("insert-check", "42501"), ("delete-using", "42501")],
            repr(outcomes))
 
@@ -709,7 +718,7 @@ def invoker_metadata(db: Database, record) -> None:
  'documents__delete_document','documents_nocheck__delete_document')
  AND NOT prosecdef;""")
     record("PGJT-46/invoker-metadata",
-           views == "8:true" and functions == "12:true"
+           views == "8:true" and functions == "14:true"
            and mains == "documents,documents_nocheck"
            and deletes == "documents__delete_document,documents_nocheck__delete_document",
            f"views={views}/{mains},functions={functions}/{deletes}")

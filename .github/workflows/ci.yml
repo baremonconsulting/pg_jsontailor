@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -37,17 +38,11 @@ jobs:
         run: |
           python3 tools/verify_test_coverage.py
           python3 tools/verify_repository_consistency.py
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg17
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg18
-          python3 bench/verify_results.py bench/reference/azure-039a555-pg19
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg17
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg18
-          python3 bench/verify_results.py bench/reference/azure-a9a455e-pg19
-          python3 bench/verify_results.py bench/reference/azure-11e6d74
-          python3 bench/verify_results.py bench/reference/azure-afa643c
-          python3 bench/verify_results.py bench/reference/azure-04d053e
-          python3 bench/verify_results.py bench/reference/azure-acecaae
           python3 tests/tooling_regressions.py
+          python3 tests/documentation_regressions.py
+          python3 tests/rc02_benchmark_regressions.py
+          python3 tools/verify_generated_sql_notice.py
+          python3 -m unittest discover -s tests -p '*trust_regressions.py'
           python3 tools/verify_release_candidate.py
           python3 tools/verify_test_coverage.py \
             --scope repository \
@@ -65,7 +60,7 @@ jobs:
   postgres:
     name: PostgreSQL ${{ matrix.postgresql }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -85,29 +80,21 @@ jobs:
           echo "PGBIN=$RUNNER_TEMP/pgsql/bin" >> "$GITHUB_ENV"
 
       - name: Install PostgreSQL ${{ matrix.postgresql }} packages
+        timeout-minutes: 9
         if: matrix.postgresql != '19'
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
-            --connect-timeout 20 -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | gpg --dearmor \
-            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends \
-            "postgresql-${{ matrix.postgresql }}" \
-            "postgresql-server-dev-${{ matrix.postgresql }}"
+          python3 tools/install_postgresql.py "${{ matrix.postgresql }}" \
+            --log "$RUNNER_TEMP/installation.log" --job-minutes 45
           ln -s "/usr/lib/postgresql/${{ matrix.postgresql }}" "$RUNNER_TEMP/pgsql"
-
       - name: Build PostgreSQL 19 release candidate
+        timeout-minutes: 15
         if: matrix.postgresql == '19'
         shell: bash
         run: |
           set -euo pipefail
+          {
           archive="$RUNNER_TEMP/postgresql-19rc1.tar.bz2"
           source_dir="$RUNNER_TEMP/postgresql-19rc1"
           curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
@@ -125,6 +112,7 @@ jobs:
             --without-zlib
           make -s -j2
           make -s install
+          } 2>&1 | tee "$RUNNER_TEMP/installation.log"
 
       - name: Start isolated PostgreSQL instance
         shell: bash
@@ -204,6 +192,14 @@ jobs:
             --psql "$PGBIN/psql" \
             --database jsontailor_ci \
             --output "$RUNNER_TEMP/partition-results.jsonl"
+          python3 tests/helper_acl_matrix.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/helper-acl-results.jsonl"
+          python3 tests/runtime_limits_matrix.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/runtime-limits-results.jsonl"
+          python3 tests/rc02_database_regressions.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/rc02-database-results.jsonl"
+          python3 tests/rc02_read_qualification.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --output "$RUNNER_TEMP/rc02-read-results.jsonl"
           python3 tools/verify_jsonl_results.py \
             "$RUNNER_TEMP/core-results.jsonl" \
             "$RUNNER_TEMP/validation-results.jsonl" \
@@ -214,8 +210,42 @@ jobs:
             "$RUNNER_TEMP/type-results.jsonl" \
             "$RUNNER_TEMP/shape-results.jsonl" \
             "$RUNNER_TEMP/security-results.jsonl" \
-            "$RUNNER_TEMP/partition-results.jsonl"
+            "$RUNNER_TEMP/partition-results.jsonl" \
+            "$RUNNER_TEMP/helper-acl-results.jsonl" \
+            "$RUNNER_TEMP/runtime-limits-results.jsonl" \
+            "$RUNNER_TEMP/rc02-database-results.jsonl" \
+            "$RUNNER_TEMP/rc02-read-results.jsonl"
           grep -q '"status": "PASS"' "$RUNNER_TEMP/setbased-results.json"
+
+      - name: Execute documentation and standalone generated SQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/documentation_smoke.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/docs-quickstart-results.jsonl"
+          python3 tests/upgrade_documentation.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/upgrade-docs-results.jsonl"
+          python3 tests/public_contract.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/public-contract-results.jsonl"
+          python3 tests/standalone_generated_sql.py --pg-bin "$PGBIN" \
+            --output "$RUNNER_TEMP/standalone-results.jsonl"
+          python3 tools/verify_jsonl_results.py \
+            "$RUNNER_TEMP/docs-quickstart-results.jsonl" \
+            "$RUNNER_TEMP/upgrade-docs-results.jsonl" \
+            "$RUNNER_TEMP/public-contract-results.jsonl" \
+            "$RUNNER_TEMP/standalone-results.jsonl"
+
+      - name: Retain documentation and standalone evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: standalone-docs-pg${{ matrix.postgresql }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/docs-quickstart-results.jsonl
+            ${{ runner.temp }}/upgrade-docs-results.jsonl
+            ${{ runner.temp }}/public-contract-results.jsonl
+            ${{ runner.temp }}/standalone-results.jsonl
 
       - name: Verify custom and plain dump restore
         shell: bash
@@ -238,13 +268,22 @@ jobs:
       - name: Install pinned PostgREST 16.5
         if: matrix.postgresql == '18' || github.event_name == 'schedule'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/postgrest-v16.5-linux-static-x86-64.tar.xz"
-          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
+          if ! curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
             --connect-timeout 20 -fsSL \
             https://github.com/PostgREST/postgrest/releases/download/v16.5/postgrest-v16.5-linux-static-x86-64.tar.xz \
-            -o "$archive"
+            -o "$archive"; then
+            curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors \
+              --connect-timeout 20 -fsSL \
+              -H 'Accept: application/octet-stream' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/PostgREST/postgrest/releases/assets/658320847 \
+              -o "$archive"
+          fi
           echo '5099e7ada38f9f6846cd87c14c5f158b7c165f1e9959665ad412e61f4dceba95  '"$archive" \
             | sha256sum --check --strict
           tar -xJf "$archive" -C "$RUNNER_TEMP"
@@ -255,14 +294,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           "$PGBIN/psql" -X -v spec="$(cat examples/orders_dv.spec.json)" \
             -d jsontailor_ci -f tests/setup_postgrest.sql
+          mkdir -m 700 "$RUNNER_TEMP/postgrest-private"
           cat > "$RUNNER_TEMP/postgrest.conf" <<EOF
           db-uri = "postgresql://jt_postgrest_authenticator@127.0.0.1:${PGPORT}/jsontailor_ci"
           db-schemas = "api"
           db-anon-role = "jt_postgrest_anon"
           server-host = "127.0.0.1"
-          server-port = 3050
+          server-port = 3052
+          server-unix-socket = "$RUNNER_TEMP/postgrest-private/upstream.sock"
+          server-unix-socket-mode = "600"
           admin-server-port = 3051
           log-level = "warn"
           EOF
@@ -271,38 +314,65 @@ jobs:
           echo "$!" > "$RUNNER_TEMP/postgrest.pid"
           for attempt in {1..80}; do
             curl -fsS http://127.0.0.1:3051/ready >/dev/null && break
-            test "$attempt" -lt 80 || { cat "$RUNNER_TEMP/postgrest.log"; exit 1; }
+            test "$attempt" -lt 80 || { echo 'PostgREST readiness failed; inspect encrypted diagnostics'; exit 1; }
+            sleep 0.25
+          done
+          python3 tools/http_boundary.py \
+            --upstream-socket "$RUNNER_TEMP/postgrest-private/upstream.sock" \
+            --view orders_dv --view concurrent_dv --view fresh_acl_dv > "$RUNNER_TEMP/boundary.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/boundary.pid"
+          for attempt in {1..80}; do
+            curl -fsS http://127.0.0.1:3050/orders_dv >/dev/null && break
+            test "$attempt" -lt 80 || exit 1
             sleep 0.25
           done
           python3 tests/run_postgrest.py \
             --transcript "$RUNNER_TEMP/postgrest-transcript.md" \
             --result "$RUNNER_TEMP/postgrest-results.jsonl"
-          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/postgrest-results.jsonl"
+          python3 tests/http_security_contract.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci \
+            --upstream-socket "$RUNNER_TEMP/postgrest-private/upstream.sock" \
+            --result "$RUNNER_TEMP/http-security-results.jsonl"
+          python3 tests/http_boundary_regressions.py
+          python3 tests/http_concurrency_contract.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/http-concurrency-results.jsonl"
+          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/postgrest-results.jsonl" \
+            "$RUNNER_TEMP/http-security-results.jsonl" "$RUNNER_TEMP/http-concurrency-results.jsonl"
           python3 tools/verify_test_coverage.py \
             --scope postgrest \
             --postgresql "${{ matrix.postgresql }}" \
             --result "postgrest=$RUNNER_TEMP/postgrest-results.jsonl" \
+            --result "http_security=$RUNNER_TEMP/http-security-results.jsonl" \
+            --result "http_concurrency=$RUNNER_TEMP/http-concurrency-results.jsonl" \
             --output "$RUNNER_TEMP/postgrest-coverage.json"
 
       - name: Stop PostgREST
         if: always() && (matrix.postgresql == '18' || github.event_name == 'schedule')
         shell: bash
         run: |
+          test ! -f "$RUNNER_TEMP/boundary.pid" \
+            || kill "$(cat "$RUNNER_TEMP/boundary.pid")" || true
           test ! -f "$RUNNER_TEMP/postgrest.pid" \
             || kill "$(cat "$RUNNER_TEMP/postgrest.pid")" \
             || true
+
+      - name: Redact PostgREST evidence
+        if: always() && (matrix.postgresql == '18' || github.event_name == 'schedule')
+        run: |
+          python3 tools/redact_results.py --suite postgrest \
+            --input "$RUNNER_TEMP/postgrest-results.jsonl" \
+            --output "$RUNNER_TEMP/postgrest-public-results.jsonl"
 
       - name: Upload PostgREST evidence
         if: always() && (matrix.postgresql == '18' || github.event_name == 'schedule')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: postgrest-pg${{ matrix.postgresql }}
+          retention-days: 30
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/postgrest-transcript.md
-            ${{ runner.temp }}/postgrest-results.jsonl
+            ${{ runner.temp }}/postgrest-public-results.jsonl
             ${{ runner.temp }}/postgrest-coverage.json
-            ${{ runner.temp }}/postgrest.log
 
       - name: Verify Jira-keyed runtime coverage
         shell: bash
@@ -311,6 +381,7 @@ jobs:
           python3 tools/verify_test_coverage.py \
             --scope postgresql \
             --postgresql "${{ matrix.postgresql }}" \
+            --result "core=$RUNNER_TEMP/core-results.jsonl" \
             --result "validation=$RUNNER_TEMP/validation-results.jsonl" \
             --result "integrity=$RUNNER_TEMP/integrity-results.jsonl" \
             --result "repeatability=$RUNNER_TEMP/repeatability-results.jsonl" \
@@ -319,18 +390,65 @@ jobs:
             --result "types=$RUNNER_TEMP/type-results.jsonl" \
             --result "shapes=$RUNNER_TEMP/shape-results.jsonl" \
             --result "security=$RUNNER_TEMP/security-results.jsonl" \
+            --result "helper_acl=$RUNNER_TEMP/helper-acl-results.jsonl" \
+            --result "runtime_limits=$RUNNER_TEMP/runtime-limits-results.jsonl" \
+            --result "rc02_database=$RUNNER_TEMP/rc02-database-results.jsonl" \
+            --result "rc02_read=$RUNNER_TEMP/rc02-read-results.jsonl" \
             --result "partitions=$RUNNER_TEMP/partition-results.jsonl" \
             --result "partition_restore=$RUNNER_TEMP/partition-restore-results.jsonl" \
             --result "restore_matrix=$RUNNER_TEMP/restore-matrix-results.jsonl" \
+            --result "docs_quickstart=$RUNNER_TEMP/docs-quickstart-results.jsonl" \
+            --result "upgrade_docs=$RUNNER_TEMP/upgrade-docs-results.jsonl" \
+            --result "public_contract=$RUNNER_TEMP/public-contract-results.jsonl" \
+            --result "standalone=$RUNNER_TEMP/standalone-results.jsonl" \
             --passed-suite installcheck \
             --passed-suite dump_restore \
             --output "$RUNNER_TEMP/coverage-pg${{ matrix.postgresql }}.json"
 
-      - name: Show PostgreSQL log on failure
+      - name: Require separate stale-return mutant witness
+        run: |
+          python3 tests/stale_return_mutant.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --output "$RUNNER_TEMP/stale-return-results.jsonl"
+          python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/stale-return-results.jsonl"
+
+      - name: Keep PostgreSQL diagnostics out of public job output
         if: failure()
-        run: test ! -f "$RUNNER_TEMP/postgresql.log" || cat "$RUNNER_TEMP/postgresql.log"
+        run: echo 'Full PostgreSQL and PostgREST diagnostics require protected operator retrieval.'
 
       - name: Stop PostgreSQL
         if: always()
         run: |
           "$PGBIN/pg_ctl" -D "$RUNNER_TEMP/pgdata" -m fast stop || true
+
+      - name: Collect and require complete exact-SHA evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_DIAGNOSTICS_CERTIFICATE: ${{ vars.EVIDENCE_DIAGNOSTICS_CERTIFICATE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml" --jq '.id' || echo 0)"
+          python3 tools/collect_evidence.py --kind ci --major "${{ matrix.postgresql }}" \
+            --input "$RUNNER_TEMP" --repo . --workflow-id "$workflow_id" \
+            --output "$RUNNER_TEMP/evidence/ci-pg${{ matrix.postgresql }}"
+
+      - name: Retain redacted PostgreSQL evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgresql-${{ matrix.postgresql }}-evidence
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/evidence/ci-pg${{ matrix.postgresql }}/bundle.json
+            ${{ runner.temp }}/evidence/ci-pg${{ matrix.postgresql }}/public/
+
+      - name: Retain encrypted PostgreSQL diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgresql-${{ matrix.postgresql }}-diagnostics
+          retention-days: 30
+          if-no-files-found: error
+          path: ${{ runner.temp }}/evidence/ci-pg${{ matrix.postgresql }}/diagnostics/

@@ -20,7 +20,7 @@ The source must contain at most one row for each root key. A staging primary key
 CREATE TEMP TABLE document_stage (
     root_id bigint PRIMARY KEY,
     doc jsonb NOT NULL,
-    CHECK (doc->'_id' = to_jsonb(root_id))
+    CHECK ((doc->'_id' = to_jsonb(root_id)) IS TRUE)
 );
 ```
 

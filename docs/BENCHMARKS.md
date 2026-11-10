@@ -1,120 +1,163 @@
-# Reference benchmark
+# Current-candidate benchmark protocol
 
-Generated row triggers no longer place the complete write path inside a
-PL/pgSQL exception block. Bulk root-only replacement therefore uses one
-top-level transaction ID rather than one subtransaction ID per document. The
-CI regression records elapsed time, time per document and XID consumption for
-100- and 1,000-document transactions. Partitioned child writes retain narrow
-exception blocks solely to translate PostgreSQL's missing-partition error to
-the documented `PT422`; measure those workloads separately.
+Final exact-SHA measurements on PostgreSQL 17, 18 and 19 are pending the merged
+security/runtime freeze. There are no current performance numbers to publish.
+Fixtures prove verification algorithms, not installation, host provenance or
+performance. A later commit invalidates exact-SHA evidence. Do not relabel an
+older run or substitute product-equivalence fingerprints for the required SHA.
 
-The normal non-deferrable explicit-child path remains set based. A
-`DEFERRABLE INITIALLY IMMEDIATE` child primary key uses a narrow compatibility
-fallback around explicit-key inserts. Its exception/subtransaction cost is
-outside the normal reference workload and should be measured separately when
-that schema design is used.
+The comparison is the current candidate against **lower-contract direct SQL**,
+not another implementation revision. Direct SQL does not provide complete
+document validation, ETag checks, the generated locking/RLS contract or returned
+document construction. The object in this workload has `etag=false`; checked
+objects, partitioned children and deferrable/default-preserving fallback paths
+need separate qualification. Results are diagnostic, not a customer SLO.
 
-Any generator change invalidates the previous reference measurement. Publish
-a fresh reference set from the release candidate; do not relabel an older set.
+## Installation trust
 
-The included benchmark compares generated document views with direct relational SQL in the same PostgreSQL instance. It measures server execution time with prebuilt JSON payloads and rolls back every mutation.
+Use a private, disposable PostgreSQL installation and cluster for each major.
+Never install into a shared prefix. The operator supplies an Ed25519 signing key
+and signer identity; the reviewer/release owner supplies the trusted public key
+independently of the result bundle. Protect the private key and retain the trust
+root separately in the protected evidence store. A self-supplied bundle key is
+not approval. Signing vouches for the recorded native execution; a digest alone
+does not prove a host or actor.
 
-## Last published reference environment
+`bench/attest_installation.py` requires a clean Git checkout at the immutable
+candidate. It records commands, timestamps, durations, exit codes and logs,
+installs that candidate, and checks every installed control/SQL file against
+the exact Git blobs. Two fresh databases compare the installed catalogue
+functions and representative root-only/object-and-array generated DDL against
+an oracle loaded directly from the candidate SQL, not from the installed
+extension. Both temporary databases are dropped. The canonical, versioned
+installation record is Ed25519-signed and binds the full installation log.
 
-- PostgreSQL 18.6;
-- Azure Linux x86-64;
-- 4 vCPUs;
-- 15 GiB RAM;
-- JIT disabled;
-- one persistent local session;
-- three warm-ups and 30 measured repetitions per group.
+```sh
+python3 bench/attest_installation.py \
+  --pg-config /disposable/pg18/bin/pg_config \
+  --disposable-prefix /disposable/pg18 \
+  --private-key /protected/benchmark-signing.pem \
+  --trusted-key /approved/benchmark-public.pem \
+  --signer 'Named measurement operator' \
+  --output /evidence/installation-pg18
+```
 
-The current release-candidate measurements used commit `039a555b55f89b849c98ab918ba279889fbf38bf`. PostgreSQL 17.11, 18.6 and 19rc1 each completed 2,640 of 2,640 benchmark executions with PASS status across 40 groups, including native MERGE actions. The PostgreSQL 18 [reference evidence](../bench/reference/azure-039a555-pg18/) is the published performance reference; the matching [PostgreSQL 17](../bench/reference/azure-039a555-pg17/) and [PostgreSQL 19](../bench/reference/azure-039a555-pg19/) evidence records cross-version behaviour on the same Azure VM. All three sets pass the independent artifact verifier. The runs were executed sequentially and contain 7,920 benchmark executions in total: 7,200 measured executions and 720 warm-ups.
+Set `PGHOST`, `PGPORT` and `PGUSER` for the private cluster before running this
+command. The benchmark independently rechecks the signed record, installed
+files, live catalogue and generated DDL before measuring. The artifact verifier
+and release-consumer API each authenticate installation independently, using
+the expected exact candidate and the externally trusted key. Stale installation,
+altered SQL/catalogue/DDL, a wrong candidate, signature or log digest fails closed.
 
-Release-candidate verification separately determines whether these measurements are transferable to a later candidate. Schema-v2 evidence records mode-aware SHA-256 fingerprints for every regular file under `sql/`, `pg_jsontailor.control` and `Makefile`. Only the values of the four safe literal test-runner declarations `REGRESS`, `REGRESS_OPTS`, `ISOLATION` and `ISOLATION_OPTS` are normalized, and only at their exact positions in the canonical project Makefile. Raw and normalized fingerprints use separate domains; any other layout, syntax, file mode or inventory change remains significant. The candidate must have the identical fingerprint set. This remains valid after a reviewed squash merge even when the measured feature commit is no longer an ancestor or locally reachable. Older evidence without fingerprints retains the stricter ancestor and defined-product-identity rule. If any defined product input changed, the run remains historical evidence and a fresh measurement is required; its `source_commit` must never be relabelled.
+## Reviewed workload and semantics
 
-The artifact verifier validates the stored results, environment metadata and
-declared product fingerprints. The original invocation, environment record and
-run logs provide native execution provenance; validating a stored artifact does
-not independently attest the execution host or actor.
+The workload is exactly sizes `0,1,10,100,1000` × operations
+`read,insert,root_update,update,delete,merge_insert,merge_update,merge_delete` ×
+implementations `direct,duality`. Removing a size or operation is invalid even
+when all remaining artifacts agree. Statement text/count is checked against the
+reviewed workload, not the producer's declared inventory.
 
-The current PostgreSQL 18 reference preserves its originally emitted
-schema-v1 hashes in `environment.json`. The adjacent `fingerprint-v2.json`
-records the auditable derivation used by the release gate, including the
-original inventory and environment Git blob. Fingerprint-policy semantics are
-versioned; they are not changed in place under an existing schema number.
+Each constituent checks operation preconditions and child cardinality, relational
+and document state after execution, the chosen MERGE branch and affected
+cardinality, and complete rollback restoration. These assertions run outside
+the timed statements. Each mutation is rolled back. Every constituent retains its
+`EXPLAIN (ANALYZE, TIMING OFF, BUFFERS, WAL, FORMAT JSON)` plans. The independent
+verifier checks real plan roots/nodes, statement inventory, integer block/WAL
+counters, planning and execution reconciliation, calibration selection,
+constituent chronology and batch totals. Semantic snapshots are content-addressed
+to avoid duplicating large documents.
 
-An intermediate run at `afa643c27c70eef49b3358f60de538820801e66a`, after moving catalogue guards to statement triggers but before set-wise array validation, is retained as [optimization evidence](../bench/reference/azure-afa643c/). Compared with the completed set-wise build at [`11e6d74`](../bench/reference/azure-11e6d74/), 1,000-child median insert, root-only update, complete replacement, MERGE insert and MERGE update time fell by 69.0%, 67.7%, 58.9%, 69.1% and 59.3%. At zero and one child that optimization adds roughly 8–25% to those paths; it is intentionally targeted at larger arrays. These percentages describe the two named historical builds, not the current reference.
+The nightly six-mutation campaign requires successful compilation/application
+and passing control suites. A kill requires the named behavioural witness or
+exact control SQLSTATE and verified mutant read-back. An unrelated suite failure,
+SQLSTATE or infrastructure error is a harness failure, not a kill. The separate
+stale-return witness remains separately required.
 
-The earlier `04d053e9f5f06c2bee6f1f14a8afa3871d8cf3b8` run predates strict type conversion, current catalogue guards, `timestamptz` normalization and lifecycle tooling. Its [historical evidence](../bench/reference/azure-04d053e/) remains reproducible but is not semantically equivalent to the current write path.
+## Sampling and statistics
 
-## Set-based reconciliation result
+Each of three sessions starts a new persistent PostgreSQL backend, recording its
+PID and start time. Before warm-up, each group calibrates one shared batch size
+for both implementations. It tries the reviewed powers of two from 1 to 32 in
+order and retains three complete pilot batches per implementation at every
+visited level. The first level where both median batch totals reach 1 ms is
+frozen. Missing levels, unequal arms, invalid timings or cap exhaustion fail.
+Calibration is never repeated in response to a failed stability gate.
 
-| Items | Operation | Median | p95 | Direct SQL median |
-| ---: | --- | ---: | ---: | ---: |
-| 10 | complete replacement | 2.992 ms | 3.076 ms | 0.134 ms |
-| 100 | complete replacement | 7.771 ms | 7.887 ms | 0.503 ms |
-| 1,000 | read | 4.213 ms | 4.275 ms | 2.878 ms |
-| 1,000 | insert | 38.492 ms | 38.932 ms | 9.508 ms |
-| 1,000 | root-only update | 35.208 ms | 35.408 ms | 0.057 ms |
-| 1,000 | complete replacement | 49.782 ms | 50.721 ms | 5.698 ms |
-| 1,000 | ETag-checked delete | 10.650 ms | 10.902 ms | 0.870 ms |
+Every constituent is a complete independent transaction: precondition snapshot,
+the exact reviewed `EXPLAIN ANALYZE` workload, resulting-state snapshot, rollback
+and restoration snapshot. Direct and duality constituents alternate within each
+batch. Plans, semantic witnesses and integer counters are retained per
+constituent; batching never repeats mutations against progressively changed state.
 
-## Native MERGE result
+Each group starts with ten paired warm-up batches. After ten, compare the median
+aggregate execution time of the last five with the preceding five,
+independently for each implementation. Both must differ by at most 10%. If
+either fails, add five batches and check again, up to 30; continued instability
+is FAIL. The threshold is unchanged, but the estimand is explicitly batch
+aggregate stability rather than individual-operation stability.
 
-The MERGE groups execute native PostgreSQL MERGE against both the generated document view and relational targets. The document path retains validation, ETag, locking, RLS and stored-document semantics.
-
-| Items | MERGE action | Median | p95 | Relational MERGE median |
-| ---: | --- | ---: | ---: | ---: |
-| 0 | INSERT | 1.357 ms | 1.404 ms | 0.085 ms |
-| 0 | UPDATE | 1.687 ms | 1.718 ms | 0.056 ms |
-| 0 | ETag-checked DELETE | 0.698 ms | 0.814 ms | 0.085 ms |
-| 10 | INSERT | 1.961 ms | 2.026 ms | 0.310 ms |
-| 10 | UPDATE | 3.093 ms | 3.139 ms | 0.136 ms |
-| 10 | ETag-checked DELETE | 1.029 ms | 1.073 ms | 0.100 ms |
-| 100 | INSERT | 5.428 ms | 5.595 ms | 1.126 ms |
-| 100 | UPDATE | 7.751 ms | 7.874 ms | 0.526 ms |
-| 100 | ETag-checked DELETE | 2.177 ms | 2.216 ms | 0.169 ms |
-| 1,000 | INSERT | 35.330 ms | 35.560 ms | 7.115 ms |
-| 1,000 | UPDATE | 51.510 ms | 51.918 ms | 5.545 ms |
-| 1,000 | ETag-checked DELETE | 14.858 ms | 15.390 ms | 0.560 ms |
-
-Read medians remain close to the historical build. Write medians must not be compared as if the contracts were identical: the current path adds strict JSON type and lossless numeric checks, statement-level schema guards, deterministic `timestamptz` rendering and stronger lifecycle metadata. Use the intermediate optimization run above to evaluate the set-wise validation change in isolation.
-
-Delete results are not equivalent to the old baseline. The current path locks the root, ETag-covered referenced object and child rows, reads the document again and validates its post-lock ETag before mutation. The baseline did not provide that contract.
-
-This reference workload includes a referenced object with `object.etag=false`. It therefore does not measure the additional object-row locking cost when that feature participates in the ETag.
-
-Direct SQL is not semantically equivalent: the document path additionally validates the complete document, checks the ETag, locks the configured state, applies RLS coverage checks and constructs the returned document.
-
-These measurements are diagnostic results, not a production capacity claim. They exclude network latency, TLS, PostgREST, connection-pool contention, sustained WAL pressure and simultaneous writers. Define an item-count limit and p95 write SLO for each pilot, then run a representative concurrent workload. A second shared-host run showed materially higher variance, which is why the isolated Azure run is the published reference.
-
-Run a measurement with explicit connection, workload and output settings:
+Each accepted session/group then records at least 50 measured batches. No
+constituent is trimmed. Report median, minimum, maximum and nearest-rank p95
+(`sorted[ceil(0.95*N)-1]`) separately for raw individual operations and for
+per-operation batch means. A p95 of batch means is always labelled as such and
+is never presented as individual tail latency. The comparison ratio uses batch
+mean medians. Diagnose variability; do not turn it into a production promise.
 
 ```sh
 python3 bench/duality_overhead.py \
-  --pg-bin /usr/lib/postgresql/18/bin \
-  --pg-host /var/run/postgresql \
-  --pg-port 5432 \
-  --pg-user "$(id -un)" \
-  --database jsontailor_duality_benchmark \
-  --sizes 0,1,10,100,1000 \
-  --warmups 3 \
-  --repetitions 30 \
-  --output results/duality-benchmark-reference \
-  --drop-database-after
+  --pg-bin /disposable/pg18/bin --pg-host /disposable/socket \
+  --pg-port 55433 --pg-user benchmark \
+  --database jsontailor_disposable_benchmark \
+  --installation /evidence/installation-pg18/installation.json \
+  --trusted-key /approved/benchmark-public.pem \
+  --measurement-key /protected/benchmark-signing.pem \
+  --warmups 10 --repetitions 50 \
+  --output /evidence/current-pg18 --drop-database-after
 ```
 
-When the source was copied without its `.git` directory, add `--source-commit <40-character-commit>`; otherwise the script refuses to run without reliable provenance. In a Git checkout the commit is detected automatically, and a conflicting explicit value is rejected.
+Warning: the selected database is dropped and recreated. Only use a dedicated
+disposable database. Output artifacts are never overwritten. For an installation
+and semantic smoke check before freeze, add `--semantic-check-only`; this emits
+no publishable timing artifacts and cannot pass the full benchmark verifier.
 
-The PostgreSQL role must be able to create and drop the dedicated benchmark database. With peer authentication, pass the operating-system account returned by `id -un`; otherwise pass the configured benchmark role. The script rejects maintenance database names, drops and recreates the target database before measurement, and leaves it available for inspection unless `--drop-database-after` is supplied.
+## Evidence and release consumption
 
-The output path may be absent or may be an existing directory that does not already contain benchmark artifacts. This permits a wrapper to place its log in the directory before starting the measurement while still preventing accidental replacement of earlier evidence. Preserve `measurements.csv`, `plans.json`, `summary.json` and `environment.json` together. The environment file records the exact source commit, dirty-tree state, connection settings and workload configuration.
+Retain `measurements.csv`, `plans.json`, `semantics.json`, `summary.json`,
+`environment.json`, `installation.json`, `installation.log`, `manifest.json`
+and `measurement.json`
+together. The SHA-256 manifest has an exact artifact inventory. Environment
+metadata records the exact source SHA/clean state, invocation, timestamps,
+PostgreSQL version (including prerelease suffix), effective server settings,
+CPU, memory, storage, host load, Python, connection settings and session identities.
 
-Validate any completed run independently:
+The measurement operator signs the completed manifest with the protected
+Ed25519 key identified by the independently supplied `--trusted-key`.
+`measurement.json` binds the complete manifest, installation attestation,
+candidate SHA, run identity/timestamps and producer/workload/verifier hashes.
+It is outside the manifest to avoid a circular digest. A signature proves
+origin and integrity under the approved operator key, not that a dishonest
+operator measured truthfully; independent review and key custody remain
+mandatory. An installation signature alone is not measurement evidence.
+Missing, stale or changed completed-measurement signatures fail verification.
+
+The fixture creates the required `(order_id,item_id)` child index and must
+pass its generated `__check()` before any samples are collected. A timing
+run on an unhealthy fixture is not qualified evidence.
 
 ```sh
-python3 bench/verify_results.py results/duality-benchmark-reference
+python3 bench/verify_results.py /evidence/current-pg18 \
+  --candidate FULL_IMMUTABLE_SHA --trusted-key /approved/benchmark-public.pem
+python3 tools/verify_release_candidate.py \
+  --benchmark-evidence /evidence/current-pg17 \
+  --benchmark-evidence /evidence/current-pg18 \
+  --benchmark-evidence /evidence/current-pg19 \
+  --benchmark-key /approved/benchmark-public.pem
 ```
 
-Comparisons between implementations also require the earlier commit and its raw output; summary ratios alone are not a reproducible baseline. Run `python3 tools/verify_repository_consistency.py` before publishing changed reference data or release metadata.
+Without the three-major matrix, repository candidate checks explicitly report
+the final benchmark as PENDING; that is not release approval. The release gate
+must invoke `verify_benchmark_matrix` with the frozen SHA and protected trust
+root. Retain approved records under the release evidence store for that SHA,
+with installation records and logs in each major's benchmark directory. Keep
+approvals/trust roots independent of the producer. Candidate validation never
+satisfies protected-main release authority or authorises publication.

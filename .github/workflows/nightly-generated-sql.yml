@@ -5,13 +5,14 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: nightly-generated-sql
   cancel-in-progress: true
 jobs:
   pg18:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       PGHOST: ${{ github.workspace }}/.pgsocket
       PGPORT: '55432'
@@ -20,18 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install PostgreSQL 18
+        timeout-minutes: 9
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
-          curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors -fsSL \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor \
-            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg >/dev/null
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends postgresql-18 postgresql-server-dev-18
+          python3 tools/install_postgresql.py 18 \
+            --log "$RUNNER_TEMP/installation.log" --job-minutes 45
+
       - name: Start isolated database and install extension
         shell: bash
         run: |
@@ -55,22 +51,36 @@ jobs:
             --output "$RUNNER_TEMP/mutation-generated-sql.jsonl"
           python3 tools/verify_jsonl_results.py "$RUNNER_TEMP/property-generated-sql.jsonl" \
             "$RUNNER_TEMP/mutation-generated-sql.jsonl"
-      - name: Upload evidence
+      - name: Stop PostgreSQL
+        if: always()
+        run: /usr/lib/postgresql/18/bin/pg_ctl -D "$RUNNER_TEMP/pgdata" -m fast stop || true
+      - name: Collect and require complete nightly evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_DIAGNOSTICS_CERTIFICATE: ${{ vars.EVIDENCE_DIAGNOSTICS_CERTIFICATE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly-generated-sql.yml" --jq '.id' || echo 0)"
+          python3 tools/collect_evidence.py --kind nightly --major 18 \
+            --input "$RUNNER_TEMP" --repo . --workflow-id "$workflow_id" \
+            --output "$RUNNER_TEMP/evidence/nightly-pg18"
+      - name: Upload redacted nightly evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: generated-sql-pg18
+          retention-days: 30
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/property-generated-sql.jsonl
-            ${{ runner.temp }}/mutation-generated-sql.jsonl
-            ${{ runner.temp }}/postgresql.log
-      - name: Require complete evidence
+            ${{ runner.temp }}/evidence/nightly-pg18/bundle.json
+            ${{ runner.temp }}/evidence/nightly-pg18/public/
+      - name: Upload encrypted nightly diagnostics
         if: always()
-        shell: bash
-        run: |
-          test -s "$RUNNER_TEMP/property-generated-sql.jsonl"
-          test -s "$RUNNER_TEMP/mutation-generated-sql.jsonl"
-      - name: Stop PostgreSQL
-        if: always()
-        run: /usr/lib/postgresql/18/bin/pg_ctl -D "$RUNNER_TEMP/pgdata" -m fast stop || true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-sql-pg18-diagnostics
+          retention-days: 30
+          if-no-files-found: error
+          path: ${{ runner.temp }}/evidence/nightly-pg18/diagnostics/

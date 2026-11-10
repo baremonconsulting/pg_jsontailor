@@ -13,11 +13,11 @@ import sys
 from typing import Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.product_fingerprint import PRODUCT_INPUTS, SCHEMA_VERSION, digest
+from bench.installation import verify_attestation
+from tools.release_metadata import verify as verify_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = ROOT / "bench/reference/azure-039a555-pg18"
-REFERENCE_FINGERPRINT = REFERENCE / "fingerprint-v2.json"
 PRODUCT_EQUIVALENCE_PATHS = PRODUCT_INPUTS
 EXACT_SHA_CHECKS = (
     "Repository checks", "PostgreSQL 17", "PostgreSQL 18", "PostgreSQL 19",
@@ -110,11 +110,13 @@ def benchmark_source_status(repo: Path, source_commit: str,
 
 
 def verify_release_policy(release: str, dependency: str) -> None:
-    block = re.search(r"required_checks=\(\n(.*?)\n\s+\)\n", release, re.DOTALL)
-    require(block is not None, "release gate required-check list is missing")
-    names = tuple(re.findall(r"'([^']+)'", block.group(1)))
-    require(names == EXACT_SHA_CHECKS,
-            "release gate exact-SHA check list differs")
+    require('tools/prepare_release.py' in release and 'environment: release' in release
+            and 'needs: [prepare, archive]' in release and '--verify-tag' in release,
+            'release authority/preparation/environment gate is missing')
+    require('  contents: read' in release and release.count('      contents: write') == 1,
+            'release write permission is not confined to publication')
+    require('workflow_dispatch:' in release and '\n  push:' not in release,
+            'release requires explicit authorised dispatch')
     require("push:\n    branches: [main]" in dependency,
             "dependency review does not run on main pushes")
     require("pull_request:\n    branches: [main]" in dependency,
@@ -131,10 +133,38 @@ def verify_release_policy(release: str, dependency: str) -> None:
             "dependency review PR and main runs are not equally pinned")
 
 
+def verify_benchmark_candidate(folder: Path, candidate: str, trusted_key: Path,
+                               repo: Path = ROOT) -> dict:
+    """Release consumer: independently authenticate installation before timings."""
+    installation = verify_attestation(folder / 'installation.json', repo=repo,
+                                      candidate=candidate, trusted_key=trusted_key)
+    from bench.verify_results import verify_results
+    result = verify_results(folder, candidate=candidate, trusted_key=trusted_key, repo=repo)
+    require(installation['candidate'] == candidate, 'release benchmark candidate differs')
+    return result
+
+
+def verify_benchmark_matrix(folders: Sequence[Path], candidate: str,
+                            trusted_key: Path, repo: Path = ROOT) -> None:
+    from tools.strict_results import loads
+    require(len(folders) == 3, 'release requires exact-candidate benchmarks on PG17/18/19')
+    majors = []
+    for folder in folders:
+        verify_benchmark_candidate(folder, candidate, trusted_key, repo)
+        majors.append(loads((folder / 'environment.json').read_text())['postgresql_major'])
+    require(set(majors) == {'17', '18', '19'}, 'release benchmark majors differ/duplicate')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument('--benchmark-evidence', action='append', type=Path, default=[])
+    parser.add_argument('--benchmark-key', type=Path)
     args = parser.parse_args()
+
+    previous_metadata = git('show', 'HEAD^:release-metadata.json', check=False)
+    from tools.strict_results import loads
+    verify_metadata(ROOT, loads(previous_metadata.stdout) if previous_metadata.returncode == 0 else None)
 
     if not args.allow_dirty:
         require(not git("status", "--porcelain").stdout,
@@ -144,26 +174,15 @@ def main() -> int:
     match = re.search(r"^default_version = '([^']+)'$", control, re.MULTILINE)
     require(match is not None, "extension version is missing")
     version = match.group(1)
-    require(f"## {version} — unreleased" in (ROOT / "CHANGELOG.md").read_text(),
-            "changelog is not in release-candidate state")
     require(f"version: {version}" in (ROOT / "CITATION.cff").read_text(),
             "citation version differs")
     require("Baremon s.r.o." in (ROOT / "LICENSE").read_text(),
             "legal identity differs")
 
-    environment = json.loads((REFERENCE / "environment.json").read_text())
-    migration = json.loads(REFERENCE_FINGERPRINT.read_text())
-    require(migration.get("product_fingerprint_schema") == SCHEMA_VERSION,
-            "reference benchmark fingerprint schema differs")
-    require(migration.get("source_commit") == environment.get("source_commit"),
-            "reference fingerprint source differs from benchmark environment")
-    require(migration.get("original_product_hashes") == environment.get("product_hashes"),
-            "reference fingerprint migration does not preserve original hashes")
-    source_commit = environment.get("source_commit", "")
-    benchmark_ok, benchmark_detail = benchmark_source_status(
-        ROOT, source_commit, recorded_hashes=migration.get("product_hashes"),
-        fingerprint_schema=migration.get("product_fingerprint_schema"))
-    require(benchmark_ok, benchmark_detail)
+    if args.benchmark_evidence:
+        require(args.benchmark_key is not None, 'independently trusted benchmark key required')
+        verify_benchmark_matrix(args.benchmark_evidence, git('rev-parse', 'HEAD').stdout.strip(),
+                                args.benchmark_key)
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     require("tests/dump_restore.py" in workflow,
@@ -180,7 +199,8 @@ def main() -> int:
     require(forbidden.returncode == 1,
             "public source contains disallowed authorship/tooling references:\n" + forbidden.stdout)
 
-    print(f"release candidate {version}: PASS ({source_commit[:8]} product-equivalent benchmark)")
+    benchmark = 'exact-candidate matrix PASS' if args.benchmark_evidence else 'final benchmark PENDING'
+    print(f"release candidate {version}: PASS ({benchmark}; not release approval)")
     return 0
 
 

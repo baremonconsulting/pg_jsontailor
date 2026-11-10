@@ -7,6 +7,9 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.strict_results import loads as strict_json_loads, result_rows, validate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,13 +39,18 @@ EXPECTED_CLAIMS = {
     "PGJT-47/CLAIM-PARTITION-ROLES",
     "PGJT-47/CLAIM-PARTITION-LIFECYCLE",
     "PGJT-47/CLAIM-PARTITION-RESTORE",
+    "PGJT-65/CLAIM-EXECUTABLE-QUICKSTART",
+    "PGJT-66/CLAIM-SCHEMA-MIGRATION",
+    "PGJT-67/CLAIM-PRECISE-CONTRACT",
+    "PGJT-68/CLAIM-STANDALONE",
+    "PGJT-72/CLAIM-GENERATED-SQL-NOTICES",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "d914017acccda38a8b3983648083977b8fc33615152ef2104306bb32b68e179d",
-    "claims": "1016c956fbf7d072e481a6fe3556fe44963374e2864ee11a30c77f2ea71da454",
+    "requirements": "1278b3cce362429fd53d608b2cb72a1f383e3f68929c209f932c56773e256deb",
+    "claims": "75956af0052559c996e51d1e00b455db83c4a5a8d37a8c9562fcde0525fb7e6e",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "supplemental_evidence": "ea010483e8967b3985b39c3ff0c95a358c6af8dd9f3e21d69af288faecfd8f4b",
-    "runtime_evidence": "cb3f75a3e1e1086cb1d567811f9cc0835564beff72f29fa1758f69f66bd8ecc4",
+    "supplemental_evidence": "912bfa4e1b74b10258737fa0f233540d2eac879ec4e19bd6f863f06a6f4a5988",
+    "runtime_evidence": "35c8187b9a30bf5ac59eab28ad8c84e1b72ddee7acdb5b0abd73b23d020e918e",
 }
 
 
@@ -55,18 +63,6 @@ def section_digest(value: object) -> str:
     encoded = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return hashlib.sha256(encoded).hexdigest()
-
-
-def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        require(key not in result, f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def strict_json_loads(content: str) -> object:
-    return json.loads(content, object_pairs_hook=reject_duplicate_keys)
 
 
 def source(entry: dict, *, label: str) -> str:
@@ -198,21 +194,6 @@ def verify(manifest: dict) -> None:
                 f"{name} differs from the reviewed PGJT-40 contract")
 
 
-def result_rows(path: Path) -> list[dict]:
-    require(path.is_file(), f"runtime result does not exist: {path}")
-    content = path.read_text()
-    try:
-        value = strict_json_loads(content)
-    except json.JSONDecodeError:
-        rows = [strict_json_loads(line)
-                for line in content.splitlines() if line.strip()]
-    else:
-        rows = value if isinstance(value, list) else [value]
-    require(rows and all(isinstance(row, dict) for row in rows),
-            f"runtime result has no object rows: {path}")
-    return rows
-
-
 def attest(manifest: dict, scope: str, postgresql: str | None,
            results: dict[str, Path], passed_suites: set[str]) -> dict:
     verify(manifest)
@@ -223,7 +204,7 @@ def attest(manifest: dict, scope: str, postgresql: str | None,
                 "PostgreSQL version is required for database attestation")
     else:
         require(postgresql is None, "repository attestation cannot declare PostgreSQL")
-    parsed = {suite: result_rows(path) for suite, path in results.items()}
+    parsed = {suite: validate(result_rows(path), suite) for suite, path in results.items()}
     evidence = {item["test_id"]: item for item in manifest["requirements"]}
     evidence.update({item["test_id"]: item
                      for item in manifest.get("supplemental_evidence", [])})

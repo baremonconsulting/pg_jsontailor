@@ -17,6 +17,7 @@ import tempfile
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bench.product_fingerprint import digest, working_tree_hashes
+from tools.strict_results import inventories, loads
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,10 @@ def coverage_manifest_checks() -> None:
             if row not in rows.setdefault(item["suite"], []):
                 rows[item["suite"]].append(row)
         paths = {}
+        for suite in rows:
+            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "runtime_limits", "rc02_database"}
+                           else {"name": ident, "status": "PASS"}
+                           for ident in inventories()[suite]]
         for suite, values in rows.items():
             path = folder / f"{suite}.jsonl"
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
@@ -149,17 +154,16 @@ def coverage_manifest_checks() -> None:
                                 for item in manifest["runtime_evidence"])
         if len(database["tests"]) != expected_database:
             raise AssertionError("database runtime attestation count differs")
-        postgrest_rows = [
-            {item["field"]: item["value"], "status": "PASS"}
-            for item in manifest["runtime_evidence"]
-            if item["scope"] == "postgrest"
-        ]
-        postgrest_path = folder / "postgrest.jsonl"
-        postgrest_path.write_text(
-            "".join(json.dumps(row) + "\n" for row in postgrest_rows))
+        postgrest_paths = {}
+        for suite in {item["suite"] for item in manifest["runtime_evidence"]
+                      if item["scope"] == "postgrest"}:
+            path = folder / f"{suite}.jsonl"
+            path.write_text("".join(json.dumps({"id": ident, "status": "PASS"}) + "\n"
+                                    for ident in inventories()[suite]))
+            postgrest_paths[suite] = path
         postgrest = verifier.attest(
-            manifest, "postgrest", "18", {"postgrest": postgrest_path}, set())
-        if len(postgrest["tests"]) != len(postgrest_rows):
+            manifest, "postgrest", "18", postgrest_paths, set())
+        if len(postgrest["tests"]) != sum(item["scope"] == "postgrest" for item in manifest["runtime_evidence"]):
             raise AssertionError("PostgREST runtime attestation count differs")
         partials = [row for row in database["tests"]
                     if row["coverage"] == "partial"]
@@ -205,7 +209,7 @@ def coverage_manifest_checks() -> None:
                       if row.get(selected["field"]) != selected["value"]]
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
 
-        runtime_rejected(remove_selected, "expected one runtime result, found 0")
+        runtime_rejected(remove_selected, "inventory differs")
 
         def fail_selected(changed_paths) -> None:
             path = changed_paths[selected["suite"]]
@@ -225,7 +229,7 @@ def coverage_manifest_checks() -> None:
             values.append(copy.deepcopy(duplicate))
             path.write_text("".join(json.dumps(row) + "\n" for row in values))
 
-        runtime_rejected(duplicate_selected, "expected one runtime result, found 2")
+        runtime_rejected(duplicate_selected, "duplicate test identifiers")
 
         def duplicate_status_key(changed_paths) -> None:
             path = changed_paths[selected["suite"]]
@@ -239,13 +243,19 @@ def coverage_manifest_checks() -> None:
 
         runtime_rejected(duplicate_status_key, "duplicate JSON key: status")
 
+        def unreferenced_failure(changed_paths) -> None:
+            path = changed_paths[selected["suite"]]
+            path.write_text(path.read_text() + '{"id":"unreferenced-failure","status":"FAIL"}\n')
+
+        runtime_rejected(unreferenced_failure, "non-PASS")
+
         first_suite = next(iter(paths))
         paths[first_suite].write_text("")
         try:
             verifier.attest(manifest, "postgresql", "18", paths,
                             {"installcheck", "dump_restore"})
         except RuntimeError as error:
-            if "runtime result has no object rows" not in str(error):
+            if "no test results" not in str(error):
                 raise AssertionError(f"unexpected missing-result rejection: {error}") from error
         else:
             raise AssertionError("missing runtime results were accepted")
@@ -413,47 +423,13 @@ def expect_rejection(verify, folder: Path, expected: str) -> None:
 
 
 def benchmark_checks() -> None:
-    verify = load_verifier()
-    source = ROOT / "bench/reference/azure-04d053e"
-    with tempfile.TemporaryDirectory(prefix="pgjt-tooling-") as temporary:
-        scratch = Path(temporary)
-        changed = scratch / "changed"
-        shutil.copytree(source, changed)
-        with (changed / "measurements.csv").open(newline="") as stream:
-            reader = csv.DictReader(stream)
-            fields = reader.fieldnames
-            rows = list(reader)
-        row = next(row for row in rows if row["warmup"] == "False")
-        row["warmup"] = "false"
-        with (changed / "measurements.csv").open("w", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(rows)
-        expect_rejection(verify, changed, "noncanonical warm-up flag")
-
-        empty = scratch / "empty"
-        empty.mkdir()
-        (empty / "environment.json").write_text(json.dumps({
-            "sizes": [], "operations": ["read"], "warmups": 3, "repetitions": 30}))
-        (empty / "summary.json").write_text("[]")
-        (empty / "plans.json").write_text("{}")
-        with (empty / "measurements.csv").open("w", newline="") as stream:
-            csv.DictWriter(stream, fieldnames=fields).writeheader()
-        expect_rejection(verify, empty, "invalid size configuration")
-
-        for name,change,expected in (
-                ("empty-operations", lambda value: value.update(operations=[]),
-                 "invalid operation configuration"),
-                ("fractional-size", lambda value: value.update(sizes=[0.5,1,10,100,1000]),
-                 "invalid size configuration"),
-                ("fractional-warmups", lambda value: value.update(warmups=3.5),
-                 "invalid sampling configuration")):
-            case = scratch / name
-            shutil.copytree(source, case)
-            environment = json.loads((case / "environment.json").read_text())
-            change(environment)
-            (case / "environment.json").write_text(json.dumps(environment))
-            expect_rejection(verify, case, expected)
+    from bench.verify_results import statistics_for, stable
+    if statistics_for(list(range(50)))['p95_ms'] != 47:
+        raise AssertionError('p95 must use nearest rank')
+    if not stable([1.] * 10) or stable([1.] * 5 + [1.11] * 5):
+        raise AssertionError('warm-up stability threshold differs')
+    # Full signed current-only artifacts and adversarial mutations are exercised
+    # by benchmark_trust_regressions.py, without historical repository fixtures.
 
 
 def jsonl_checks() -> None:
@@ -461,12 +437,14 @@ def jsonl_checks() -> None:
     with tempfile.TemporaryDirectory(prefix="pgjt-jsonl-") as temporary:
         folder = Path(temporary)
         valid = folder / "valid.jsonl"
-        valid.write_text('{"name":"one","status":"PASS"}\n')
-        if verify(valid) != 1:
+        valid.write_text(''.join(json.dumps({'name': ident, 'status': 'PASS'}) + '\n'
+                                 for ident in inventories()['core']))
+        if verify(valid, 'core') != 6:
             raise AssertionError("valid JSONL result count is wrong")
         valid_id = folder / "valid-id.jsonl"
-        valid_id.write_text('{"id":"one","status":"PASS"}\n')
-        if verify(valid_id) != 1:
+        valid_id.write_text(''.join(json.dumps({'id': ident, 'status': 'PASS'}) + '\n'
+                                    for ident in inventories()['core']))
+        if verify(valid_id, 'core') != 6:
             raise AssertionError("valid id-based JSONL result count is wrong")
         for name, content, expected in (
                 ("empty", "", "no test results"),
@@ -476,7 +454,7 @@ def jsonl_checks() -> None:
             path = folder / f"{name}.jsonl"
             path.write_text(content)
             try:
-                verify(path)
+                verify(path, 'core')
             except RuntimeError as error:
                 if expected not in str(error):
                     raise AssertionError(f"unexpected JSONL rejection: {error}") from error
@@ -504,41 +482,17 @@ def release_policy_checks() -> None:
     release = (ROOT / ".github/workflows/release.yml").read_text()
     dependency = (ROOT / ".github/workflows/dependency-review.yml").read_text()
     verifier.verify_release_policy(release, dependency)
+    policy = loads((ROOT / '.github/release-policy.json').read_text())
+    names = tuple(name for workflow in ['ci', 'codeql', 'dependency']
+                  for name in policy['workflows'][workflow]['jobs'])
+    if names != verifier.EXACT_SHA_CHECKS:
+        raise AssertionError('authoritative release check inventory differs')
 
-    start = release.index("required_checks=(")
-    end = release.index("\n          archive=", start)
-    gate = release[start:end]
-    gate = re.sub(
-        r"check_runs=\$\(gh api --paginate.*?@tsv'\)",
-        'check_runs="$PROBE_CHECK_RUNS"', gate, flags=re.DOTALL)
-    if "gh api" in gate:
-        raise AssertionError("release gate probe did not isolate the check loop")
-
-    def gate_status(rows: list[tuple[str, str, str]]) -> int:
-        value = "\n".join("\t".join(row) for row in rows)
-        return subprocess.run(
-            ["bash", "-ec", gate], text=True, capture_output=True,
-            env={**os.environ, "PROBE_CHECK_RUNS": value}).returncode
-
-    successful = [(name, "completed", "success")
-                  for name in verifier.EXACT_SHA_CHECKS]
-    if gate_status(successful):
-        raise AssertionError("complete exact-SHA release evidence was rejected")
-    for index, name in enumerate(verifier.EXACT_SHA_CHECKS):
-        if not gate_status(successful[:index] + successful[index + 1:]):
-            raise AssertionError(f"missing release check was accepted: {name}")
-        failed = list(successful)
-        failed[index] = (name, "completed", "failure")
-        if not gate_status(failed):
-            raise AssertionError(f"failed release check was accepted: {name}")
-        unfinished = list(successful)
-        unfinished[index] = (name, "in_progress", "")
-        if not gate_status(unfinished):
-            raise AssertionError(f"unfinished release check was accepted: {name}")
-
+    # Identity, app, attempt and pagination adversaries are exercised by
+    # release_trust_regressions.py, not a name-only shell check loop.
     for changed_release, changed_dependency, expected in (
-        (release.replace("            'Dependency review'\n", ""), dependency,
-         "exact-SHA check list differs"),
+        (release.replace('tools/prepare_release.py', 'missing-gate.py'), dependency,
+         'gate is missing'),
         (release, dependency.replace("  push:\n    branches: [main]\n", ""),
          "does not run on main pushes"),
         (release, dependency.replace("base-ref: ${{ github.event.before }}",

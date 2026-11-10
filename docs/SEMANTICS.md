@@ -8,13 +8,37 @@ Array order is deterministic and uses the configured `order_by` column followed 
 
 ## ETag
 
-The ETag is a SHA-256 digest of the configured relational state in a deterministic representation. It includes root fields, referenced-object fields unless disabled with `object.etag`, and child items in deterministic order.
+The ETag is the first 128 bits of SHA-256 encoded as 32 uppercase hexadecimal
+characters. It is a change detector, not an authentication token. It hashes a
+deterministic representation of the root identity and mapped root fields,
+referenced-object fields and child items in deterministic order.
+With `object.etag=false`, non-key object fields are excluded, but the mapped
+object key (or JSON null for a missing visible object) remains covered. Changing
+the reference key therefore changes the ETag even when object field checking
+is disabled. Unmapped source columns do not participate.
 
-A replacement or delete must carry the ETag obtained from a preceding read. The operation locks and rechecks the current document before changing data. Missing and stale ETags fail atomically.
+A replacement and the explicit delete function require the ETag obtained from
+a preceding read. Direct DELETE obtains `OLD.data` from the selected row, not
+an independently supplied client token; its predicate contract is described
+below. The write path locks and rechecks the visible document before changing
+data. A supplied missing or stale ETag fails atomically.
+
+Document writes require `READ COMMITTED` isolation. Statement guards and every
+row/RPC entrypoint reject `REPEATABLE READ` and `SERIALIZABLE` with `0A000`,
+including statements that match no document. This is enforced rather than a
+recommended default: a retained transaction snapshot cannot reliably recheck
+direct child insertions after waiting for locks. Document reads remain available
+at the caller's chosen isolation level.
 
 ## Insert
 
 An insert validates the complete document, creates the root row and then creates configured child rows. Database defaults and supported generated keys remain available when the corresponding document fields are omitted. The returned document contains generated identifiers and its current ETag.
+
+Before reporting insert or replacement success, the generated helper checks the
+materialised document against the replacement byte budget, including defaults,
+generated identifiers and ETag metadata. Excessive expansion raises `PT413` and
+rolls back the complete statement, rather than creating a document that cannot
+be submitted unchanged for its next replacement.
 
 Mapped JSON values must use the JSON type expected by the target PostgreSQL
 column: strings for character, date, timestamp, timestamp-with-time-zone and UUID columns; numbers for
@@ -50,7 +74,7 @@ a native uniqueness error at transaction commit rather than `PT422` during the
 view statement.
 
 When the constraint remains immediate, a concurrent direct writer that claims
-a previously unused deferrable child key is normalized to `PT422` and the
+a previously unused deferrable child key is normalised to `PT422` and the
 document write remains atomic.
 
 When the client ETag is included in `WHERE`, an initially stale token selects no row and returns `UPDATE 0`. If a change occurs after row selection while the trigger waits for locks, the trigger's post-lock comparison returns `PT412`.
@@ -58,10 +82,10 @@ When the client ETag is included in `WHERE`, an initially stale token selects no
 For an ETag-checked referenced object, replacement locks the root first, then
 locks the visible current and requested referenced-object rows in deterministic
 key order with `FOR SHARE`, and only then locks children and reads the document
-back for the final ETag comparison. The locks stabilize both the old reference
+back for the final ETag comparison. The locks stabilise both the old reference
 and a newly selected reference through `RETURNING`. Mappings with
-`object.etag=false` retain their NOCHECK behavior and do not take these object
-row locks. PostgreSQL deadlock or serialization errors remain whole-transaction
+`object.etag=false` exclude non-key object fields from change detection and do
+not take these object row locks. PostgreSQL deadlock or serialisation errors remain whole-transaction
 retry conditions when other application statements use conflicting lock orders.
 
 ## Delete
@@ -81,7 +105,16 @@ RETURNING _id;
 
 ## Security and RLS
 
-The extension functions and generated objects use invoker rights. Generated SQL uses qualified, quoted identifiers and a controlled search path. Row-level security remains effective on source tables. A write fails if policies hide rows required to validate, lock or reconcile the complete document.
+The extension functions and generated objects use invoker rights. Generated SQL
+uses qualified, quoted identifiers and a controlled search path.
+Row-level security remains effective on source tables. Reads and ETags are
+visibility-relative: they describe only the root, object and child rows visible
+to the current role and policies, not a privileged global snapshot. Roles with
+different visibility can observe different documents and ETags. Hidden child
+rows are preserved during replacement; deletion fails atomically if hidden
+dependants prevent removal of the root. A write fails when required visible
+rows cannot be locked or changed under the applicable policies. Do not use an
+ETag from a different role or policy context as a global revision number.
 
 ## REST
 
@@ -105,7 +138,7 @@ Native SQL `MERGE` uses the same insert, update and delete triggers as direct wr
 - a new array element with an explicit business key must provide every mapped
   field; table defaults apply only when a generated key is omitted;
 - an explicit value for a `GENERATED BY DEFAULT` identity does not advance its
-  sequence; the deployment must synchronize that sequence or avoid mixing
+  sequence; the deployment must synchronise that sequence or avoid mixing
   explicit and generated values;
 - complete replacement rather than partial patching;
 - no recursive nesting;
