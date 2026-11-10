@@ -147,6 +147,8 @@ DROP FUNCTION api.orders_dv__bounded_array(bigint);
 -- For the mapped-column rename example only:
 ALTER TABLE shop.orders RENAME COLUMN status TO state;
 
+-- Executes immediately, returns void and displays no DDL. Save/hash/approve
+-- the updated specification's exact generated SQL before this transaction.
 SELECT jsontailor.create_duality_view(
     'api.orders_dv',
     :'orders_dv_spec'::jsonb

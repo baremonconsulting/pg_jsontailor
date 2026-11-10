@@ -74,7 +74,7 @@ never use a moving ref. Use one exact-SHA evidence root containing
 their installation attestations/logs and full verified benchmark outputs.
 Provision read access to this store without granting publication write access.
 Retain approved public evidence and signed records permanently. Retain encrypted
-diagnostics for at least one year under the named release owner, with restricted
+diagnostics for at least two years under the named release owner, with restricted
 decryption keys and a documented retrieval test; Actions artifact expiry is not
 the retention mechanism. Never commit unencrypted sensitive diagnostics publicly.
 Customer pilot samples and diagnostics are not release evidence and must not be

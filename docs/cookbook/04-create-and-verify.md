@@ -2,29 +2,56 @@
 
 ## Goal
 
-Create a reviewed mapping and verify catalogue health/inventory.
+Create a reviewed mapping and retain observed catalogue evidence.
 
 ## Prerequisites
 
-Source schema, required index and a safely bound `spec` variable.
+Complete recipe 03; retain approval and keep schema, generator and specification
+unchanged. Bind `spec` from the reviewed file. Run as deployment owner with
+stop-on-error.
 
 ## Steps
 
+`create_duality_view()` executes immediately, returns void and displays no DDL.
+It generates SQL afresh; it does not read or validate the review file.
+
 ```sql
+BEGIN;
 SELECT jsontailor.create_duality_view('api.orders_dv', :'spec'::jsonb);
 SELECT api.orders_dv__check();
 SELECT view_name,generator_version,health_status
 FROM jsontailor.duality_view_inventory()
 WHERE view_name='api.orders_dv';
+COMMIT;
 ```
 
-Expected: a healthy check and one `api.orders_dv` inventory row with matching
-generator version and `OK` health. Creation can succeed without the child
-index; the check then raises PT422. Add the index and repeat. Binding drift is
-a stop condition requiring reviewed regeneration.
+Capture actual deployed state as owner, separately from desired-state SQL:
 
-## Expected result, common errors and reference
+```sh
+umask 077
+psql -XqAt -v ON_ERROR_STOP=1 -d generator \
+  -f examples/orders_deployed_manifest.sql > deployed.manifest.json
+sha256sum deployed.manifest.json > deployed.manifest.sha256
+```
 
-Require `OK` health and one current inventory row. Treat `PT422` as a stop
-condition. See [schema change](11-schema-change.md).
+The manifest applies to the complete shipped bigint-key orders mapping.
+Other mappings require reviewed exact identities, optional roles and signatures.
+
+## Expected result
+
+An `OK` check and inventory row; four views, seven functions and six triggers
+for this mapping, definitions/security state, owners, ACLs, comments and metadata.
+
+## Stop, common errors and recovery
+
+Missing objects, unexpected grants/owners or PT422 are stop conditions.
+Before COMMIT use ROLLBACK; after COMMIT stop traffic and follow
+[removal/rollback](09-remove-and-rollback.md). Never use CASCADE to repair an
+unexplained dependency. A missing child index can allow creation but fail health.
+
+## Evidence and reference
+
+Retain manifest, hash, reviewed SQL and approval privately. Catalogue
+reconstruction is not original SQL bytes. Regenerating the stored specification
+describes desired state, not proof of absence of deployed drift.
 

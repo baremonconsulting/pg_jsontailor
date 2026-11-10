@@ -181,10 +181,13 @@ The same DDL can be inspected before execution:
 SELECT jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb);
 ```
 
-`create_duality_view()` executes exactly the output of `duality_view_ddl()`.
+`create_duality_view()` executes immediately, returns void and displays no DDL.
+It regenerates the output of `duality_view_ddl()` rather than reading a saved file.
 The complete mapping creates four views, seven functions and six triggers.
 Use [the DDL review recipe](docs/cookbook/03-review-ddl.md) for unpadded output
-and the protected exporter for anything that will be deployed.
+and save/hash/approve that exact SQL before extension-mode creation. For a
+no-extension target, verify and deploy the protected standalone exporter bundle.
+Do not execute the raw review file as the deployment procedure.
 
 In applications, pass the specification as a query parameter rather than reading a server-side file. Both the target view and every source table must be schema-qualified.
 

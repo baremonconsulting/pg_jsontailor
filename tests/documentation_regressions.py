@@ -93,7 +93,7 @@ def pilot_readiness_documents() -> None:
     cookbook = ROOT / "docs/cookbook"
     recipes = sorted(cookbook.glob("[0-9][0-9]-*.md"))
     assert len(recipes) == 15, "cookbook recipe inventory differs"
-    for recipe in recipes[:10]:
+    for recipe in recipes:
         content = recipe.read_text()
         for marker in ("## Goal", "## Prerequisites", "## Steps"):
             assert marker in content, f"{recipe.name}: missing recipe section {marker}"
@@ -180,6 +180,66 @@ def pilot_readiness_documents() -> None:
     for marker in ("Annotated abridged DDL", "CREATE VIEW", "CREATE FUNCTION",
                    "CREATE TRIGGER", "REVOKE ALL", "COMMENT ON VIEW"):
         assert marker in ddl_outline, "generated DDL outline missing " + marker
+
+
+def pilot_closure_contract(documents: dict[str, str]) -> None:
+    """PGJT-126..130: reject deployment/security cookbook regressions."""
+    api = documents["docs/API.md"]
+    assert "Run DDL returned by `duality_view_ddl`" not in api
+    review = documents["docs/cookbook/03-review-ddl.md"]
+    for marker in ("encode(convert_to", "bytes.fromhex", "sha256sum", "reviewed.commit",
+                   "Extension installed", "No-extension target", "does not consume the saved file"):
+        assert marker in review, "missing reviewed-byte/deployment contract: " + marker
+    for path in ("examples/quickstart.sql", "docs/UPGRADING.md",
+                 "docs/cookbook/04-create-and-verify.md", "docs/cookbook/15-rls.md"):
+        content = documents[path].lower()
+        assert "immediately" in content and ("displays no" in content or "nothing" in content), path
+    rls = documents["docs/cookbook/15-rls.md"]
+    assert "Deny direct source-table access" not in rls
+    for marker in ("NOBYPASSRLS", "Source privileges remain necessary", "no database",
+                   "arbitrary-SQL", "cross-tenant", "ROLLBACK"):
+        assert marker in rls, "missing RLS boundary: " + marker
+    proxy = documents["docs/cookbook/10-postgrest-proxy.md"]
+    assert "upstream URL" not in proxy
+    for marker in ("--upstream-socket", "--view orders_dv", "server-unix-socket-mode",
+                   "0700", "0600", "RAW_POSTGREST_HOST", "RAW_POSTGREST_PORT",
+                   "actual customer network", "NOT_RUN"):
+        assert marker in proxy, "missing private-socket gate: " + marker
+    pilot = documents["docs/cookbook/14-pilot-acceptance.md"]
+    for marker in ("All three majors remain required", "release-candidate qualification",
+                   "NOT_RUN", "Customer samples/diagnostics", "two-year"):
+        assert marker in pilot, "missing pilot gate: " + marker
+    assert "at least two years" in documents["docs/RELEASE_AUTHORITY.md"]
+    manifest = documents["examples/orders_deployed_manifest.sql"]
+    for marker in ("READ ONLY", "REPEATABLE READ", "pg_get_viewdef", "pg_get_functiondef",
+                   "pg_get_triggerdef", "tgenabled", "aclexplode", "acldefault", "attacl",
+                   "obj_description", "orders_dv__check", "observed_counts"):
+        assert marker in manifest, "missing deployed-state evidence: " + marker
+
+
+def pilot_closure_negatives() -> None:
+    paths = ("docs/API.md", "docs/cookbook/03-review-ddl.md", "examples/quickstart.sql",
+             "docs/UPGRADING.md", "docs/cookbook/04-create-and-verify.md",
+             "docs/cookbook/15-rls.md", "docs/cookbook/10-postgrest-proxy.md",
+             "docs/cookbook/14-pilot-acceptance.md", "docs/RELEASE_AUTHORITY.md",
+             "examples/orders_deployed_manifest.sql")
+    documents = {path: (ROOT / path).read_text() for path in paths}
+    pilot_closure_contract(documents)
+    for path, old, new in (
+        ("docs/API.md", "", "Run DDL returned by `duality_view_ddl`"),
+        ("docs/cookbook/03-review-ddl.md", "bytes.fromhex", "str.strip"),
+        ("docs/cookbook/15-rls.md", "NOBYPASSRLS", "BYPASSRLS"),
+        ("docs/cookbook/10-postgrest-proxy.md", "--upstream-socket", "--upstream-url"),
+        ("examples/orders_deployed_manifest.sql", "tgenabled", "omitted"),
+        ("examples/orders_deployed_manifest.sql", "aclexplode", "omitted"),
+    ):
+        changed = dict(documents)
+        changed[path] = changed[path] + new if not old else changed[path].replace(old, new)
+        try:
+            pilot_closure_contract(changed)
+        except AssertionError:
+            continue
+        raise AssertionError("pilot closure mutation accepted: " + path + "/" + old)
 
 
 def rejected(callback) -> None:
@@ -301,6 +361,7 @@ def archive_identity() -> None:
 if __name__ == "__main__":
     claims()
     pilot_readiness_documents()
+    pilot_closure_negatives()
     capability_claim_negatives()
     notices()
     standalone_attestation()
@@ -310,3 +371,4 @@ if __name__ == "__main__":
     print("PGJT-68/attestation-negatives: PASS")
     print("PGJT-75/capability-documentation-negatives: PASS")
     print("PGJT-116-125/pilot-documentation-contract: PASS")
+    print("PGJT-126-130/pilot-closure-negatives: PASS")

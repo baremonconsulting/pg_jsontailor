@@ -69,10 +69,17 @@ as the base and add customer-specific cases. At minimum include:
 
 ## 4. Deployment and release gate
 
-Managed PostgreSQL installations apply only the reviewed, verified bundle from
-`tools/export_standalone.py`; raw `duality_view_ddl` output is inspection-only.
+With the extension installed, save/hash/approve exact generated DDL and call
+`create_duality_view()` in a stop-on-error transaction. It executes immediately,
+returns void and displays no DDL. No-extension managed installations apply only
+the reviewed, verified bundle from `tools/export_standalone.py`; raw
+`duality_view_ddl` output is inspection-only in both paths.
 Generation and regeneration occur in a controlled environment with the same
 schema and PostgreSQL major, followed by catalogue and application smoke tests.
+Retain the reviewed SQL bytes and the separate observed deployed-object manifest
+from cookbook recipes 03–04. Regenerated desired-state SQL is not proof of the
+actual deployed state. Validate PostgreSQL 17, 18 and the pinned 19 build; record
+its pre-release qualification separately from GA support.
 
 Provide a controlled pilot only from a pinned full commit and retained bundle
 hash after the functional and security pilot gate. A public release still

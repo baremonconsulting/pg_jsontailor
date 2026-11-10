@@ -27,13 +27,21 @@ For `examples/orders_dv.spec.json`, the generator creates:
    provenance.
 
 The complete mapping therefore has four views, seven functions and six
-triggers. Use these catalogue queries to inspect a deployed mapping:
+triggers. These counts apply only to this complete shipped mapping. Capture
+actual deployed state with `examples/orders_deployed_manifest.sql` as shown in
+recipe 04: all exact identities, definitions, trigger enabled state, view options,
+owners, raw/effective ACLs, comments, metadata and health are retained. The
+following older queries are useful partial inspections, not a complete manifest:
 
 ```sql
 SELECT pg_get_viewdef('api.orders_dv'::regclass, true);
 SELECT pg_get_functiondef(p.oid)
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-WHERE n.nspname='api' AND p.proname LIKE 'orders_dv__%'
+WHERE p.oid IN ('api.orders_dv__insert()'::regprocedure,
+ 'api.orders_dv__update()'::regprocedure,'api.orders_dv__delete()'::regprocedure,
+ 'api.orders_dv__guard()'::regprocedure,'api.orders_dv__check()'::regprocedure,
+ 'api.orders_dv__bounded_array(bigint)'::regprocedure,
+ 'api.orders_dv__delete_document(bigint,text)'::regprocedure)
 ORDER BY p.proname,pg_get_function_identity_arguments(p.oid);
 SELECT event_object_schema,event_object_table,trigger_name,event_manipulation
 FROM information_schema.triggers
@@ -51,7 +59,11 @@ SELECT jsontailor.duality_view_ddl(
           length('pg_jsontailor metadata v1: ')+1)::jsonb)->'spec');
 ```
 
-Raw output is inspection-only. Deploy the self-protecting exporter bundle.
+This regenerates desired state, not actual deployed state or proof of no drift.
+Raw output is inspection-only. Extension mode uses reviewed generation followed
+by `create_duality_view()`; no-extension mode deploys the verified exporter
+bundle. Create executes immediately and displays no DDL. It does not consume
+the saved review file. See recipes 03–04 for exact-byte hashes and evidence.
 
 ## Annotated abridged DDL
 
