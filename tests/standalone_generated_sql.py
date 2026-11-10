@@ -18,13 +18,16 @@ from dump_restore import Commands, literal
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from export_standalone import export
-from verify_generated_sql_notice import verify_bundle
+from verify_generated_sql_notice import BUNDLE_HEADER, bundle_preamble, verify_bundle
 from source_provenance import source_identity
 
 RESULT_IDS = (
     "PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags",
     "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards",
     "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore",
+    "PGJT-114/self-protecting-header", "PGJT-114/wrong-major",
+    "PGJT-114/hostile-search-path", "PGJT-114/transaction-invocations",
+    "PGJT-114/bundle-negatives",
 )
 
 
@@ -102,6 +105,69 @@ def failed_sql(commands: Commands, database: str, sql: str, expected: str) -> No
             is not None, f"expected {expected}, got {result.stderr}")
 
 
+def bundle_negatives(bundle: Path) -> None:
+    """Every part of the PGJT-114 deployment envelope is independently required."""
+    path = bundle / "generated.sql"
+    original = path.read_text()
+    mutations = (
+        original.replace('-- pg_jsontailor standalone bundle\n', '', 1),
+        original.replace('-- Copyright (c) 2026, Baremon s.r.o.\n', '', 1),
+        original.replace('BEGIN;\n', '', 1),
+        original.replace('SET LOCAL search_path = pg_catalog, pg_temp;\n', '', 1),
+        original.replace('IF target_major <> ', 'IF target_major = ', 1),
+        original.removesuffix('COMMIT;\n'),
+        original + '-- jsontailor.forbidden_runtime_reference\n',
+    )
+    try:
+        for mutation in mutations:
+            require(mutation != original, 'bundle negative mutation did not match')
+            path.write_text(mutation)
+            try:
+                verify_bundle(bundle)
+            except RuntimeError:
+                continue
+            raise RuntimeError('incomplete or unsafe standalone bundle was accepted')
+    finally:
+        path.write_text(original)
+
+
+def apply_bundle(commands: Commands, database: str, path: Path, wrapped: bool = False,
+                 check: bool = True, role: str | None = None) -> subprocess.CompletedProcess[str]:
+    invocation = [str(commands.pg_bin / 'psql'), '-X', '-v', 'ON_ERROR_STOP=1',
+                  '-d', database]
+    if wrapped:
+        invocation.append('--single-transaction')
+    session = ('SET ROLE ' + role + ';' if role else '')
+    session += 'SET search_path = pgjt114_untrusted, pg_catalog;'
+    invocation.extend(['-c', session, '-f', str(path)])
+    result = subprocess.run(invocation, text=True, capture_output=True, timeout=120)
+    if check:
+        require(result.returncode == 0, 'standalone application failed: ' + result.stderr)
+    return result
+
+
+def no_generated_objects(commands: Commands, database: str) -> bool:
+    return last(commands, database, """SELECT
+ NOT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='api')
+ AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname='api');""") == 't'
+
+
+def hash_binding_fixture(commands: Commands, database: str) -> None:
+    # A controlled sentinel must never become the generated view's hash binding.
+    commands.sql(database, """INSERT INTO shop.orders(order_id,status,created_at)
+VALUES(43,'second hash fixture',DATE '2026-11-04');
+CREATE SCHEMA pgjt114_untrusted;
+CREATE FUNCTION pgjt114_untrusted.sha256(bytea) RETURNS bytea LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'unexpected hash binding'; END; $$;""")
+
+
+def distinct_etags(commands: Commands, database: str) -> bool:
+    return last(commands, database, """SELECT count(*) > 1
+ AND count(DISTINCT data#>>'{_metadata,etag}') = count(*) FROM api.orders_dv;""") == 't'
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pg-bin", type=Path, required=True)
@@ -116,9 +182,10 @@ def main() -> int:
     require(major in {"17", "18", "19"}, "unsupported PostgreSQL major")
     provenance = source_identity(ROOT, args.source_commit, args.source_archive, args.archive_sha256)
     prefix = "pgjt68_" + uuid.uuid4().hex[:10]
-    databases = [prefix + suffix for suffix in ("_source", "_target", "_custom", "_plain")]
-    source, target, custom, plain = databases
+    databases = [prefix + suffix for suffix in ("_source", "_target", "_custom", "_plain", "_wrapped", "_wrong")]
+    source, target, custom, plain, wrapped, wrong = databases
     role = prefix + "_reader"
+    owner = prefix + "_owner"
     results: list[dict] = []
     ddl_hash = ""
     created: list[str] = []
@@ -132,6 +199,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pgjt68-bundle-") as temporary:
         folder = Path(temporary)
         try:
+            commands.sql(args.maintenance_database,
+                         f"CREATE ROLE {owner} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;")
             commands.create(source)
             created.append(source)
             commands.sql(source, "CREATE EXTENSION pg_jsontailor;")
@@ -150,14 +219,78 @@ def main() -> int:
             ddl_hash = hashlib.sha256((bundle / "generated.sql").read_bytes()).hexdigest()
             verify_bundle(bundle)
             record(RESULT_IDS[0], True, "candidate generator body and exported SQL validated")
+            script = (bundle / 'generated.sql').read_text()
+            header = BUNDLE_HEADER.match(script)
+            require(header is not None and header.group(2) == major
+                    and json.loads(header.group(3)) == 'api.orders_dv', 'bundle source header differs')
+            require(header.group(1) == last(commands, source,
+                    "SELECT extversion FROM pg_extension WHERE extname='pg_jsontailor';"),
+                    'bundle generator version differs')
+            bundle_negatives(bundle)
+            commands.create(wrong)
+            created.append(wrong)
+            commands.run('psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', wrong,
+                         '-f', str(ROOT / 'examples/shop_schema.sql'))
+            commands.sql(wrong, 'CREATE SCHEMA api;')
+            notice = (bundle / 'GENERATED_SQL_NOTICE').read_text()
+            preamble = bundle_preamble(header.group(1), int(major), 'api.orders_dv', notice)
+            other_major = int(major) + 1
+            mismatched = folder / 'wrong-major.sql'
+            mismatched.write_text(bundle_preamble(header.group(1), other_major, 'api.orders_dv', notice)
+                                  + script[len(preamble):])
+            late_failure = folder / 'late-failure.sql'
+            late_failure.write_text(script.removesuffix('COMMIT;\n') + 'SELECT 1/0;\nCOMMIT;\n')
+            for invocation in (False, True):
+                rejected = apply_bundle(commands, wrong, mismatched, invocation, check=False)
+                require(rejected.returncode != 0
+                        and f'generated on PostgreSQL {other_major}, target PostgreSQL {major}' in rejected.stderr,
+                        'major guard did not identify both versions: ' + rejected.stderr)
+                require(no_generated_objects(commands, wrong), 'wrong-major bundle created objects')
+                rejected = apply_bundle(commands, wrong, late_failure, invocation, check=False)
+                require(rejected.returncode != 0 and 'division by zero' in rejected.stderr,
+                        'late-failure control did not run: ' + rejected.stderr)
+                require(no_generated_objects(commands, wrong), 'failed bundle application was not atomic')
             commands.create(target)
             created.append(target)
+            commands.sql(args.maintenance_database, f"ALTER DATABASE {target} OWNER TO {owner};")
             require(absent(commands, target), "target is not clean before import")
             commands.run("psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", target,
+                         "-c", f"SET ROLE {owner};",
                          "-f", str(ROOT / "examples/shop_schema.sql"))
-            commands.sql(target, "CREATE SCHEMA api;")
-            commands.run("psql", "-X", "-v", "ON_ERROR_STOP=1", "--single-transaction",
-                         "-d", target, "-f", str(bundle / "generated.sql"))
+            commands.sql(target, f"SET ROLE {owner};CREATE SCHEMA api;")
+            hash_binding_fixture(commands, target)
+            commands.sql(target, f"ALTER SCHEMA pgjt114_untrusted OWNER TO {owner};"
+                         f"ALTER FUNCTION pgjt114_untrusted.sha256(bytea) OWNER TO {owner};"
+                         f"ALTER TABLE shop.orders OWNER TO {owner};"
+                         f"ALTER TABLE shop.order_items OWNER TO {owner};"
+                         f"ALTER TABLE shop.customers OWNER TO {owner};"
+                         f"ALTER SCHEMA shop OWNER TO {owner};")
+            apply_bundle(commands, target, bundle / 'generated.sql', role=owner)
+            require(last(commands, target, "SELECT pg_get_userbyid(relowner) FROM pg_class "
+                         "WHERE oid='api.orders_dv'::regclass;") == owner,
+                    'standalone objects are not owned by the unprivileged database owner')
+            require(distinct_etags(commands, target), 'hostile-path bundle ETags are not distinct')
+            commands.create(wrapped)
+            created.append(wrapped)
+            commands.sql(args.maintenance_database, f"ALTER DATABASE {wrapped} OWNER TO {owner};")
+            commands.run('psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', wrapped,
+                         '-c', f'SET ROLE {owner};',
+                         '-f', str(ROOT / 'examples/shop_schema.sql'))
+            commands.sql(wrapped, f'SET ROLE {owner};CREATE SCHEMA api;')
+            hash_binding_fixture(commands, wrapped)
+            commands.sql(wrapped, f"ALTER SCHEMA pgjt114_untrusted OWNER TO {owner};"
+                         f"ALTER FUNCTION pgjt114_untrusted.sha256(bytea) OWNER TO {owner};"
+                         f"ALTER TABLE shop.orders OWNER TO {owner};"
+                         f"ALTER TABLE shop.order_items OWNER TO {owner};"
+                         f"ALTER TABLE shop.customers OWNER TO {owner};"
+                         f"ALTER SCHEMA shop OWNER TO {owner};")
+            apply_bundle(commands, wrapped, bundle / 'generated.sql', wrapped=True,
+                         role=owner)
+            require(absent(commands, wrapped) and distinct_etags(commands, wrapped)
+                    and last(commands, wrapped, "SELECT api.orders_dv__check()->>'status';") == 'OK',
+                    'single-transaction invocation differs')
+            crud(commands, wrapped)
+            deletes(commands, wrapped)
             record(RESULT_IDS[1], absent(commands, target), "no extension and no jsontailor schema")
             crud(commands, target)
             record(RESULT_IDS[2], True)
@@ -219,11 +352,17 @@ CREATE POLICY visible_child ON shop.order_items TO {role} USING(item_id<>2) WITH
                 merges(commands, database)
                 record(result_id, last(commands, database, f"SET ROLE {role};SELECT "
                        "jsonb_array_length(data->'items')=1 FROM api.orders_dv WHERE _id=42;") == "t")
+            record(RESULT_IDS[9], True, 'generator version, PostgreSQL major, target and embedded notice verified')
+            record(RESULT_IDS[10], True, 'both invocations reject before creating generated objects')
+            record(RESULT_IDS[11], True, 'untrusted hash sentinel unused; distinct ETags on both invocations')
+            record(RESULT_IDS[12], True, 'own and psql transactions support CRUD and roll back failed applications')
+            record(RESULT_IDS[13], True, 'missing header, notice, BEGIN, search_path, guard, COMMIT and runtime reference rejected')
             require([row["name"] for row in results] == list(RESULT_IDS), "result inventory differs")
         finally:
             for database in reversed(created):
                 commands.drop(database)
             commands.sql(args.maintenance_database, f"DROP ROLE IF EXISTS {role};")
+            commands.sql(args.maintenance_database, f"DROP ROLE IF EXISTS {owner};")
             args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in results))
     print("standalone generated SQL: PASS (PostgreSQL " + major + ")")
     return 0

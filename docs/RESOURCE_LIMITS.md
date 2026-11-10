@@ -50,7 +50,7 @@ native constraint SQLSTATEs retain their previous meanings.
 
 ## Runtime read capability migration
 
-An array document now needs an explicit EXECUTE grant on its owner-only
+An array document needs an explicit EXECUTE grant on its owner-only
 `<view>__bounded_array(bigint)` cardinality gate. It returns a boolean or raises
 an error; it cannot read or write source data itself. As the view owner:
 

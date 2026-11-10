@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from verify_generated_sql_notice import verify_archive, verify_bundle, verify_notice, verify_source
+from verify_generated_sql_notice import bundle_preamble, verify_archive, verify_bundle, verify_notice, verify_source
 from verify_standalone_results import EXPECTED_IDS, verify as verify_results
 from source_provenance import archive_provenance, source_identity
 
@@ -88,6 +88,100 @@ def claims() -> None:
                              content, re.IGNORECASE), f"non-British public prose: {path}"
 
 
+def pilot_readiness_documents() -> None:
+    """PGJT-116-125 user-facing contracts remain complete and conservative."""
+    cookbook = ROOT / "docs/cookbook"
+    recipes = sorted(cookbook.glob("[0-9][0-9]-*.md"))
+    assert len(recipes) == 15, "cookbook recipe inventory differs"
+    for recipe in recipes[:10]:
+        content = recipe.read_text()
+        for marker in ("## Goal", "## Prerequisites", "## Steps"):
+            assert marker in content, f"{recipe.name}: missing recipe section {marker}"
+        lowered = content.lower()
+        for marker in ("expected result", "common errors", "reference"):
+            assert marker in lowered, f"{recipe.name}: missing recipe contract {marker}"
+    required = {
+        "README.md": ("Users and operators", "Maintainers"),
+        "SECURITY_MODEL.md": ("Residual risks", "Minimum capabilities"),
+        "DEPLOYMENT_RECORD.md": ("RPO and RTO", "Raw PostgREST exposure"),
+        "cookbook/08-no-extension.md": ("same PostgreSQL major", "No provider"),
+        "cookbook/10-postgrest-proxy.md": ("exactly one `_id=eq.<value>`", "Raw PostgREST"),
+        "cookbook/troubleshooting.md": ("PT412", "PT428", "42501", "unknown `limits` key"),
+        "cookbook/generated-ddl-outline.md": ("four views, seven functions and six", "inspection-only"),
+    }
+    for relative, markers in required.items():
+        text = (ROOT / "docs" / relative).read_text()
+        for marker in markers:
+            assert marker in text, f"{relative}: missing {marker}"
+    troubleshooting = (ROOT / "docs/cookbook/troubleshooting.md").read_text()
+    assert "| 40P01 deadlock |" in troubleshooting
+    assert "| 500 (tested PostgREST contract) |" in troubleshooting
+    assert "| 0A000 isolation | Writes are not READ COMMITTED | Use READ COMMITTED | 400 |" in troubleshooting
+    assert "| 401 anonymous / 403 authenticated |" in troubleshooting
+    assert "unknown `limits` key" in troubleshooting
+    assert troubleshooting.count("N/A — generator") == 6
+    assert "409/503" not in troubleshooting
+    required_messages = (
+        "document value cannot be converted to the mapped SQL type",
+        "invalid or unsupported root.fields.x",
+        "root.table is not an ordinary or partitioned table",
+        "generated object name exceeds 63 bytes",
+        "array.parent_fk requires a validated enforced non-deferrable NO ACTION/RESTRICT foreign key",
+        "permission denied for function orders_dv__bounded_array",
+        "resource limit must be a supported integer",
+        "_id column requires _id in the document",
+    )
+    for message in required_messages:
+        assert message in troubleshooting, "missing exact troubleshooting diagnostic: " + message
+    assert "../API.md#supported-mapped-column-types" in troubleshooting
+    for cause in ("unvalidated", "not enforced", "deferrable", "CASCADE"):
+        assert cause in troubleshooting, "missing foreign-key cause: " + cause
+    assert "ON DELETE NO ACTION" in troubleshooting
+    assert "ON UPDATE/DELETE" not in troubleshooting
+    security_model = (ROOT / "docs/SECURITY_MODEL.md").read_text()
+    for marker in ("different tenant", "cross-tenant foreign-key targets",
+                   "creation can succeed", "actual application role"):
+        assert marker in security_model, "missing PGJT-125 residual: " + marker
+    no_extension = (ROOT / "docs/cookbook/08-no-extension.md").read_text()
+    assert "SET ROLE target_owner; CREATE SCHEMA api" in no_extension
+    for marker in ("pg_dump --schema-only", "source-schema.sql",
+                   "Move to a new product version", "reviewed-remove-orders.sql",
+                   "standalone-orders-vnext/generated.sql", "reviewed-grants.sql",
+                   "reapply the retained previous"):
+        assert marker in no_extension, "missing PGJT-116 runbook step: " + marker
+    pilot = (ROOT / "docs/PILOT_READINESS.md").read_text()
+    for marker in ("irreversibly anonymised", "written customer agreement",
+                   "Pilot scope record", "private support channel",
+                   "verified deletion owner"):
+        assert marker in pilot, "missing PGJT-123 pilot control: " + marker
+    support = (ROOT / "SUPPORT.md").read_text()
+    assert "private support channel" in support and "Pilot scope record" in support
+    release_authority = (ROOT / "docs/RELEASE_AUTHORITY.md").read_text()
+    assert "Customer pilot samples and diagnostics are not release evidence" in release_authority
+    for marker in ("including `DELETE`", "helper functions remain owner-only",
+                   "Revoke broad view defaults", "exact function ACLs"):
+        assert marker in security_model, "missing default-privilege residual: " + marker
+    readme_status = (ROOT / "README.md").read_text()
+    for marker in ("separately signed written pilot terms", "best-effort",
+                   "without warranty"):
+        assert marker in readme_status, "missing PGJT-123 status wording: " + marker
+    security_policy = (ROOT / "SECURITY.md").read_text()
+    security_words = " ".join(security_policy.split())
+    assert "best-effort basis" in security_words and "without a warranty" in security_words
+    readme = (ROOT / "README.md").read_text()
+    assert "PostgreSQL 17 and 18 are the supported released majors" in readme
+    assert "high-contention write-heavy" in readme.lower()
+    assert "protected standalone bundle" in readme
+    assert "preliminary figures" not in readme.lower()
+    for marker in ("### Before you start", '"root"', '"_metadata"',
+                   "docs/SQL_SHAPES.md", "docs/TESTING.md"):
+        assert marker in readme, "README entry path missing " + marker
+    ddl_outline = (ROOT / "docs/cookbook/generated-ddl-outline.md").read_text()
+    for marker in ("Annotated abridged DDL", "CREATE VIEW", "CREATE FUNCTION",
+                   "CREATE TRIGGER", "REVOKE ALL", "COMMENT ON VIEW"):
+        assert marker in ddl_outline, "generated DDL outline missing " + marker
+
+
 def rejected(callback) -> None:
     try:
         callback()
@@ -111,8 +205,22 @@ def notices() -> None:
         (folder / "generated.sql").write_text("SELECT 1;\n")
         rejected(lambda: verify_bundle(folder))
         shutil.copyfile(ROOT / "GENERATED_SQL_NOTICE", folder / "GENERATED_SQL_NOTICE")
+        rejected(lambda: verify_bundle(folder))
+        script = bundle_preamble('0.2.0', 18, 'api.orders_dv', notice.decode()) + 'SELECT 1;\n\nCOMMIT;\n'
+        (folder / "generated.sql").write_text(script)
         verify_bundle(folder)
-        (folder / "generated.sql").write_text("SELECT jsontailor.duality_view_inventory();\n")
+        for fragment in ('-- pg_jsontailor standalone bundle\n',
+                         '-- Copyright (c) 2026, Baremon s.r.o.\n',
+                         'BEGIN;\n', 'SET LOCAL search_path = pg_catalog, pg_temp;\n',
+                         '    IF target_major <> 18 THEN\n', 'COMMIT;\n'):
+            (folder / "generated.sql").write_text(script.replace(fragment, '', 1))
+            rejected(lambda: verify_bundle(folder))
+        (folder / "generated.sql").write_text(script + "-- jsontailor.duality_view_inventory()\n")
+        rejected(lambda: verify_bundle(folder))
+        # Keeping only the legal paragraphs must not omit the surrounding notice.
+        (folder / "GENERATED_SQL_NOTICE").write_bytes(licence)
+        (folder / "generated.sql").write_text(
+            bundle_preamble('0.2.0', 18, 'api.orders_dv', licence.decode()) + 'SELECT 1;\n\nCOMMIT;\n')
         rejected(lambda: verify_bundle(folder))
         for omitted in (None, "GENERATED_SQL_NOTICE", "LICENSE", "examples/standalone/README.md"):
             archive_path = folder / "source.tar.gz"
@@ -192,6 +300,7 @@ def archive_identity() -> None:
 
 if __name__ == "__main__":
     claims()
+    pilot_readiness_documents()
     capability_claim_negatives()
     notices()
     standalone_attestation()
@@ -200,3 +309,4 @@ if __name__ == "__main__":
     print("PGJT-72/notice-packaging-negatives: PASS")
     print("PGJT-68/attestation-negatives: PASS")
     print("PGJT-75/capability-documentation-negatives: PASS")
+    print("PGJT-116-125/pilot-documentation-contract: PASS")

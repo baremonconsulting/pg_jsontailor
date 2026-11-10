@@ -1,0 +1,16 @@
+[
+  {
+    "_id": 1,
+    "n": 7,
+    "ok": true,
+    "observed": "2026-11-10T10:15:00Z",
+    "description": "mixed-type pilot fixture"
+  },
+  {
+    "_id": 2,
+    "n": 0,
+    "ok": false,
+    "observed": "2026-11-10T11:30:00Z",
+    "description": "second reading"
+  }
+]

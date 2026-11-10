@@ -158,7 +158,12 @@ def coverage_manifest_checks() -> None:
         for suite in {item["suite"] for item in manifest["runtime_evidence"]
                       if item["scope"] == "postgrest"}:
             path = folder / f"{suite}.jsonl"
-            path.write_text("".join(json.dumps({"id": ident, "status": "PASS"}) + "\n"
+            fields = {item.get("field", "id") for item in manifest["runtime_evidence"]
+                      if item["scope"] == "postgrest" and item["suite"] == suite}
+            if len(fields) != 1:
+                raise AssertionError("PostgREST suite must use one result selector field")
+            field = fields.pop()
+            path.write_text("".join(json.dumps({field: ident, "status": "PASS"}) + "\n"
                                     for ident in inventories()[suite]))
             postgrest_paths[suite] = path
         postgrest = verifier.attest(

@@ -1,6 +1,6 @@
 # Public HTTP boundary
 
-The supported public PostgREST deployment uses `tools/http_boundary.py`.
+The tested reference PostgREST deployment uses `tools/http_boundary.py`.
 PostgREST itself must have no public TCP listener: use its
 [Unix socket configuration](https://docs.postgrest.org/en/stable/references/configuration.html#server-unix-socket)
 in a directory owned by the service user with mode `0700`, socket mode `0600`.
@@ -10,6 +10,7 @@ Do not place an untrusted local user in the service account or socket group.
 ```ini
 # postgrest.conf: service-private configuration, never publicly downloadable
 db-schemas = "api"
+db-max-rows = 1000
 server-unix-socket = "/run/jsontailor-private/upstream.sock"
 server-unix-socket-mode = "600"
 ```
@@ -37,6 +38,14 @@ guard and health-check helpers owner-only; never grant all functions. The
 cardinality helper remains inaccessible as a public RPC because the proxy routes
 only the named document view and delete RPC. See
 [`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for direct standalone grants and migration.
+
+The proxy rejects DELETE on document-view routes; delete through the generated
+POST RPC. PATCH requires exactly one `_id=eq.<value>` filter and is forwarded
+with `handling=strict, max-affected=1`. `on_conflict`, conflict-resolution
+preferences and excessive limits are rejected. SQL `DELETE` or `UPDATE`
+without `WHERE` still affects every visible document, and the delete RPC needs
+DELETE on the view. Set a role-level `statement_timeout` and keep raw PostgREST
+unreachable from outside the trusted boundary.
 
 For every error response, including a deferred failure at COMMIT, the proxy
 preserves the final HTTP status and an explicitly allow-listed SQLSTATE.

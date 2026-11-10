@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from itertools import combinations
 import json
 import re
 import subprocess
@@ -135,6 +136,222 @@ def document(identity: int, detail_id: int, item_id: int, changed: bool = False)
     return {"_id": identity, **values,
             "detail": {"id": detail_id, **values},
             "items": [{"id": item_id, **values}]}
+
+
+MIXED_OPERATIONS = ("insert", "replacement", "merge_insert", "merge_update")
+MIXED_INVALID_VALUES = {
+    "textValue": 1, "varcharValue": "too-long", "bpcharValue": True,
+    "int2Value": 32768, "int4Value": 2147483648,
+    "int8Value": 9223372036854775808, "numericValue": 1234567.89,
+    "booleanValue": "true", "dateValue": "not-a-date",
+    "timestampValue": "not-a-timestamp",
+    "timestamptzValue": "not-a-timestamptz", "uuidValue": "not-a-uuid",
+}
+
+
+def mixed_document(names: tuple[str, ...], identity: int, changed: bool = False) -> dict:
+    """Keep every mapped field present, including the unchanged referenced object."""
+    value = document(identity, identity + 10000, identity + 20000, changed)
+    value["detail"] = document(identity, identity + 10000, identity + 20000)["detail"]
+    for target in (value, value["detail"], value["items"][0]):
+        for name in EXPECTED_FIELD_NAMES:
+            if name not in names:
+                target[name] = None
+    # Checked objects are compared as emitted JSON, not merely as SQL values.
+    for name in EXPECTED_FIELD_NAMES:
+        value["detail"][name] = emitted(name, value["detail"][name])
+    return value
+
+
+def mixed_rows(value: dict) -> dict[str, dict]:
+    fields = {name: column for name, column, *_ in FIELD_COLUMNS}
+
+    def mapped(target):
+        return {column: target[name] for name, column in fields.items()}
+
+    return {
+        "detail": {"id": value["detail"]["id"], **mapped(value["detail"])},
+        "root": {"id": value["_id"], "detail_id": value["detail"]["id"], **mapped(value)},
+        "item": {"id": value["items"][0]["id"], "parent": value["_id"],
+                 **mapped(value["items"][0])},
+    }
+
+
+def mixed_setup(value: dict, existing: bool) -> str:
+    rows = mixed_rows(value)
+    tables = ("detail", "root", "item") if existing else ("detail",)
+    return "\n".join(
+        f"INSERT INTO jt_type_matrix.{table} SELECT * FROM jsonb_populate_record("
+        f"NULL::jt_type_matrix.{table},{quote(json.dumps(rows[table]))}::jsonb);"
+        for table in tables)
+
+
+def mixed_statement(operation: str, values: list[dict]) -> str:
+    payloads = ",".join(f"({value['_id']},{quote(json.dumps(value))}::jsonb)"
+                        for value in values)
+    target = "jt_type_matrix.documents"
+    if operation == "insert":
+        return f"INSERT INTO {target}(data) SELECT payload FROM (VALUES {payloads}) s(id,payload);"
+    if operation == "replacement":
+        return (f"UPDATE {target} d SET data=s.payload || "
+                "jsonb_build_object('_metadata',d.data->'_metadata') "
+                f"FROM (VALUES {payloads}) s(id,payload) WHERE d._id=s.id;")
+    if operation == "merge_insert":
+        return (f"MERGE INTO {target} d USING (VALUES {payloads}) s(id,payload) "
+                "ON d._id=s.id WHEN NOT MATCHED THEN INSERT(data) VALUES(s.payload);")
+    if operation == "merge_update":
+        return (f"MERGE INTO {target} d USING (VALUES {payloads}) s(id,payload) "
+                "ON d._id=s.id WHEN MATCHED THEN UPDATE SET data=s.payload || "
+                "jsonb_build_object('_metadata',d.data->'_metadata');")
+    raise ValueError(f"unsupported mixed-type operation: {operation}")
+
+
+def mixed_assertions(value: dict, updated: bool) -> str:
+    expected = json.loads(json.dumps(value))
+    for target in (expected, expected["detail"], expected["items"][0]):
+        for name in EXPECTED_FIELD_NAMES:
+            target[name] = emitted(name, target[name])
+    identity = value["_id"]
+    conditions = [
+        f"(SELECT data-'_metadata'={quote(json.dumps(expected))}::jsonb "
+        "AND data#>>'{_metadata,etag}' ~ '^[0-9A-F]{32}$' "
+        f"FROM jt_type_matrix.documents WHERE _id={identity})",
+    ]
+    for table, row in mixed_rows(value).items():
+        conditions.append(
+            f"EXISTS(SELECT FROM jt_type_matrix.{table} t WHERE "
+            f"to_jsonb(t)=to_jsonb(jsonb_populate_record(NULL::jt_type_matrix.{table},"
+            f"{quote(json.dumps(row))}::jsonb)))")
+    if updated:
+        conditions.append(
+            "(SELECT d.data#>>'{_metadata,etag}'<>b.etag "
+            "FROM jt_type_matrix.documents d JOIN pgjt_mixed_before b USING(_id) "
+            f"WHERE d._id={identity})")
+    return "\n".join(
+        "DO $mixed$ BEGIN IF (" + condition + ") IS NOT TRUE THEN "
+        f"RAISE EXCEPTION 'mixed-type state differs for document {identity}';"
+        "END IF; END $mixed$;" for condition in conditions)
+
+
+def mixed_script(operation: str, names: tuple[str, ...], mode: str,
+                 reverse: bool = False) -> str:
+    """One psql session and one transaction, with no hidden per-row reconnects."""
+    if mode not in {"isolated", "transaction", "multirow"}:
+        raise ValueError(f"unsupported mixed-type session mode: {mode}")
+    selected = tuple(reversed(names)) if reverse else names
+    groups = [names] if mode == "isolated" else [(name,) for name in selected] + [names]
+    initial = [mixed_document(group, 100000 + index)
+               for index, group in enumerate(groups)]
+    updated = operation in {"replacement", "merge_update"}
+    desired = [mixed_document(group, value["_id"], updated)
+               for group, value in zip(groups, initial)]
+    script = ["BEGIN; SET LOCAL TIME ZONE 'UTC'; SET LOCAL DateStyle='ISO, YMD';"]
+    script.extend(mixed_setup(value, updated) for value in initial)
+    if updated:
+        script.append("CREATE TEMP TABLE pgjt_mixed_before AS "
+                      "SELECT _id,data#>>'{_metadata,etag}' AS etag "
+                      "FROM jt_type_matrix.documents WHERE _id>=100000;")
+    if mode == "multirow":
+        script.append(mixed_statement(operation, desired))
+        script.extend(mixed_assertions(value, updated) for value in desired)
+    else:
+        for value in desired:
+            script.extend((mixed_statement(operation, [value]),
+                           mixed_assertions(value, updated)))
+    script.extend(("SELECT 'PGJT-MIXED-OK';", "ROLLBACK;"))
+    return "\n".join(script)
+
+
+def lint_mixed_type_ddl(ddl: str) -> None:
+    """Inspect only multi-type root loops; single-type key checks remain valid."""
+    decoded = ddl.replace("''", "'")
+    loops = re.findall(
+        r"FOR\s+bad\s*,\s*keyj\s+IN\s+SELECT\s+key\s*,\s*value\s+FROM\s+"
+        r"jsonb_each\(cfg#>'\{root,fields\}'\)\s+LOOP[ \t]*\n(.*?)\n\s*END LOOP;",
+        decoded, re.DOTALL)
+    # Each of the three shared row-trigger bodies contains INSERT and UPDATE.
+    if len(loops) != 6:
+        raise ValueError(f"expected six generated root-field loops, found {len(loops)}")
+    for loop in loops:
+        calls = re.findall(
+            r"^\s*IF\s+NOT\s+pg_input_is_valid\(\s*doc\s*->>\s*bad\s*,"
+            r"\s*(.*?)\)\s+THEN\b", loop, re.MULTILINE)
+        if len(calls) != 1 or re.sub(r"\s+", "", calls[0]) != "concat(sql_type)":
+            raise ValueError("generated root-field validation requires concat(sql_type)")
+
+
+def mixed_type_matrix(db: Database, record) -> None:
+    ddl = db.run("SELECT jsontailor.duality_view_ddl('jt_type_matrix.lint_documents'," +
+                 quote(json.dumps(specification("jt_type_matrix"))) + "::jsonb);").stdout
+    try:
+        lint_mixed_type_ddl(ddl)
+    except ValueError as error:
+        record("PGJT-111/mixed-type-ddl-lint", False, str(error))
+    else:
+        record("PGJT-111/mixed-type-ddl-lint", True, "six root loops checked; key checks excluded")
+    pairs = list(combinations(EXPECTED_FIELD_NAMES, 2))
+    all_types = tuple(EXPECTED_FIELD_NAMES)
+
+    def run_cases(test_id, cases, modes):
+        outcomes = []
+        for names in cases:
+            for mode in modes:
+                operations = (MIXED_OPERATIONS if mode != "multirow"
+                              else ("insert", "replacement"))
+                for operation in operations:
+                    for reverse in ((False,) if mode == "isolated" else (False, True)):
+                        result = db.run(mixed_script(operation, names, mode, reverse), False)
+                        passed = (result.returncode == 0
+                                  and "PGJT-MIXED-OK" in result.stdout.splitlines())
+                        outcomes.append((names, operation, mode, reverse, passed,
+                                         "" if passed else result.stderr[-700:]))
+        expected = len(cases) * sum(4 if mode == "isolated" else
+                                   4 if mode == "multirow" else 8 for mode in modes)
+        failures = [row for row in outcomes if not row[4]]
+        record(test_id, bool(cases) and len(outcomes) == expected and not failures,
+               f"cases={len(cases)},executions={len(outcomes)}/{expected},failures={failures!r}")
+
+    run_cases("PGJT-112/all-types-document", [all_types],
+              ("isolated", "transaction", "multirow"))
+    if len(pairs) != 66:
+        raise RuntimeError("reviewed mixed-type pair inventory differs")
+    run_cases("PGJT-112/type-pairs-isolated", pairs, ("isolated",))
+    run_cases("PGJT-112/transaction-order-matrix", pairs, ("transaction",))
+    run_cases("PGJT-112/multirow-mixed-types", pairs, ("multirow",))
+
+
+def mixed_invalid_matrix(db: Database, record) -> None:
+    outcomes = []
+    for name, invalid in MIXED_INVALID_VALUES.items():
+        for operation in MIXED_OPERATIONS:
+            updated = operation in {"replacement", "merge_update"}
+            initial = mixed_document(tuple(EXPECTED_FIELD_NAMES), 100000)
+            candidate = mixed_document(tuple(EXPECTED_FIELD_NAMES), 100000, updated)
+            candidate[name] = invalid
+            snapshot = """SELECT jsonb_build_object(
+ 'root',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM jt_type_matrix.root t),
+ 'detail',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM jt_type_matrix.detail t),
+ 'item',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM jt_type_matrix.item t))"""
+            script = ("BEGIN; SET LOCAL TIME ZONE 'UTC';\n" + mixed_setup(initial, updated)
+                      + "\nDO $negative$ DECLARE before_state jsonb; after_state jsonb; "
+                      "rejected boolean:=false; failure_state text; BEGIN\n"
+                      + snapshot + " INTO before_state;\nBEGIN\n"
+                      + mixed_statement(operation, [candidate])
+                      + "\nEXCEPTION WHEN OTHERS THEN GET STACKED DIAGNOSTICS "
+                      "failure_state=RETURNED_SQLSTATE; rejected:=true; "
+                      "IF failure_state<>'PT422' THEN RAISE; END IF; END;\n"
+                      + snapshot + " INTO after_state;\n"
+                      "IF NOT rejected OR before_state IS DISTINCT FROM after_state THEN "
+                      "RAISE EXCEPTION 'invalid mixed document was accepted or changed state';"
+                      "END IF; END $negative$;\nSELECT 'PGJT-MIXED-OK'; ROLLBACK;")
+            result = db.run(script, False)
+            outcomes.append((name, operation, result.returncode == 0
+                             and "PGJT-MIXED-OK" in result.stdout.splitlines(),
+                             result.stderr[-700:] if result.returncode else ""))
+    record("PGJT-112/mixed-invalid-values-atomic",
+           tuple(MIXED_INVALID_VALUES) == EXPECTED_FIELD_NAMES
+           and len(outcomes) == 48 and all(row[2] for row in outcomes),
+           f"executions={len(outcomes)}/48,failures={[row for row in outcomes if not row[2]]!r}")
 
 
 def field_matrix(db: Database, record) -> None:
@@ -389,6 +606,8 @@ def main() -> int:
     invalid_matrix(db, record)
     special_values(db, record)
     key_matrix(db, record)
+    mixed_type_matrix(db, record)
+    mixed_invalid_matrix(db, record)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n"
                                    for row in results))
     for row in results:

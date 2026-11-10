@@ -84,7 +84,8 @@ def main():
     pg_config = args.pg_config.resolve()
     bindir = Path(run([pg_config, '--bindir']).strip())
     require(bindir.parent.resolve() == args.disposable_prefix.resolve(), 'disposable installation prefix differs')
-    require(args.disposable_prefix.resolve() not in {Path('/'), Path('/usr'), Path('/usr/local'), Path('/home/adam')},
+    require(args.disposable_prefix.resolve() not in {
+        Path('/'), Path('/usr'), Path('/usr/local'), Path.home().resolve()},
             'refusing a shared installation prefix')
     run(['make', 'install', f'PG_CONFIG={pg_config}'])
     observed_files = installed_files(pg_config, expected)

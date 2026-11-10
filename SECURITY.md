@@ -2,7 +2,10 @@
 
 ## Supported versions
 
-The unreleased 0.2.0 development line receives security fixes. No earlier validation build is supported as a released product.
+The unreleased 0.2.0 development line is the only maintained line. It is not a
+released product and carries no support-period or response-time commitment.
+Security assessment and fixes are provided on a best-effort basis without a
+warranty that every report will result in a fix or a particular release date.
 
 ## Reporting a vulnerability
 
@@ -13,6 +16,9 @@ Include the affected version, PostgreSQL version, reproduction steps and expecte
 ## Deployment note
 
 Generated views and triggers use invoker rights. Deployers remain responsible for table privileges, row-level security policies, PostgREST exposure, authentication, TLS, backups and operational monitoring.
+
+Read [the security model and residual risks](docs/SECURITY_MODEL.md) before a
+pilot. Raw PostgREST must not be exposed outside the controlled network path.
 
 The normalised mapping specification and generated SQL are visible to roles
 that can inspect PostgreSQL catalogue comments and function definitions. They

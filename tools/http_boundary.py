@@ -12,7 +12,7 @@ import socket
 import stat
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from strict_results import loads as strict_json_loads
 
@@ -21,6 +21,49 @@ SAFE_CODES = frozenset({'22023', '23502', '23503', '23505', '23514', '23P01',
                         '40001', '40P01', '42501', '57014', '55P03',
                         'PT412', 'PT413', 'PT422', 'PT428'})
 SAFE_HEADERS = frozenset({'content-range', 'range-unit', 'preference-applied', 'allow'})
+MAX_QUERY_LIMIT = 1000
+
+
+def request_policy(method, query, preferences):
+    """Validate the public query and merge mandatory single-document preferences."""
+    if re.search(r'%(?![0-9A-Fa-f]{2})', query):
+        raise ValueError('invalid query encoding')
+    pairs = (parse_qsl(query, keep_blank_values=True, strict_parsing=True,
+                       encoding='utf-8', errors='strict', max_num_fields=256)
+             if query else [])
+    identities = []
+    limits = set()
+    for key, value in pairs:
+        if key.lower() == 'on_conflict':
+            raise ValueError('upsert is not supported')
+        if key == '_id':
+            identities.append(value)
+        if key == 'limit' or key.endswith('.limit'):
+            if (key in limits or not re.fullmatch(r'[0-9]+', value)
+                    or int(value) > MAX_QUERY_LIMIT):
+                raise ValueError('invalid or excessive query limit')
+            limits.add(key)
+    if method == 'PATCH' and (len(identities) != 1
+                             or not identities[0].startswith('eq.')
+                             or not identities[0][3:]):
+        raise ValueError('PATCH requires one exact identity filter')
+    merged = {}
+    for header in preferences:
+        if '\r' in header or '\n' in header:
+            raise ValueError('invalid preference header')
+        for preference in header.split(','):
+            name, separator, value = preference.strip().partition('=')
+            name, value = name.strip().lower(), value.strip()
+            if not re.fullmatch(r'[a-z][a-z0-9_-]*', name) or name == 'resolution':
+                raise ValueError('invalid or unsupported preference')
+            item = name + separator + value
+            if name in merged and merged[name] != item:
+                raise ValueError('conflicting preferences')
+            merged[name] = item
+    if method == 'PATCH':
+        merged['handling'] = 'handling=strict'
+        merged['max-affected'] = 'max-affected=1'
+    return ', '.join(merged.values())
 
 
 def within_json_depth(body, limit):
@@ -141,6 +184,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Connection', 'close')
         for key, value in headers:
             if key.lower() in SAFE_HEADERS and '\r' not in value and '\n' not in value:
+                if (key.lower() == 'allow'
+                        and unquote(self.path.split('?', 1)[0]) in self.server.routes):
+                    value = ', '.join(method.strip() for method in value.split(',')
+                                      if method.strip().upper() in
+                                      {'GET', 'HEAD', 'OPTIONS', 'POST', 'PATCH'})
                 self.send_header(key, value)
         self.end_headers()
         if self.command != 'HEAD':
@@ -157,6 +205,12 @@ class Handler(BaseHTTPRequestHandler):
                             path in self.server.rpcs and self.command == 'POST')
                     or 'openapi' in self.headers.get('Accept', '').lower()):
                 return self.reply(404, safe_error())
+            if self.command == 'DELETE':
+                return self.reply(405, safe_error(), [('Allow', 'GET, HEAD, OPTIONS, POST, PATCH')])
+            try:
+                prefer = request_policy(self.command, url.query, self.headers.get_all('Prefer', []))
+            except (ValueError, UnicodeError):
+                return self.reply(400, safe_error())
             lengths = self.headers.get_all('Content-Length', [])
             if (len(lengths) > 1 or self.headers.get('Transfer-Encoding') is not None
                     or self.headers.get('Content-Encoding') is not None
@@ -178,9 +232,11 @@ class Handler(BaseHTTPRequestHandler):
                 except (RuntimeError, ValueError, UnicodeError, RecursionError):
                     return self.reply(400, safe_error())
             headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-            for key in ('Authorization', 'Prefer', 'Range', 'Range-Unit'):
+            for key in ('Authorization', 'Range', 'Range-Unit'):
                 if key in self.headers:
                     headers[key] = self.headers[key]
+            if prefer:
+                headers['Prefer'] = prefer
             upstream = UnixConnection(self.server.upstream, self.server.timeout_seconds)
             upstream.request(self.command, self.path, body=body, headers=headers)
             response = upstream.getresponse()

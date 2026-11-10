@@ -1,5 +1,10 @@
 # Upgrading generated views
 
+Generated views contain a copy of the generator's SQL. Installing newer
+extension files does not alter an existing view. Keep each specification and
+reviewed bundle in source control, then regenerate only through a planned
+deployment transaction.
+
 The 0.2.0 generated write functions remove per-document subtransactions from
 ordinary bulk writes. Regenerate existing duality views after installing this
 version; upgrading the extension alone does not replace SQL already copied
@@ -18,9 +23,13 @@ need `ACCESS EXCLUSIVE` wait for those transactions; use a reviewed write-free
 window and deployment-appropriate `lock_timeout`. Missing source relations are
 reported as `PT422`. Regenerate existing helpers to obtain this behaviour.
 
-Any view generated from an untagged 0.2.0 development snapshot, including an
-earlier public `main` commit, must be regenerated from the eventual tagged
-release before it is treated as a pilot deployment.
+Any view generated before the selected pilot candidate must be regenerated from
+that pinned full commit and retained verified bundle before the pilot. Public
+release still requires the separate tag, benchmark and release-authority gate.
+
+The mixed-type validation correction changes the generator definition and its
+provenance hash. Regenerate every view made by an earlier 0.2.0 development
+snapshot; reinstalling the extension alone is insufficient.
 
 ## Source-schema change matrix
 
@@ -74,10 +83,10 @@ explicitly recreated as reviewed deployment objects.
 
 Generated-function EXECUTE grants survive regeneration only when the existing
 delete or array-read ACL entry still matches its recorded reviewed provenance.
-Unreviewed, revoked, default and legacy helper grants are not restored. Review
+Unreviewed, revoked, default and earlier helper grants are not restored. Review
 approved delete capabilities with `jsontailor.grant_delete_rpc` and array-read
 capabilities with `jsontailor.grant_array_reader` as the view owner. Array document
-reads now require the owner-only `__bounded_array(bigint)` capability in addition
+reads require the owner-only `__bounded_array(bigint)` capability in addition
 to source/view SELECT and RLS; otherwise PostgreSQL returns `42501`. Trigger,
 guard and health-check helpers remain owner-only. See
 [`RESOURCE_LIMITS.md`](RESOURCE_LIMITS.md) for migration and `PT413` resource limits.
@@ -109,7 +118,7 @@ proved, stop and resolve it manually; a matching name alone is not provenance.
 Record view, column and function ACLs, grant options/grantors, comments,
 dependent-object definitions and RLS policies before starting. Source-table RLS
 policies are not dropped by this procedure. Reapply only the reviewed grants;
-never copy legacy or default `PUBLIC` helper grants indiscriminately. Test with
+never copy earlier or default `PUBLIC` helper grants indiscriminately. Test with
 the actual application role, not a superuser or an RLS-bypassing owner.
 
 The following exact identity list applies only to the complete shipped orders

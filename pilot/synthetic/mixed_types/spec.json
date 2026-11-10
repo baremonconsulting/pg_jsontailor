@@ -1,0 +1,15 @@
+{
+  "root": {
+    "table": "pilot_mixed.readings",
+    "key": "reading_id",
+    "fields": {
+      "n": "qty",
+      "ok": "active",
+      "observed": "observed_at",
+      "description": "label"
+    },
+    "insert": true,
+    "update": true,
+    "delete": true
+  }
+}

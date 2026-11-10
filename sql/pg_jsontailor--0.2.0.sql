@@ -286,6 +286,7 @@ BEGIN
     IF NOT (cfg#>>'{root,insert}')::boolean THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='root insert is disabled'; END IF;
     doc:=NEW.data;
     IF jsonb_typeof(doc) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document must be an object'; END IF;
+    IF NEW._id IS NOT NULL AND NOT (doc?'_id') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id column requires _id in the document';END IF;
     IF doc?'_id' AND doc->'_id'='null'::jsonb THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id must not be null'; END IF;
     IF doc?'_id' AND doc->'_id'<>'null'::jsonb THEN
       SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod),t.typname INTO sql_kind,sql_type,sql_typname FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=cfg#>>'{root,key}' AND a.attnum>0 AND NOT a.attisdropped;
@@ -338,7 +339,8 @@ BEGIN
       IF doc?bad AND doc->bad<>'null'::jsonb THEN
         SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod),t.typname INTO sql_kind,sql_type,sql_typname FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc->bad) IS DISTINCT FROM sql_kind AND NOT (sql_typname='numeric' AND jsonb_typeof(doc->bad)='string' AND doc->>bad=ANY(ARRAY['NaN','Infinity','-Infinity'])) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s has wrong JSON type',bad);END IF;
-        IF NOT pg_input_is_valid(doc->>bad,sql_type) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
+        -- The changing type name must not be cached as a stable expression.
+        IF NOT pg_input_is_valid(doc->>bad,concat(sql_type)) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
         IF sql_typname='numeric' AND sql_type<>'numeric' AND doc->>bad=ANY(ARRAY['Infinity','-Infinity']) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->bad;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s loses precision in the mapped SQL type',bad);END IF;END IF;
       END IF;
@@ -460,7 +462,8 @@ BEGIN
       IF doc->bad<>'null'::jsonb THEN
         SELECT CASE WHEN t.typname=ANY(ARRAY['text','varchar','bpchar','date','timestamp','timestamptz','uuid']) THEN 'string' WHEN t.typname=ANY(ARRAY['int2','int4','int8','numeric']) THEN 'number' WHEN t.typname='bool' THEN 'boolean' END,format_type(a.atttypid,a.atttypmod),t.typname INTO sql_kind,sql_type,sql_typname FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=to_regclass(cfg#>>'{root,table}') AND a.attname=keyj#>>'{}' AND a.attnum>0 AND NOT a.attisdropped;
         IF jsonb_typeof(doc->bad) IS DISTINCT FROM sql_kind AND NOT (sql_typname='numeric' AND jsonb_typeof(doc->bad)='string' AND doc->>bad=ANY(ARRAY['NaN','Infinity','-Infinity'])) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s has wrong JSON type',bad);END IF;
-        IF NOT pg_input_is_valid(doc->>bad,sql_type) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
+        -- The changing type name must not be cached as a stable expression.
+        IF NOT pg_input_is_valid(doc->>bad,concat(sql_type)) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
         IF sql_typname='numeric' AND sql_type<>'numeric' AND doc->>bad=ANY(ARRAY['Infinity','-Infinity']) THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='document value cannot be converted to the mapped SQL type';END IF;
         IF sql_kind='number' THEN EXECUTE format('SELECT to_jsonb(x.v) IS DISTINCT FROM $1 FROM jsonb_to_record(jsonb_build_object(''v'',$1)) AS x(v %%s)',sql_type) INTO changed USING doc->bad;IF changed THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE=format('field %%s loses precision in the mapped SQL type',bad);END IF;END IF;
       END IF;

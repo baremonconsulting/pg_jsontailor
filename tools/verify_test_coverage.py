@@ -46,11 +46,11 @@ EXPECTED_CLAIMS = {
     "PGJT-72/CLAIM-GENERATED-SQL-NOTICES",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "1278b3cce362429fd53d608b2cb72a1f383e3f68929c209f932c56773e256deb",
-    "claims": "75956af0052559c996e51d1e00b455db83c4a5a8d37a8c9562fcde0525fb7e6e",
+    "requirements": "b47cf64b3c853e8e0929e7b7c73f28c80ed14c3e7912436d62a1283a253610b1",
+    "claims": "755a614ab37d460ba2f636f9cfa177b2efac78e078bf0004f204793527c4f11b",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "supplemental_evidence": "912bfa4e1b74b10258737fa0f233540d2eac879ec4e19bd6f863f06a6f4a5988",
-    "runtime_evidence": "35c8187b9a30bf5ac59eab28ad8c84e1b72ddee7acdb5b0abd73b23d020e918e",
+    "supplemental_evidence": "e7216a712b846ee927daf3d0d05c4bf703ea4e64e6aa3c4cbe2778c224534174",
+    "runtime_evidence": "a1c40b8ce2a1c6e3544a4ee6a9670a9086fcac0f154ecb341de187755908c40d",
 }
 
 
@@ -119,9 +119,10 @@ def verify(manifest: dict) -> None:
                     f"{jira}: partial evidence must identify its tracked gap")
         source(item, label=jira)
 
-    expected = {f"PGJT-{number}" for number in range(2, 39)}
+    expected = ({f"PGJT-{number}" for number in range(2, 39)}
+                | {f"PGJT-{number}" for number in range(111, 126)})
     require(jira_ids == expected,
-            "historical Jira coverage differs: missing="
+            "reviewed Jira coverage differs: missing="
             + repr(sorted(expected - jira_ids)) + ", extra="
             + repr(sorted(jira_ids - expected)))
 

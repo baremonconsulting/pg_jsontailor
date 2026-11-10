@@ -13,6 +13,9 @@ EXPECTED_IDS = frozenset({
     "PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags",
     "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards",
     "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore",
+    "PGJT-114/self-protecting-header", "PGJT-114/wrong-major",
+    "PGJT-114/hostile-search-path", "PGJT-114/transaction-invocations",
+    "PGJT-114/bundle-negatives",
 })
 EXPECTED_MAJORS = frozenset({"17", "18", "19"})
 

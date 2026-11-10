@@ -14,9 +14,24 @@ This rehearsal exercises the currently supported thin slice: one order root, one
 8. Keep internal per-role binding views inaccessible through the REST surface.
 9. Delete a document and its children atomically.
 10. Complete 20 local operational reads without errors; timings are diagnostic only, not a benchmark.
-11. Restore the pre-pilot snapshot into a fresh database and recover five roots, ten children, and five documents.
+11. Restore the pre-pilot snapshot into a fresh database and recover the root,
+    child and document counts derived from the fixture. The current orders
+    fixture contains five roots and ten children, so its expected result is
+    `5:10:5`; this is verified against the files, not assumed by the runner.
+12. Exercise the separate mixed-type fixture whose JSONB field order starts
+    with numeric, boolean and timestamp-with-time-zone fields: both multi-row
+    transaction orders and HTTP INSERT/replacement through the proxy.
+13. Reject direct view DELETE, unfiltered PATCH and duplicate identity filters
+    through the proxy with safe errors and unchanged source rows.
 
-The decision is `GO` only if every check passes. A GO authorises progression to a controlled pilot with anonymised client data; it does not authorise production deployment.
+The runner creates the required child index, grants the array-reader and
+delete-RPC capabilities, and requires both generated health checks to return
+`OK`. PostgREST has a private Unix socket; requests use the boundary proxy.
+The broad SQL grants are an isolated test fixture, not a deployment template.
+
+The decision is `GO` only if every check passes. A GO is technical evidence
+from synthetic data only. It does not authorise use of client data, a customer
+pilot, production deployment or a release.
 
 ## Running the rehearsal
 
@@ -33,4 +48,21 @@ python3 pilot/synthetic/run_pilot.py \
   --restore-database jsontailor_synthetic_pilot_restore
 ```
 
-Both database names must identify dedicated disposable databases. Use `--postgrest-db-host`, `--rest-host`, `--rest-port` and `--admin-port` when the services do not use their local defaults.
+Both database names must identify new, dedicated disposable databases. Existing
+databases are refused without being removed. The runner removes only the
+databases and unique roles it created, stops its HTTP services, and retains the
+snapshot and diagnostic files. Use a private test cluster; no customer material
+is accepted. Use `--postgrest-db-host`, `--rest-host`, `--rest-port` and
+`--admin-port` when the services do not use their local defaults.
+
+Pass a fresh `--output` directory for evidence. The fixed fourteen-result JSONL
+file is `synthetic-pilot-results.jsonl` inside it, or a fresh path supplied with
+`--result`. A failed scenario still emits the complete inventory with unfinished
+checks marked `FAIL`; a cleanup failure also prevents `GO`. Upload only the
+reviewed result file and summary, not the private `raw/` diagnostics.
+
+Database-free runner regressions:
+
+```sh
+python3 pilot/synthetic/test_runner.py
+```

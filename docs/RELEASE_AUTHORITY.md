@@ -77,6 +77,9 @@ Retain approved public evidence and signed records permanently. Retain encrypted
 diagnostics for at least one year under the named release owner, with restricted
 decryption keys and a documented retrieval test; Actions artifact expiry is not
 the retention mechanism. Never commit unencrypted sensitive diagnostics publicly.
+Customer pilot samples and diagnostics are not release evidence and must not be
+copied into release-evidence retention. Their access, retention and verified
+deletion follow the separate written Pilot scope record.
 
 `tools/evidence_index.py retain` verifies and copies indexed material to a new,
 non-overwriting durable destination. The release owner must also retain the

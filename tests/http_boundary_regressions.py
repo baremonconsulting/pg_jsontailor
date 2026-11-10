@@ -11,7 +11,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from http_boundary import Boundary
+from http_boundary import Boundary, MAX_QUERY_LIMIT, request_policy
 
 SENTINEL = 'UNMAPPED_SOURCE_SECRET_57'
 
@@ -28,7 +28,8 @@ class Upstream(socketserver.UnixStreamServer):
 class RawHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.calls += 1
-        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        self.server.requests.append((self.command, self.path, dict(self.headers), body))
         self.send_response(self.server.status)
         self.send_header('X-Diagnostics', SENTINEL)
         if not self.server.omit_length:
@@ -39,7 +40,7 @@ class RawHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(self.server.body)
 
-    do_POST = do_GET
+    do_POST = do_PATCH = do_DELETE = do_OPTIONS = do_GET
 
     def log_message(self, *_args):
         pass
@@ -49,6 +50,7 @@ class BoundaryTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='pgjt-boundary-')
         self.raw = Upstream(self.directory.name + '/upstream.sock', RawHandler)
+        self.raw.requests = []
         Path(self.raw.server_address).chmod(0o600)
         self.raw_thread = threading.Thread(target=self.raw.serve_forever, daemon=True)
         self.raw_thread.start()
@@ -101,6 +103,80 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(400, self.request(headers={'Transfer-Encoding': 'chunked'})[0])
         self.assertEqual(413, self.request(headers={'Content-Length': '1048577'})[0])
         self.assertEqual(0, self.raw.calls)
+
+    def test_pgjt_113_delete_and_non_exact_patch_never_reach_upstream(self):
+        cases = [('DELETE', '/documents'), ('DELETE', '/documents?_id=eq.42')]
+        cases += [('PATCH', '/documents' + query) for query in (
+            '', '?_id=eq.', '?_id=gt.1', '?_id=in.(1,2)', '?_id=eq(any).{1,2}',
+            '?_id=eq.1&_id=eq.2', '?_id=eq.1&%5Fid=eq.1',
+            '?or=(_id.eq.1,_id.eq.2)', '?_id=eq.42%FF', '?_id=eq.%zz')]
+        for method, path in cases:
+            with self.subTest(method=method, path=path):
+                status, _, body = self.request(path, method=method)
+                self.assertEqual(405 if method == 'DELETE' else 400, status)
+                self.assertEqual({'code': 'BOUNDARY_ERROR', 'message': 'Request rejected.',
+                                  'details': None, 'hint': None, 'context': None}, json.loads(body))
+        self.assertEqual(0, self.raw.calls)
+
+    def test_pgjt_113_upsert_preferences_and_limit_fail_closed(self):
+        for path in ('/documents?on_conflict=_id', '/documents?on%5Fconflict=_id',
+                     '/documents?limit=-1', '/documents?limit=', '/documents?limit=1.0',
+                     '/documents?limit=1&limit=2', '/documents?limit=1001',
+                     '/documents?child.limit=1001', '/documents?limit=' + '9' * 5000):
+            with self.subTest(path=path):
+                self.assertEqual(400, self.request(path)[0])
+        for prefer in ('resolution=merge-duplicates', 'resolution=ignore-duplicates',
+                       'return=representation, Resolution = merge-duplicates',
+                       'resolution', 'return=minimal, return=representation'):
+            with self.subTest(prefer=prefer):
+                status, _, body = self.request(headers={'Prefer': prefer})
+                self.assertEqual(400, status)
+                self.assertEqual('BOUNDARY_ERROR', json.loads(body)['code'])
+        self.assertEqual(0, self.raw.calls)
+
+    def test_pgjt_113_patch_preferences_are_merged_and_forced(self):
+        self.raw.status, self.raw.body = 200, b'[]'
+        for preferences in ({}, {'Prefer': 'return=representation'},
+                            {'Prefer': 'handling=lenient, max-affected=999, count=exact'},
+                            {'Prefer': 'handling=strict, max-affected=1'}):
+            with self.subTest(preferences=preferences):
+                headers = {'Content-Type': 'application/json', **preferences}
+                self.assertEqual(200, self.request('/documents?%5Fid=eq.42',
+                    method='PATCH', headers=headers, body='{}')[0])
+                forwarded = self.raw.requests[-1][2]['Prefer'].split(', ')
+                self.assertEqual(1, forwarded.count('handling=strict'))
+                self.assertEqual(1, forwarded.count('max-affected=1'))
+                self.assertNotIn('handling=lenient', forwarded)
+                self.assertNotIn('max-affected=999', forwarded)
+                if 'return=representation' in preferences.get('Prefer', ''):
+                    self.assertIn('return=representation', forwarded)
+        self.assertEqual('return=representation, count=exact, handling=strict, max-affected=1',
+                         request_policy('PATCH', '_id=eq.42',
+                                        ['return=representation', 'count=exact']))
+
+    def test_pgjt_113_single_identity_values_and_rpc_remain_supported(self):
+        self.raw.status, self.raw.body = 200, b'[]'
+        for value in ('42', '-1', 'abc', 'a%2Bb', '%22a%2Cb%22',
+                      '10000000-0000-0000-0000-000000000001', '2026-11-10'):
+            with self.subTest(value=value):
+                self.assertEqual(200, self.request('/documents?_id=eq.' + value,
+                                                   method='PATCH')[0])
+        self.assertEqual(200, self.request('/documents?limit=0')[0])
+        self.assertEqual(200, self.request('/documents?limit=' + str(MAX_QUERY_LIMIT))[0])
+        self.assertEqual(200, self.request('/rpc/documents__delete_document', method='POST',
+            body='{"expected_id":42,"expected_etag":"token"}',
+            headers={'Content-Type': 'application/json', 'Prefer': 'return=representation'})[0])
+        self.assertEqual('return=representation', self.raw.requests[-1][2]['Prefer'])
+
+    def test_pgjt_113_allow_header_matches_boundary_methods(self):
+        self.raw.status, self.raw.body = 200, b'[]'
+        self.raw.extra_headers = (('Allow', 'GET, HEAD, OPTIONS, POST, PATCH, DELETE, PUT'),)
+        status, headers, _ = self.request(method='OPTIONS')
+        self.assertEqual(200, status)
+        self.assertEqual('GET, HEAD, OPTIONS, POST, PATCH', headers['Allow'])
+        status, headers, _ = self.request(method='DELETE')
+        self.assertEqual(405, status)
+        self.assertNotIn('DELETE', headers['Allow'])
 
     def test_depth_and_invalid_json_rejected_before_upstream(self):
         self.assertEqual(413, self.request(method='POST', body='[' * 33 + '0' + ']' * 33,

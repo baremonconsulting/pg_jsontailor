@@ -19,6 +19,9 @@ END
 $setup$;
 
 GRANT jt_postgrest_anon TO jt_postgrest_authenticator;
+-- Test-fixture grants, not a deployment template. The delete RPC needs DELETE
+-- on the view; the boundary blocks direct HTTP DELETE on every view route.
+ALTER ROLE jt_postgrest_anon SET statement_timeout = '5s';
 GRANT USAGE ON SCHEMA api, shop TO jt_postgrest_anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO jt_postgrest_anon;
 GRANT SELECT, DELETE ON api.fresh_acl_dv TO jt_postgrest_anon;

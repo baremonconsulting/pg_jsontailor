@@ -5,8 +5,9 @@ pilot. It is not a production certification.
 
 ## 1. Fit assessment
 
-Obtain a schema-only dump from the candidate database and keep it within the
-customer-approved environment. Confirm for every proposed document:
+Use synthetic definitions by default. If a schema-only dump or representative
+sample is required, obtain written customer approval and keep it within the
+approved environment. Confirm for every proposed document:
 
 - one root, at most one referenced object and at most one child array;
 - single-column primary and foreign keys;
@@ -18,17 +19,23 @@ customer-approved environment. Confirm for every proposed document:
   populated by the database;
 - mapped names, operation flags, object ETag inclusion and array ordering are
   explicit in a source-controlled specification.
+- every mapped child collection has an index beginning with
+  `(parent_fk, order_by, key)`; creation may succeed without it, but
+  `__check()` then reports PT422.
 
 Generate DDL in a disposable database restored from the schema dump. Run the
 generated `__check()` function and inspect `duality_view_inventory()`. Exercise
 INSERT, complete replacement, ETag-checked DELETE and each intended MERGE
 action using synthetic rows. If representative values are needed to validate
-conversion semantics, use an anonymized, customer-approved sample; a schema
-dump alone cannot demonstrate application data quality.
+conversion semantics, use only an irreversibly anonymised sample covered by a
+written customer agreement; a schema dump alone cannot demonstrate application
+data quality. Record the approved fields, environment, recipients, retention
+deadline and deletion owner before receiving the sample.
 
-## 2. Pilot contract
+## 2. Pilot scope record
 
-Record before implementation:
+Execute a separate written pilot agreement with the customer before
+implementation and attach or reference its agreed Pilot scope record. Record:
 
 - exact schemas, mappings, operations and PostgreSQL versions in scope;
 - excluded features and unsupported source shapes;
@@ -36,7 +43,9 @@ Record before implementation:
 - target p50 and p95 latency, throughput and concurrency;
 - RLS, roles, PostgREST and network boundary;
 - acceptance dataset and rollback owner;
-- support channel, response expectations and pilot end date.
+- private support channel, response expectations and pilot end date;
+- permitted diagnostic data, storage location, access list, retention deadline
+  and verified deletion owner.
 
 The relational tables remain the source of truth. The exit plan is to stop
 traffic to generated views and retain the underlying tables; no proprietary
@@ -60,13 +69,15 @@ as the base and add customer-specific cases. At minimum include:
 
 ## 4. Deployment and release gate
 
-Managed PostgreSQL installations may execute reviewed output from
-`duality_view_ddl` without a runtime extension dependency. Generation and
-regeneration must occur in a controlled environment with the same schema and
-PostgreSQL major version, followed by catalogue and application smoke tests.
+Managed PostgreSQL installations apply only the reviewed, verified bundle from
+`tools/export_standalone.py`; raw `duality_view_ddl` output is inspection-only.
+Generation and regeneration occur in a controlled environment with the same
+schema and PostgreSQL major, followed by catalogue and application smoke tests.
 
-Provide a pilot only from an immutable release tag. Archive the source, release
-notes and checksums. Do not label historical benchmark numbers as current.
+Provide a controlled pilot only from a pinned full commit and retained bundle
+hash after the functional and security pilot gate. A public release still
+requires an immutable tag, archived source, release notes and checksums. Do not
+label historical benchmark numbers as current.
 Final benchmark evidence requires the exact immutable candidate SHA on all
 three PostgreSQL majors. Signed installation records bind installed control/SQL,
 catalogue functions and representative generated DDL to that candidate. The
@@ -76,5 +87,7 @@ See [the current-only benchmark protocol](BENCHMARKS.md). Final runs remain
 pending the merged security/runtime freeze; no current performance numbers are
 published. Preserve the actual source SHA and original logs without relabelling.
 
-Before go-live, confirm private security reporting through Baremon, named
-operational ownership, backups, monitoring and a tested rollback window.
+Before a pilot, complete the [deployment record](DEPLOYMENT_RECORD.md), confirm
+private security reporting, named operational ownership, backups, monitoring,
+RTO/RPO and a tested rollback window. A named support contact and pilot terms
+are owner actions outside this repository.
