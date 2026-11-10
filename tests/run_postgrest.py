@@ -133,8 +133,9 @@ def main() -> int:
          and len(seed_after_delete) == 1 and seed_after_delete[0]["_id"] == 42,
          "200 exact deleted document and empty read-back", delete_readback),
         ("PGJT-48/http-options", options_status == 200
-         and all(method in allow for method in ("POST", "PATCH", "DELETE")),
-         "200 with POST/PATCH/DELETE", {"status": options_status, "allow": allow}),
+         and all(method in allow for method in ("POST", "PATCH"))
+         and "DELETE" not in allow,
+         "200 with POST/PATCH but no view DELETE", {"status": options_status, "allow": allow}),
         ("PGJT-48/http-hidden-base-tables", table_get == 404 and table_patch == 404,
          "GET=404,PATCH=404", {"get": table_get, "patch": table_patch}),
     ]

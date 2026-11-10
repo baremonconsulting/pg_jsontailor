@@ -26,4 +26,4 @@ Changes to generated DDL or document semantics should include regression coverag
 
 Describe the problem, the chosen approach and the tests performed. Keep functional changes separate from unrelated formatting. Do not include customer data, credentials, connection strings or production traces.
 
-By contributing, you agree that your contribution is licensed under the PostgreSQL Licence used by this project.
+By contributing, you agree that your contribution is licensed under the PostgreSQL License used by this project.

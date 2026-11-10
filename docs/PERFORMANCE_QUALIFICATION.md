@@ -19,7 +19,7 @@ FROM (
     ORDER BY order_id
     LIMIT 20
 ) AS selected
-JOIN shop.orders_dv AS document ON document._id = selected.order_id
+JOIN api.orders_dv AS document ON document._id = selected.order_id
 ORDER BY document._id;
 ```
 

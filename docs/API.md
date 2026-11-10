@@ -1,13 +1,17 @@
 # API and specification
 
-`pg_jsontailor` maps writable JSON documents to ordinary PostgreSQL tables. Its document model can support Oracle-to-PostgreSQL migration work, but it is not a drop-in implementation of every Oracle duality-view or ORDS feature.
+`pg_jsontailor` maps writable JSON documents to ordinary PostgreSQL tables. Its
+document model is duality-like, but it does not claim Oracle JSON Relational
+Duality View or ORDS compatibility.
 
 `pg_jsontailor` exposes seven functions in the `jsontailor` schema.
 
 ```sql
 jsontailor.duality_view_ddl(view_name text, spec jsonb) RETURNS text
 jsontailor.create_duality_view(view_name text, spec jsonb) RETURNS void
-jsontailor.duality_view_inventory() RETURNS TABLE (...)
+jsontailor.duality_view_inventory() RETURNS TABLE (
+  view_name text, generator_version text, generator_hash text,
+  current_generator_hash text, health_status text, health_detail text)
 jsontailor.regenerate_duality_view(view_name text) RETURNS void
 jsontailor.grant_delete_rpc(view_name text, role_name text, grant_option boolean DEFAULT false) RETURNS void
 jsontailor.grant_array_reader(view_name text, role_name text, grant_option boolean DEFAULT false) RETURNS void
@@ -23,7 +27,10 @@ the owner, recipient and grant-option provenance in managed-view metadata.
 `delete_document` or `bounded_array` as `helper_suffix`. All seven functions use
 invoker privileges; calling a review operation does not confer view ownership.
 
-Both the view name and source table names must contain exactly two identifier parts, for example `api.orders_dv` and `shop.orders`.
+Both the view name and source table names must contain exactly two identifier
+parts, for example `api.orders_dv` and `shop.orders`. A view name is limited to
+46 UTF-8 bytes so generated suffixes fit PostgreSQL identifiers. Names
+containing `$revoke$` fail closed in 0.2.0 and must not be used.
 
 Source roles may use ordinary leaf tables or declaratively partitioned table roots. Ordinary tables with classic `INHERITS` descendants are rejected because their default scans cannot guarantee document-key uniqueness across independently constrained physical tables.
 
@@ -147,6 +154,12 @@ function remains a separate privileged operational action. A different recorded 
 current hash means regeneration is available even when the schema health check
 is otherwise `OK`.
 
+`health_status=OK` means validated catalogue bindings. `SKIPPED` means the
+caller cannot safely evaluate the row and is not a health result. Other values
+are SQLSTATEs from validation and `health_detail` describes the observed
+problem. Inventory discovery begins with an owner-editable catalogue comment;
+the function validates it against trusted catalogue data before reporting OK.
+
 `regenerate_duality_view` must be run by the view owner. It reads the stored
 normalised specification, rejects dependent relations and unmanaged view
 triggers or rules, generates and validates replacement DDL before dropping
@@ -208,6 +221,9 @@ explicit value for a `GENERATED ALWAYS` identity, an array key owned by another
 document, and an array row for which no target partition exists. SQL/JSON null
 is passed to PostgreSQL so target nullability remains authoritative. Unrelated
 table constraints keep their native SQLSTATE rather than being rewritten.
+`PT422 object fields do not match referenced row` means a replacement supplied
+non-key object fields inconsistent with the referenced row while
+`object.etag=true`; these fields are not independently writable.
 
 The mapped child primary key may be `DEFERRABLE INITIALLY IMMEDIATE`. Generated
 writes detect that property after stabilising source identities and use an

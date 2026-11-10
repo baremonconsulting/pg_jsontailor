@@ -25,6 +25,7 @@ FILENAMES = {
     'property-generated-sql.jsonl': 'properties', 'mutation-generated-sql.jsonl': 'mutations',
     'stale-return-results.jsonl': 'stale_return',
     'standalone-results.jsonl': 'standalone', 'docs-quickstart-results.jsonl': 'docs_quickstart',
+    'synthetic-pilot-results.jsonl': 'synthetic_pilot',
     'upgrade-docs-results.jsonl': 'upgrade_docs', 'public-contract-results.jsonl': 'public_contract',
 }
 

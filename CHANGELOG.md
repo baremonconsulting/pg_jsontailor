@@ -4,6 +4,16 @@ All notable changes to `pg_jsontailor` are documented in this file.
 
 ## 0.2.0 — unreleased
 
+Customer summary: 0.2.0 provides a constrained PostgreSQL JSON relational
+duality-like view for selected pilots, with protected standalone deployment,
+ETag-guarded writes and an executable operational cookbook. It is not intended
+for high-contention write-heavy workloads.
+
+- Corrected mixed-type root validation and rejected an unconfirmed top-level
+  identity supplied separately from the document.
+- Added protected standalone export and documented regeneration of views made
+  by earlier development snapshots.
+
 - Removed the function-wide write exception block that allocated a
   subtransaction per document, while preserving native unrelated constraint
   diagnostics and documented validation errors.
@@ -57,4 +67,6 @@ regardless of commit-message wording.
 - Rejected unvalidated object and array foreign keys during view generation.
 - Forwarded the selected maintenance database through every dump/restore database lifecycle command.
 
-This release is intended for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 coverage uses the current release candidate until the final release is available.
+This release is intended for evaluation and controlled pilots on supported
+PostgreSQL 17 and 18. PostgreSQL 19 is tested on a pre-release build only until
+general availability.

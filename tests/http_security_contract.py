@@ -9,7 +9,67 @@ import sys
 from run_postgrest import request
 from security_contract_matrix import Database
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from http_boundary import UnixConnection
+from http_boundary import MAX_QUERY_LIMIT, UnixConnection, safe_error
+
+
+def write_boundary_contract(base, db, record):
+    """PGJT-113: rejected public writes leave every source row unchanged."""
+    snapshot_sql = """SELECT jsonb_build_object(
+ 'root',(SELECT jsonb_agg(to_jsonb(o) ORDER BY order_id) FROM shop.orders o),
+ 'children',(SELECT jsonb_agg(to_jsonb(i) ORDER BY item_id) FROM shop.order_items i))::text;"""
+    _, _, raw = request(base, 'GET', '/orders_dv?_id=eq.42')
+    original = json.loads(raw)[0]['data']
+    new_document = {'status': 'boundary-check', 'customer': {'customerId': 7},
+                    'items': [{'product': 'boundary-check', 'qty': 1, 'price': 1}]}
+    status, _, raw = request(base, 'POST', '/orders_dv', {'data': new_document},
+                             {'Prefer': 'return=representation'})
+    assert status == 201, 'PGJT-113 fixture insert failed'
+    inserted = json.loads(raw)[0]
+    ident = inserted['_id']
+    try:
+        snapshot = db.value(snapshot_sql)
+
+        def rejected(method, path, headers=None):
+            status, _, raw = request(base, method, path, {'data': original}, headers)
+            return (status == (405 if method == 'DELETE' else 400)
+                    and json.loads(raw) == json.loads(safe_error())
+                    and db.value(snapshot_sql) == snapshot)
+
+        write_cases = [('DELETE', '/orders_dv'), ('DELETE', '/orders_dv?_id=eq.42')]
+        write_cases += [('PATCH', '/orders_dv' + query) for query in (
+            '', '?_id=eq.', '?_id=gt.1', '?_id=eq.42&_id=eq.42',
+            '?_id=eq.42&%5Fid=eq.42')]
+        write_results = [rejected(method, path) for method, path in write_cases]
+        record('PGJT-113/http-write-boundary', all(write_results))
+
+        preference_results = [rejected('POST', '/orders_dv?on_conflict=_id')]
+        for value in ('merge-duplicates', 'ignore-duplicates'):
+            preference_results.append(rejected('POST', '/orders_dv',
+                                               {'Prefer': 'resolution=' + value}))
+        preference_results.append(rejected('GET', '/orders_dv?limit=' + str(MAX_QUERY_LIMIT + 1)))
+        record('PGJT-113/http-query-preferences', all(preference_results))
+
+        document = inserted['data']
+        document['status'] = 'boundary-updated'
+        patch_status, headers, raw = request(base, 'PATCH', f'/orders_dv?_id=eq.{ident}',
+            {'data': document}, {'Prefer': 'return=representation, handling=lenient, max-affected=999'})
+        patched = json.loads(raw)[0] if patch_status == 200 else None
+        patch_ok = (patch_status == 200 and patched['_id'] == ident
+                    and patched['data']['status'] == 'boundary-updated'
+                    and 'return=representation' in headers.get('Preference-Applied', ''))
+        _, _, raw = request(base, 'GET', '/orders_dv?_id=eq.42')
+        unchanged_seed = json.loads(raw)[0]['data'] == original
+        delete_ok = False
+        if patched is not None:
+            delete_status, _, raw = request(base, 'POST', '/rpc/orders_dv__delete_document', {
+                'expected_id': ident, 'expected_etag': patched['data']['_metadata']['etag']})
+            delete_ok = (delete_status == 200 and json.loads(raw) == patched['data']
+                         and db.value(f'SELECT count(*) FROM shop.orders WHERE order_id={ident};') == '0')
+        record('PGJT-113/http-patch-rpc-compatibility', patch_ok and unchanged_seed and delete_ok)
+    finally:
+        # Remove only the generated test document if a contract assertion failed.
+        db.run(f'DELETE FROM shop.order_items WHERE order_id={ident}; '
+               f'DELETE FROM shop.orders WHERE order_id={ident};')
 
 
 def main():
@@ -38,6 +98,7 @@ def main():
  CREATE CONSTRAINT TRIGGER reject_deferred AFTER UPDATE ON shop.orders
  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION shop.reject_deferred();""")
     try:
+        write_boundary_contract(args.base, db, record)
         for phase in ('immediate', 'deferred'):
             status, _, raw = request(args.base, 'GET', '/orders_dv?_id=eq.42')
             original = json.loads(raw)[0]['data']

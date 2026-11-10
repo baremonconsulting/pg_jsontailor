@@ -57,11 +57,23 @@ fractional-second digits. Finite BC values additionally carry the ` BC` era
 suffix. Their document representation and ETag therefore do not change with the
 session `TimeZone`, and BC and AD values cannot collapse to the same document.
 
+Input uses PostgreSQL's native parsers and is deliberately lenient. Tokens such
+as `today` and `now` may be accepted where PostgreSQL accepts them; mapping to
+`date` or timestamp without time zone can discard a supplied time-zone offset.
+Applications needing canonical input must validate it before submission.
+
 ## Replacement
 
 An update is a complete document replacement, not a partial patch. `NEW.data` must be a complete valid document, but the client may pass only the identity, an earlier ETag and changed values while PostgreSQL constructs that document from the current view row in the statement. The root identity cannot change. Child rows are reconciled by key using set-based insert, update and delete operations. Operation flags in the specification determine which changes are allowed.
 
 Replacement applies the same JSON-type and lossless-conversion rules as insert.
+
+The optional object is a reference, not an independently writable nested row.
+On insert, non-key object fields are ignored rather than written. On
+replacement with `object.etag=true`, a mismatch is rejected with PT422; with
+`object.etag=false`, non-key object fields are ignored.
+Changing the object key changes the root reference. Prefer `object.etag=true`
+when clients submit complete object projections.
 
 For a non-`GENERATED ALWAYS` child key, a supplied key identifies an existing element when it belongs to the document and creates a new element when it is globally unused and array insertion is enabled. A key owned by another document or an existing orphan key whose parent is `NULL` is rejected with `PT422`. Explicit new values for `GENERATED ALWAYS` child keys are rejected; omit those keys and let PostgreSQL generate them.
 
@@ -89,6 +101,11 @@ not take these object row locks. PostgreSQL deadlock or serialisation errors rem
 retry conditions when other application statements use conflicting lock orders.
 
 ## Delete
+
+When `array.delete=false`, deleting a root unlinks retained child rows. The
+mapped child `parent_fk` must therefore be nullable; a NOT NULL foreign key
+produces native SQLSTATE 23502. Choose `array.delete=true` if children should be
+removed with the document.
 
 Call the generated `<view>__delete_document(expected_id, expected_etag)` function when an explicit-argument API is preferable. Before validating bindings, it takes fixed-order `ACCESS SHARE` locks on every configured source relation so DDL requiring `ACCESS EXCLUSIVE` cannot replace a source between validation and dynamic DML. It then locks the configured document rows, reads the document back, verifies the caller's ETag and removes or unlinks children according to the schema and specification before deleting the root row. A missing ETag returns `PT428`; a stale ETag returns `PT412` and changes nothing.
 

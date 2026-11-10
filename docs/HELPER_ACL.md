@@ -20,7 +20,7 @@ option. Regeneration preserves only an existing owner-issued RPC grant matching
 that record exactly. It never resurrects a revoked grant. Delegated grants cause
 regeneration to fail closed rather than losing grantor provenance.
 
-On upgrade, legacy PUBLIC, custom-default and unreviewed direct helper grants
+On upgrade, earlier PUBLIC, custom-default and unreviewed direct helper grants
 are not retained. Review intended RPC roles with this operation before
 regenerating; never copy all old helper ACLs. Table/column view grants retain
 their existing regeneration policy. Ownership changes and role recreation

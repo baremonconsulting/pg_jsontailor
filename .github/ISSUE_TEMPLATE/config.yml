@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://www.baremon.eu/
+    url: https://github.com/baremonconsulting/pg_jsontailor/security/advisories/new
     about: Report suspected vulnerabilities privately; do not open a public issue.

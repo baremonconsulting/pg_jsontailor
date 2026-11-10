@@ -379,6 +379,82 @@ def atomicity_matrix(db: Database, record) -> None:
            repr(outcomes))
 
 
+def insert_column_identity_matrix(db: Database, record) -> None:
+    """PGJT-115 rejects an unconfirmed column identity without changing rows."""
+    outcomes = []
+    for shape in SHAPES:
+        setup(db, shape)
+        schema = f"jt_shape_{shape}"
+        tables = ["root"] + (["detail"] if has_object(shape) else []) + (
+            ["item"] if has_array(shape) else [])
+
+        def snapshot():
+            entries = ",".join(
+                f"{quote(table)},(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) "
+                f"FROM {schema}.{table} t)" for table in tables)
+            return db.value(f"SELECT jsonb_build_object({entries})::text;")
+
+        def insertion(column_id, document):
+            column = "NULL" if column_id is None else str(column_id)
+            return (f"INSERT INTO {schema}.documents(_id,data) VALUES({column},"
+                    f"{quote(json.dumps(document))}::jsonb) RETURNING data::text;")
+
+        rejected = (
+            ("column-only", 5000, new_document(shape, None, populated=False)),
+            ("different-identities", 5001, new_document(shape, 5002, populated=False)),
+            ("null-document-identity", 5003,
+             {**new_document(shape, None, populated=False), "_id": None}),
+        )
+        for name, column_id, candidate in rejected:
+            before = snapshot()
+            failed = db.run(insertion(column_id, candidate), False)
+            outcomes.append((shape, name, db.state(failed) == "PT422"
+                             and before == snapshot(), db.state(failed)))
+
+        accepted = (
+            ("matching-identities", 5010, new_document(shape, 5010, populated=False), 5010),
+            ("generated-identity", None, new_document(shape, None, populated=False), None),
+            ("null-column-explicit-document", None,
+             new_document(shape, 5011, populated=False), 5011),
+        )
+        for name, column_id, candidate, expected_id in accepted:
+            result = db.run(insertion(column_id, candidate), False)
+            lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+            returned = json.loads(lines[-1]) if lines else {}
+            observed_id = returned.get("_id")
+            identity_ok = (observed_id == expected_id if expected_id is not None else
+                           type(observed_id) is int and 100 < observed_id < 5000)
+            persisted = (identity_ok and db.value(
+                f"SELECT count(*) FROM {schema}.root WHERE id={observed_id};") == "1")
+            outcomes.append((shape, name, result.returncode == 0 and identity_ok
+                             and persisted and returned.get("label") == "root-default",
+                             f"state={db.state(result)},id={observed_id}"))
+
+        # Omitting the column altogether retains the existing document-ID path.
+        explicit = new_document(shape, 5020, populated=False)
+        result = db.run(f"INSERT INTO {schema}.documents(data) VALUES("
+                        f"{quote(json.dumps(explicit))}::jsonb);", False)
+        outcomes.append((shape, "document-only", result.returncode == 0 and db.value(
+            f"SELECT count(*) FROM {schema}.root WHERE id=5020;") == "1", db.state(result)))
+        merged = merge(db, shape, 5021, new_document(shape, 5021, populated=False),
+                       "WHEN MATCHED THEN DO NOTHING",
+                       "WHEN NOT MATCHED THEN INSERT(data) VALUES(s.data)")
+        outcomes.append((shape, "merge-data-only", merged.returncode == 0 and db.value(
+            f"SELECT count(*) FROM {schema}.root WHERE id=5021;") == "1", db.state(merged)))
+
+        before = snapshot()
+        matching = new_document(shape, 5030, populated=False)
+        missing = new_document(shape, None, populated=False)
+        failed = db.run(f"INSERT INTO {schema}.documents(_id,data) VALUES"
+                        f"(5030,{quote(json.dumps(matching))}::jsonb),"
+                        f"(5031,{quote(json.dumps(missing))}::jsonb);", False)
+        outcomes.append((shape, "multirow-atomic", db.state(failed) == "PT422"
+                         and before == snapshot(), db.state(failed)))
+    record("PGJT-115/insert-column-identity",
+           len(outcomes) == len(EXPECTED_SHAPES) * 9 and all(row[2] for row in outcomes),
+           repr(outcomes))
+
+
 def deferrable_merge_matrix(db: Database, record) -> None:
     schema = "jt_shape_deferrable"
     db.run(f"DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
@@ -475,6 +551,7 @@ def main() -> int:
     identity_default_matrix(db, record)
     atomicity_matrix(db, record)
     deferrable_merge_matrix(db, record)
+    insert_column_identity_matrix(db, record)
     args.output.write_text("".join(json.dumps(row, sort_keys=True) + "\n"
                                    for row in results))
     for row in results:

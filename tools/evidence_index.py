@@ -39,7 +39,8 @@ CI_FILES = {
 }
 HTTP_FILES = {'postgrest-results.jsonl': 'postgrest',
               'http-security-results.jsonl': 'http_security',
-              'http-concurrency-results.jsonl': 'http_concurrency'}
+              'http-concurrency-results.jsonl': 'http_concurrency',
+              'synthetic-pilot-results.jsonl': 'synthetic_pilot'}
 
 
 def ci_files(major, event):

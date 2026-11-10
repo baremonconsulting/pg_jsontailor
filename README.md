@@ -4,13 +4,24 @@
 
 It is useful for APIs, integration layers and migrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
 
-The design follows the same core idea as Oracle JSON Relational Duality Views: one logical JSON document can be read from and written back to normalised relational tables. `pg_jsontailor` provides a focused PostgreSQL implementation rather than a drop-in implementation of every Oracle feature or ORDS interface.
+The design is inspired by the general duality-view model: one logical JSON
+document can be read from and written back to normalised relational tables.
+`pg_jsontailor` is an independent, focused PostgreSQL product and makes no
+Oracle JSON Relational Duality View or ORDS compatibility claim.
 
 ## Status
 
 Release metadata: `0.2.0` / `development`.
 
-The unreleased 0.2.0 development version is suitable for evaluation and controlled pilots on PostgreSQL 17, 18 and 19. PostgreSQL 19 is tested against the current release candidate until its final release is available. The extension has passed the supplied regression, isolation, row-level security, hostile-identifier and PostgREST scenarios. It is not yet presented as a production-ready compatibility layer for unrestricted workloads.
+The unreleased 0.2.0 development line is being prepared for selected,
+controlled pilots under separately signed written pilot terms, on a best-effort
+basis and without warranty. PostgreSQL 17 and 18 are the supported released majors;
+PostgreSQL 19 is tested on its pre-release build only until general
+availability. A pilot requires a pinned candidate, the documented functional
+and security gates and customer-specific acceptance. This is not a
+production-readiness or unrestricted-workload claim.
+The repository includes regression, isolation, RLS and tested reference
+PostgREST scenarios; final candidate evidence is collected only after freeze.
 
 The current implementation supports:
 
@@ -57,11 +68,17 @@ install -m 0644 pg_jsontailor.control "$extension_dir/"
 install -m 0644 sql/pg_jsontailor--0.2.0.sql "$extension_dir/"
 ```
 
-After the files are installed, enable the extension in a database:
+After the files are installed, a superuser enables the extension in a database:
 
 ```sql
 CREATE EXTENSION pg_jsontailor;
 ```
+
+A third route is available when the target service does not allow
+`CREATE EXTENSION`: generate and verify a protected standalone bundle on the
+same PostgreSQL major, then apply it as the target database owner. Follow
+[cookbook recipe 8](docs/cookbook/08-no-extension.md). No managed provider is
+claimed as qualified by that generic procedure.
 
 ## Development requirements
 
@@ -80,6 +97,16 @@ make installcheck
 
 ## Quick start
 
+### Before you start
+
+- Use `READ COMMITTED` for writes; other isolation levels are rejected.
+- Create the required child index beginning with `(parent_fk, order_by, key)`.
+- Keep the generated view name within 46 bytes so helper names fit PostgreSQL's
+  63-byte identifier limit.
+- Security-invoker writes require source-table privileges. Those privileges can
+  bypass document ETags through direct SQL, so expose the role only through the
+  reviewed endpoint and enforce the same RLS tenant boundary on every source.
+
 Warning: use a disposable database only. The fixture
 [`examples/shop_schema.sql`](examples/shop_schema.sql) executes `DROP SCHEMA shop CASCADE`
 and destroys existing data and dependent objects. Never load it into an application database.
@@ -88,6 +115,42 @@ database and removes that database on exit. The connected role needs `CREATEDB`
 and permission to install the extension; install the extension files first.
 Connection settings (`PGHOST`, `PGPORT`, `PGUSER` and optionally the maintenance
 `PGDATABASE`) follow the usual libpq environment variables.
+
+The specification maps relational roles to the JSON shape:
+
+```json
+{
+  "root":{"table":"shop.orders","key":"order_id",
+          "fields":{"status":"status","created":"created_at"},
+          "insert":true,"update":true,"delete":true},
+  "object":{"name":"customer","table":"shop.customers",
+            "key":"customer_id","root_fk":"customer_id",
+            "fields":{"customerId":"customer_id","name":"name"},"etag":false},
+  "array":{"name":"items","table":"shop.order_items","key":"item_id",
+           "parent_fk":"order_id","order_by":"item_id",
+           "fields":{"itemId":"item_id","product":"product",
+                     "qty":"quantity","price":"unit_price"},
+           "insert":true,"update":true,"delete":true}
+}
+```
+
+The shipped fixture and specification produce this actual document:
+
+<!-- real-document:start -->
+```json
+{
+  "_id":42,
+  "items":[
+    {"qty":2,"price":99.00,"itemId":1,"product":"Kabel"},
+    {"qty":10,"price":4.50,"itemId":2,"product":"Konektor"}
+  ],
+  "status":"new",
+  "created":"2026-11-03",
+  "customer":{"name":"ACME","customerId":7},
+  "_metadata":{"etag":"70AF45CCE541C9A5C8B598F2DA5C2CBC"}
+}
+```
+<!-- real-document:end -->
 
 <!-- quickstart-smoke:start -->
 ```sh
@@ -118,47 +181,18 @@ The same DDL can be inspected before execution:
 SELECT jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb);
 ```
 
+`create_duality_view()` executes exactly the output of `duality_view_ddl()`.
+The complete mapping creates four views, seven functions and six triggers.
+Use [the DDL review recipe](docs/cookbook/03-review-ddl.md) for unpadded output
+and the protected exporter for anything that will be deployed.
+
 In applications, pass the specification as a query parameter rather than reading a server-side file. Both the target view and every source table must be schema-qualified.
 
-The following SQL shapes are application examples, not additional steps after
-the disposable database has been removed. Read a document:
+For copyable point-read, ETag replacement, RPC/direct delete and MERGE shapes,
+see [`docs/SQL_SHAPES.md`](docs/SQL_SHAPES.md). They are application examples,
+not additional quickstart steps after the disposable database is removed.
 
-```sql
-SELECT data
-FROM api.orders_dv
-WHERE _id = 42;
-```
-
-Updates are complete-document replacements, but the client does not have to retain or transmit the complete JSON value. It can pass the identity, the ETag from an earlier read and the new field value; PostgreSQL can construct complete `NEW.data` inside the statement:
-
-```sql
-UPDATE api.orders_dv
-SET data = jsonb_set(data, '{status}', to_jsonb($3::text))
-WHERE _id = $1
-  AND data #>> '{_metadata,etag}' = $2
-RETURNING data;
-```
-
-Here `$1` is the root identity, `$2` is the ETag retained from the client's earlier read and `$3` is the new status. An ETag that is already stale selects no row and returns `UPDATE 0`. If the document changes after row selection while the trigger waits for locks, the post-lock check returns `PT412`. The value ultimately passed to the trigger must still be a complete valid document; it may be assembled from `data`, a correlated subquery or a materialised CTE in the same statement.
-
-Delete through the generated function and pass the identifier and ETag explicitly:
-
-```sql
-SELECT api.orders_dv__delete_document(42, 'ETAG_FROM_THE_PRECEDING_READ');
-```
-
-SQL clients can also include both values in a direct delete:
-
-```sql
-DELETE FROM api.orders_dv
-WHERE _id = 42
-  AND data #>> '{_metadata,etag}' = 'ETAG_FROM_THE_PRECEDING_READ'
-RETURNING _id;
-```
-
-The trigger locks the relational state, reads the document again and compares its current ETag with `OLD.data`. A concurrent change therefore returns `PT412`. An ETag that does not match during the initial `WHERE` evaluation selects no row and returns `DELETE 0`.
-
-The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). The detailed API and document rules are described in [`docs/API.md`](docs/API.md) and [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
+The complete example specification is in [`examples/orders_dv.spec.json`](examples/orders_dv.spec.json). Start with the [cookbook](docs/cookbook/README.md); the [documentation map](docs/README.md) separates user and maintainer material. The detailed contract is in [`docs/API.md`](docs/API.md), [`docs/SEMANTICS.md`](docs/SEMANTICS.md), [`docs/RESOURCE_LIMITS.md`](docs/RESOURCE_LIMITS.md), [`docs/HELPER_ACL.md`](docs/HELPER_ACL.md), [`docs/HTTP_BOUNDARY.md`](docs/HTTP_BOUNDARY.md) and [`docs/PERFORMANCE_QUALIFICATION.md`](docs/PERFORMANCE_QUALIFICATION.md).
 
 Generated functions contain copied write logic. Follow [`docs/UPGRADING.md`](docs/UPGRADING.md) to regenerate existing mappings transactionally after relevant extension or source-schema changes.
 
@@ -169,32 +203,16 @@ PostgreSQL 17, 18 and 19 can also route a documented subset of native SQL `MERGE
 
 ## Testing
 
-The repository contains several layers of verification:
-
-- `make installcheck` for PGXS regression and isolation tests;
-- `tests/core_operations.py` for the core document operations;
-- `tests/validation_security.py` for validation, security, RLS and edge cases;
-- `tests/integrity_regressions.py` for generated write-path and integrity regressions;
-- `tests/merge_operations.py` for native SQL MERGE compatibility and concurrency;
-- `tests/run_postgrest.py` for the automated REST contract;
-- `tests/setbased_reconciliation.py` for bulk array reconciliation;
-- `tests/dump_restore.py` for custom and plain dump/restore verification;
-- `tests/documentation_smoke.py` and `tests/upgrade_documentation.py` for executable walkthroughs;
-- `tests/public_contract.py` for precise ETag, deletion and mapping restrictions;
-- `tests/standalone_generated_sql.py` for clean no-extension deployment and restore;
-- `pilot/synthetic/run_pilot.py` for an isolated synthetic rehearsal;
-- `bench/duality_overhead.py` for reproducible server-side measurements.
-- `bench/verify_results.py` for independent validation and recomputation of benchmark artifacts.
-
-The extended tools create disposable schemas or databases. Review their connection settings before running them outside an isolated development environment.
-
-Every push to `main` and every pull request targeting `main` runs the installation-contract, regression, isolation, functional, security, set-based reconciliation, native MERGE and dump/restore suites on PostgreSQL 17, 18 and 19. The PostgreSQL 19 job follows the current release candidate until the final packages are published. The pinned PostgREST 16.5 HTTP contract runs against PostgreSQL 18 on each pull request; a weekly scheduled run covers PostgreSQL 17, 18 and 19 and retains its transcript as a workflow artifact. Repository checks also enforce the release-candidate version, current-only benchmark protocol and public-source contract. CodeQL and dependency review run separately with read-only default permissions. Pilot and final exact-candidate benchmark execution remain explicit integration or measurement scenarios. Retired tools for the removed merge-patch API are isolated under `archive/merge_patch/` and are not part of the supported product.
+See [`docs/TESTING.md`](docs/TESTING.md) for the suite inventory, PostgreSQL
+matrix, PostgREST schedule and local safety notes.
 
 ## Performance
 
 The write path uses set-based array reconciliation and set-wise validation.
-Final exact-SHA measurements on PostgreSQL 17, 18 and 19 are pending the
-merged security/runtime freeze. No current performance figures are published.
+Cost grows with the mapped child collection: a root-only change still locks,
+validates and reconciles that collection. High-contention write-heavy
+workloads are unqualified. Final exact-SHA measurements on PostgreSQL 17, 18
+and 19 are pending the release freeze, and no current figures are published.
 The benchmark compares the candidate with lower-contract direct SQL using
 signed installation evidence, semantic assertions and three independently
 restarted paired-sample sessions. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
@@ -206,13 +224,15 @@ restarted paired-sample sessions. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 - The document ETag covers the configured relational state, so large child collections still require linear read, lock and hash work.
 - Concurrent throughput, network latency and client-specific access policies must be measured for each deployment.
 - PostgREST configuration, authentication, TLS and operational controls remain deployment responsibilities.
+- Public REST deployments must use the tested boundary proxy; raw PostgREST
+  must not be externally reachable.
 
 The complete mapped-type, foreign-key, identity and source-shape limits are in
 [`docs/SEMANTICS.md`](docs/SEMANTICS.md).
 
 ## Licence
 
-`pg_jsontailor` is released under the PostgreSQL Licence. See [`LICENSE`](LICENSE).
+`pg_jsontailor` is released under the PostgreSQL License. See [`LICENSE`](LICENSE).
 
 Exported generated SQL contains copied implementation logic. Standalone
 redistributions must retain the complete copyright, permission and disclaimer

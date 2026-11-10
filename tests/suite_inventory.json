@@ -2,9 +2,10 @@
   "schema_version": 1,
   "suites": {
     "public_contract": ["PGJT-67/etag-coverage", "PGJT-67/direct-delete-predicate", "PGJT-67/mapping-restrictions"],
-    "docs_quickstart": ["PGJT-65/readme-quickstart"],
+    "docs_quickstart": ["PGJT-65/readme-quickstart", "PGJT-116/no-extension-runbook", "PGJT-117/task-cookbook", "PGJT-122/documentation-examples-executed"],
+    "synthetic_pilot": ["PGJT-112/synthetic-health", "PGJT-112/synthetic-readback", "PGJT-112/synthetic-filter-paging", "PGJT-112/synthetic-insert", "PGJT-112/synthetic-replacement", "PGJT-112/synthetic-etags", "PGJT-112/synthetic-errors", "PGJT-112/synthetic-rest-surface", "PGJT-112/synthetic-delete-rpc", "PGJT-112/synthetic-operational-read", "PGJT-112/synthetic-mixed-types", "PGJT-113/synthetic-write-boundary", "PGJT-112/synthetic-restore", "PGJT-112/synthetic-cleanup"],
     "upgrade_docs": ["PGJT-66/name-preserving-regeneration", "PGJT-66/mapped-rename-recreation", "PGJT-66/dependency-rollback", "PGJT-66/acl-rls-overload-preservation"],
-    "standalone": ["PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags", "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards", "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore"],
+    "standalone": ["PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags", "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards", "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore", "PGJT-114/self-protecting-header", "PGJT-114/wrong-major", "PGJT-114/hostile-search-path", "PGJT-114/transaction-invocations", "PGJT-114/bundle-negatives"],
     "stale_return": ["PGJT-61/stale-return-mutant"],
     "core": [
       "1",
@@ -86,7 +87,13 @@
       "PGJT-44/field-operation-matrix",
       "PGJT-44/invalid-values-atomic",
       "PGJT-44/key-position-matrix",
-      "PGJT-44/numeric-timestamptz-boundaries"
+      "PGJT-44/numeric-timestamptz-boundaries",
+      "PGJT-111/mixed-type-ddl-lint",
+      "PGJT-112/all-types-document",
+      "PGJT-112/type-pairs-isolated",
+      "PGJT-112/transaction-order-matrix",
+      "PGJT-112/multirow-mixed-types",
+      "PGJT-112/mixed-invalid-values-atomic"
     ],
     "shapes": [
       "PGJT-45/shape-operation-matrix",
@@ -94,7 +101,8 @@
       "PGJT-45/object-etag-modes",
       "PGJT-45/identity-default-matrix",
       "PGJT-45/failure-atomicity",
-      "PGJT-45/deferrable-merge-matrix"
+      "PGJT-45/deferrable-merge-matrix",
+      "PGJT-115/insert-column-identity"
     ],
     "security": [
       "PGJT-46/source-privilege-matrix",
@@ -233,7 +241,10 @@
       "PGJT-57/hidden-_rpc_orders_dv__check",
       "PGJT-57/hidden-_rpc_duality_view_inventory",
       "PGJT-57/raw-upstream-not-tcp",
-      "PGJT-56/http-no-rpc-capability"
+      "PGJT-56/http-no-rpc-capability",
+      "PGJT-113/http-write-boundary",
+      "PGJT-113/http-query-preferences",
+      "PGJT-113/http-patch-rpc-compatibility"
     ],
     "http_concurrency": [
       "PGJT-70/http-hot-root-stale-token",
