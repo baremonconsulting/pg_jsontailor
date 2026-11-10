@@ -2,53 +2,64 @@
 
 ## Goal
 
-Insert, read a client token, replace and delete with optimistic concurrency.
+Demonstrate successful and stale-token UPDATE/DELETE from a clean psql session.
 
 ## Prerequisites
 
-A healthy mapping and application role with reviewed write/delete capabilities.
+Recipes 01–05 in a disposable database, run as the reviewed application role.
+Start `psql -X -v ON_ERROR_STOP=1 -d generator`; no token variables are supplied.
+The transaction rolls all demonstration data back.
 
 ## Steps
 
-Insert a complete document:
-
 ```sql
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
 INSERT INTO api.orders_dv(data) VALUES
-(('{"_id":700,"status":"new","created":"2026-11-03",' ||
-  '"customer":{"customerId":7},"items":[]}')::jsonb);
-```
-
-Expected: `INSERT 0 1`. Read and retain both the complete replacement document
-and `_metadata.etag`:
-
-```sql
-SELECT data,data#>>'{_metadata,etag}' AS etag
-FROM api.orders_dv WHERE _id IN (42,700) ORDER BY _id;
-```
-
-Expected: two rows with 32-character ETags. Retain the complete document and
-token for 42 as `replacement` and `etag`, and the token for 700 as
-`delete_etag`. Submit the complete document with its token unchanged:
-
-```sql
-UPDATE api.orders_dv SET data=:'replacement'::jsonb WHERE _id=42 AND data#>>'{_metadata,etag}'=:'etag';
-```
-
-Expected: `UPDATE 1`. A stale predicate yields `UPDATE 0`; change after locking raises PT412; missing token raises PT428. Retry whole transactions after 40001/40P01. Writes require READ COMMITTED (otherwise 0A000).
-
-Delete with the current token:
-
-```sql
+('{"_id":700,"status":"new","created":"2026-11-03","customer":{"customerId":7},"items":[]}'::jsonb);
+SELECT jsonb_set(data,'{status}','"updated"'::jsonb) AS replacement,
+       data#>>'{_metadata,etag}' AS etag
+FROM api.orders_dv WHERE _id=700 \gset
+UPDATE api.orders_dv SET data=:'replacement'::jsonb
+WHERE _id=700 AND data#>>'{_metadata,etag}'=:'etag';
+UPDATE api.orders_dv SET data=:'replacement'::jsonb
+WHERE _id=700 AND data#>>'{_metadata,etag}'=:'etag';
+SELECT (data->>'status'='updated') AS unchanged_after_stale_update
+FROM api.orders_dv WHERE _id=700;
+SELECT data#>>'{_metadata,etag}' AS delete_etag
+FROM api.orders_dv WHERE _id=700 \gset
+UPDATE api.orders_dv SET data=jsonb_set(data,'{status}','"before-delete"'::jsonb)
+WHERE _id=700 AND data#>>'{_metadata,etag}'=:'delete_etag';
 DELETE FROM api.orders_dv WHERE _id=700
 AND data#>>'{_metadata,etag}'=:'delete_etag';
+SELECT (data->>'status'='before-delete') AS unchanged_after_stale_delete
+FROM api.orders_dv WHERE _id=700;
+SELECT data#>>'{_metadata,etag}' AS current_delete_etag
+FROM api.orders_dv WHERE _id=700 \gset
+DELETE FROM api.orders_dv WHERE _id=700
+AND data#>>'{_metadata,etag}'=:'current_delete_etag';
+SELECT NOT EXISTS(SELECT FROM api.orders_dv WHERE _id=700) AS deleted;
+ROLLBACK;
 ```
 
-Expected: `DELETE 1` and no remaining root or child row for document 700. A
-stale client `delete_etag` returns `DELETE 0` and changes nothing; do not replace
-the retained token with a subquery that reads the current ETag during DELETE.
+## Expected result
 
-## Expected result, common errors and reference
+In order: `INSERT 0 1`, `UPDATE 1`, stale `UPDATE 0`, true,
+`UPDATE 1`, stale `DELETE 0`, true, current `DELETE 1`, true.
+Seeded order 42 remains unchanged.
 
-Expect `INSERT 0 1`, two token reads, `UPDATE 1`, stale `DELETE 0` and current
-`DELETE 1`. `PT412` requires a fresh read. See [semantics](../SEMANTICS.md).
+## Stop, common errors and recovery
+
+An initially stale WHERE token selects no row; a post-selection lock race
+raises PT412. A missing replacement-document token or missing token argument to
+the explicit delete function raises PT428. Omitting the direct SQL DELETE
+predicate does not: it performs an unguarded identity delete and is forbidden
+for this client workflow. Roll back on unexpected results.
+Retry 40001/40P01 only as bounded whole-transaction retries after a fresh read.
+Writes require READ COMMITTED. Never replace a retained client token with a
+current-token subquery.
+
+## Evidence and reference
+
+Retain output and candidate hash privately. See [semantics](../SEMANTICS.md).
 

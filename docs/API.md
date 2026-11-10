@@ -236,7 +236,14 @@ PostgreSQL can also return `40001` (serialisation failure) or `40P01` (deadlock)
 the complete transaction after either error, re-read the document and use its current ETag; do not replay only the
 failed statement with an old token.
 
-Run DDL returned by `duality_view_ddl` in one transaction with stop-on-error behaviour.
+Use one of two deployment paths. With the extension installed, save and approve
+the exact `duality_view_ddl()` output first, then call `create_duality_view()`
+in a stop-on-error transaction. It executes immediately, returns void and does
+not display DDL; it regenerates SQL rather than reading the saved review file.
+Without the extension, verify and apply the standalone exporter bundle. Raw
+generator output is inspection-only, not the recommended deployment script.
+The standalone major guard and distribution notice belong to that bundle;
+do not attribute them to `create_duality_view()`. See cookbook recipes 03–04.
 
 For direct SQL deletion, constrain the generated view by both `_id` and `data #>> '{_metadata,etag}'`. A token that is already stale selects no row (`DELETE 0`). If the document changes while the trigger waits for locks, its post-lock check returns `PT412`. The trigger cannot require or inspect a client-supplied predicate: deleting by identity alone is allowed but does not assert the client's earlier ETag. The generated delete function provides the explicit-argument contract and returns `PT412` for both stale and missing documents.
 

@@ -4,6 +4,9 @@
 CREATE EXTENSION pg_jsontailor;
 \ir shop_schema.sql
 CREATE SCHEMA api;
+-- create_duality_view executes immediately, returns void and displays no DDL.
+-- This disposable walkthrough is not pilot deployment approval. For a pilot,
+-- save/hash/review exact SQL first using cookbook/03-review-ddl.md.
 SELECT jsontailor.create_duality_view('api.orders_dv', :'spec'::jsonb);
 
 INSERT INTO api.orders_dv(data) VALUES (

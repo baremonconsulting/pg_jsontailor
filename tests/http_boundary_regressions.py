@@ -99,6 +99,15 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(404, self.request(headers={'Accept': 'application/openapi+json'})[0])
         self.assertEqual(0, self.raw.calls)
 
+    def test_pgjt_127_source_and_arbitrary_sql_routes_never_forward(self):
+        for path in ('/shop.orders', '/orders', '/documents__root_binding',
+                     '/rpc/sql', '/rpc/exec_sql', '/rpc/query'):
+            for method in ('GET', 'POST'):
+                self.assertEqual(404, self.request(path, method=method,
+                    body='{"sql":"SELECT * FROM shop.orders"}',
+                    headers={'Content-Type': 'application/json'})[0])
+        self.assertEqual(0, self.raw.calls)
+
     def test_bad_framing_and_bytes_rejected_before_upstream(self):
         self.assertEqual(400, self.request(headers={'Transfer-Encoding': 'chunked'})[0])
         self.assertEqual(413, self.request(headers={'Content-Length': '1048577'})[0])

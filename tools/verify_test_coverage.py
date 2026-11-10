@@ -46,11 +46,11 @@ EXPECTED_CLAIMS = {
     "PGJT-72/CLAIM-GENERATED-SQL-NOTICES",
 }
 EXPECTED_SECTION_DIGESTS = {
-    "requirements": "b47cf64b3c853e8e0929e7b7c73f28c80ed14c3e7912436d62a1283a253610b1",
+    "requirements": "44f0a9243350ea2b65a290759d3194459db84227b73a8b3117d7f36a5526e8a7",
     "claims": "755a614ab37d460ba2f636f9cfa177b2efac78e078bf0004f204793527c4f11b",
     "manual_evidence": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "supplemental_evidence": "e7216a712b846ee927daf3d0d05c4bf703ea4e64e6aa3c4cbe2778c224534174",
-    "runtime_evidence": "a1c40b8ce2a1c6e3544a4ee6a9670a9086fcac0f154ecb341de187755908c40d",
+    "runtime_evidence": "390672679d189786504efb399e413872088cd4b462d06f230b0b802bbe4a7538",
 }
 
 
@@ -120,7 +120,7 @@ def verify(manifest: dict) -> None:
         source(item, label=jira)
 
     expected = ({f"PGJT-{number}" for number in range(2, 39)}
-                | {f"PGJT-{number}" for number in range(111, 126)})
+                | {f"PGJT-{number}" for number in range(111, 131)})
     require(jira_ids == expected,
             "reviewed Jira coverage differs: missing="
             + repr(sorted(expected - jira_ids)) + ", extra="

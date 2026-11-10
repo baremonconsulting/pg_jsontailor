@@ -10,6 +10,12 @@ Complete one copy for each pilot or production deployment.
 | Installation route | |
 | Generator and target PostgreSQL majors | |
 | View names and specification hashes | |
+| Exact reviewed UTF-8 SQL file and SHA-256 | |
+| Review approver, timestamp, generator/schema context | |
+| Observed deployed catalogue manifest and SHA-256 | |
+| Private diagnostic location/access/deletion deadline | |
+| PG17/18/pinned-PG19 validation results or NOT_RUN reasons | |
+| Actual customer-network raw-upstream probe | PASS/FAIL/NOT_RUN and origin |
 | Application roles and capabilities | |
 | Raw PostgREST exposure | Must be none |
 | Boundary proxy and configuration | |
