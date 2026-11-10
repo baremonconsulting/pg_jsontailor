@@ -35,5 +35,10 @@ functions and six triggers. Remove the disposable database with
 ## Expected result, common errors and reference
 
 Require all documented PASS markers and one readable document. Missing
-extension/database rights stop the recipe. See the [API](../API.md).
+extension/database rights stop the recipe: `permission denied to create extension
+"pg_jsontailor"` (`42501`) means the connected role cannot enable this untrusted
+extension. Ask the database administrator to install/enable it in the disposable
+database; on a service that forbids it use [recipe 8](08-no-extension.md), not a
+privilege bypass. `permission denied to create database` requires a disposable
+database provisioned by the administrator. See the [API](../API.md).
 

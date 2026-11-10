@@ -8,6 +8,9 @@ Inspect limits and prove oversized input fails atomically.
 
 Disposable shipped mapping with default 1 MiB request limit. Run as reviewed
 application role in a clean psql session. Never use customer data in this probe.
+Set `stored_children` to the agreed pilot maximum rather than accepting the
+10,000-child default as a performance target. Review the distribution and plans
+in [resource limits](../RESOURCE_LIMITS.md#oversized-source-data) before changing it.
 
 ## Steps
 

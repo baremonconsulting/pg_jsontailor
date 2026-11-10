@@ -39,6 +39,8 @@ def save_transcript(path: Path, base: str, calls: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:3050")
+    parser.add_argument("--uncapped-base", required=True,
+                        help="Boundary backed by PostgREST without db-max-rows")
     parser.add_argument("--transcript", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     args = parser.parse_args()
@@ -98,6 +100,18 @@ def main() -> int:
     table_get, _, _ = call("GET", "/orders")
     table_patch, _, _ = call("PATCH", "/order_items?id=eq.1", {"quantity": 99})
 
+    bounded_path = "/orders_dv?_id=gte.10000&select=_id&order=_id"
+    bounded_status, bounded_headers, bounded_raw = call("GET", bounded_path)
+    limited_status, _, limited_raw = call("GET", bounded_path + "&limit=25")
+    range_status, range_headers, range_raw = call(
+        "GET", bounded_path, headers={"Range-Unit": "items", "Range": "0-1004"})
+    uncapped_status, uncapped_headers, uncapped_raw = request(
+        args.uncapped_base, "GET", bounded_path)
+    bounded_rows = json.loads(bounded_raw)
+    limited_rows = json.loads(limited_raw)
+    range_rows = json.loads(range_raw)
+    uncapped_rows = json.loads(uncapped_raw)
+
     allow = options_headers.get("Allow", "")
     checks = [
         ("PGJT-48/http-get", status == 200 and initial_document["status"] == "new"
@@ -138,6 +152,22 @@ def main() -> int:
          "200 with POST/PATCH but no view DELETE", {"status": options_status, "allow": allow}),
         ("PGJT-48/http-hidden-base-tables", table_get == 404 and table_patch == 404,
          "GET=404,PATCH=404", {"get": table_get, "patch": table_patch}),
+        ("PGJT-142/postgrest-row-bound", bounded_status in (200, 206)
+         and len(bounded_rows) == 1000
+         and limited_status in (200, 206) and len(limited_rows) == 25
+         and range_status in (200, 206) and len(range_rows) == 1000
+         and bounded_rows[0]["_id"] == 10000 and bounded_rows[-1]["_id"] == 10999
+         and "0-999/" in (bounded_headers.get("Content-Range", "")
+                           + range_headers.get("Content-Range", "")),
+         "db-max-rows bounds absent, explicit-limit and Range reads",
+         {"absent_limit": len(bounded_rows), "explicit_limit": len(limited_rows),
+          "range": len(range_rows)}),
+        ("PGJT-142/postgrest-no-row-bound-negative",
+         uncapped_status in (200, 206) and len(uncapped_rows) == 1005
+         and uncapped_rows[-1]["_id"] == 11004,
+         "reference setup without db-max-rows exposes all 1005 rows",
+         {"rows": len(uncapped_rows),
+          "content_range": uncapped_headers.get("Content-Range", "")}),
     ]
     passed = all(item[1] for item in checks)
     save_transcript(args.transcript, args.base, calls)

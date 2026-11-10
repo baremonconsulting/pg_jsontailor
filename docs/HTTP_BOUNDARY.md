@@ -47,6 +47,14 @@ without `WHERE` still affects every visible document, and the delete RPC needs
 DELETE on the view. Set a role-level `statement_timeout` and keep raw PostgREST
 unreachable from outside the trusted boundary.
 
+`db-max-rows` is the enforcing row bound for collection reads. The boundary's
+query checks are not a substitute for it: a request with no `limit`, or with a
+`Range` larger than the configured maximum, must still return no more than
+`db-max-rows`. Before every REST pilot, repeat the no-limit, explicit-limit and
+oversized-Range probes against staging through the real ingress, and repeat the
+statement-timeout probe. An uncapped PostgREST control may be used only with
+synthetic data on an isolated test service; it must never be publicly routed.
+
 For every error response, including a deferred failure at COMMIT, the proxy
 preserves the final HTTP status and an explicitly allow-listed SQLSTATE.
 Message, details, hint and context are replaced by fixed safe fields; unknown

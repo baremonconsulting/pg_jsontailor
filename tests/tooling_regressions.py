@@ -118,7 +118,7 @@ def coverage_manifest_checks() -> None:
         "kind", "policy"),
         "requirements differs from the reviewed PGJT-40 contract")
     rejected(lambda value: value["supplemental_evidence"][0].update(
-        {"file": "README.md", "marker": "PostgREST scenarios"}),
+        {"file": "README.md", "marker": "PostgREST 16.5 for the reference REST scenarios."}),
         "supplemental_evidence differs from the reviewed PGJT-40 contract")
 
     repository = verifier.attest(manifest, "repository", None, {}, {"repository"})
@@ -141,7 +141,7 @@ def coverage_manifest_checks() -> None:
                 rows[item["suite"]].append(row)
         paths = {}
         for suite in rows:
-            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "runtime_limits", "rc02_database"}
+            rows[suite] = [{"id": ident, "status": "PASS"} if suite in {"core", "validation", "helper_acl", "minimum_grants", "runtime_limits", "rc02_database"}
                            else {"name": ident, "status": "PASS"}
                            for ident in inventories()[suite]]
         for suite, values in rows.items():

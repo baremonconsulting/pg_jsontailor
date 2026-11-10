@@ -15,3 +15,7 @@ not such an agreement.
 For a controlled pilot, use only the private support channel named in the
 written [Pilot scope record](docs/PILOT_READINESS.md#2-pilot-scope-record).
 Do not place customer schemas, samples or diagnostics in a public GitHub issue.
+Keep full server messages in the customer environment. Before sharing outside
+that environment, redact DETAIL lines and values, schema identifiers and other
+customer-sensitive context; use only the agreed private channel. Share synthetic
+reproductions publicly, not raw customer diagnostics, even when a SQLSTATE looks harmless.

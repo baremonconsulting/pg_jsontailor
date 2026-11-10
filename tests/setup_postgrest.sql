@@ -7,6 +7,11 @@ SELECT jsontailor.create_duality_view('api.fresh_acl_dv', :'spec'::jsonb);
 SELECT jsontailor.create_duality_view('api.concurrent_dv',
   jsonb_set(:'spec'::jsonb,'{object,etag}','true'::jsonb));
 
+-- PGJT-142 collection larger than the documented HTTP row bound.
+INSERT INTO shop.orders(order_id, customer_id, status, created_at)
+SELECT id, 7, 'row-bound-fixture', now()
+FROM generate_series(10000, 11004) AS id;
+
 DO $setup$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'jt_postgrest_anon') THEN
@@ -21,7 +26,10 @@ $setup$;
 GRANT jt_postgrest_anon TO jt_postgrest_authenticator;
 -- Test-fixture grants, not a deployment template. The delete RPC needs DELETE
 -- on the view; the boundary blocks direct HTTP DELETE on every view route.
-ALTER ROLE jt_postgrest_anon SET statement_timeout = '5s';
+-- Session settings belong to the login role: PostgREST connects as the
+-- authenticator and then switches to the anonymous application role.
+ALTER ROLE jt_postgrest_authenticator SET statement_timeout = '30s';
+ALTER ROLE jt_postgrest_anon SET statement_timeout = '30s';
 GRANT USAGE ON SCHEMA api, shop TO jt_postgrest_anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON api.orders_dv TO jt_postgrest_anon;
 GRANT SELECT, DELETE ON api.fresh_acl_dv TO jt_postgrest_anon;

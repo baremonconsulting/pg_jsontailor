@@ -34,7 +34,7 @@ regardless of commit-message wording.
 - Reworked array reconciliation to use set-based operations.
 - Added typed key reconciliation, nested input validation and source-relation binding checks.
 - Added synthetic pilot and reproducible benchmark tooling.
-- Added PostgreSQL 17, 18 and 19 compatibility and continuous-test coverage.
+- Added continuous tests on released PostgreSQL 17/18 and a pinned PostgreSQL 19 pre-release build until GA.
 - Documented and tested native SQL MERGE for insert, complete replacement, ETag-checked delete and DO NOTHING actions.
 - Added post-lock ETag validation for direct SQL and MERGE delete actions.
 - Added reversible document round-trips for PostgreSQL non-finite `numeric` values.
@@ -67,6 +67,7 @@ regardless of commit-message wording.
 - Rejected unvalidated object and array foreign keys during view generation.
 - Forwarded the selected maintenance database through every dump/restore database lifecycle command.
 
-This release is intended for evaluation and controlled pilots on supported
-PostgreSQL 17 and 18. PostgreSQL 19 is tested on a pre-release build only until
-general availability.
+This unreleased version is intended for evaluation and controlled pilots under
+separately signed written pilot terms, on a best-effort basis and without warranty.
+PostgreSQL 17 and 18 are tested released majors; PostgreSQL 19 is tested on the
+pinned pre-release build only until general availability, not as a support commitment.

@@ -18,7 +18,8 @@ from dump_restore import Commands, literal
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from export_standalone import export
-from verify_generated_sql_notice import BUNDLE_HEADER, bundle_preamble, verify_bundle
+from verify_generated_sql_notice import (BUNDLE_HEADER, EXPECTED_GENERATOR_SHA256,
+                                         bundle_preamble, verify_bundle)
 from source_provenance import source_identity
 
 RESULT_IDS = (
@@ -29,6 +30,10 @@ RESULT_IDS = (
     "PGJT-114/hostile-search-path", "PGJT-114/transaction-invocations",
     "PGJT-114/bundle-negatives",
 )
+# Independently measured from the complete historical 7fb535e generator, whose
+# version is also 0.2.0. Reconstructing its three small changes below keeps this
+# fixture available in source archives without copying the full generator SQL.
+OLD_GENERATOR_SHA256 = "65eb9b4f163536fc6d35d9623b6e84a0f3641f33ff16dca7390af99e7222c98c"
 
 
 def require(condition: bool, message: str) -> None:
@@ -117,6 +122,10 @@ def bundle_negatives(bundle: Path) -> None:
         original.replace('IF target_major <> ', 'IF target_major = ', 1),
         original.removesuffix('COMMIT;\n'),
         original + '-- jsontailor.forbidden_runtime_reference\n',
+        re.sub(r'-- Generator SHA-256: [0-9a-f]{64}\n', '', original, count=1),
+        re.sub(r'(?<=-- Generator SHA-256: )[0-9a-f]{64}', '0' * 64, original, count=1),
+        re.sub(r'(?<=-- Generator SHA-256: )[0-9a-f]{64}', OLD_GENERATOR_SHA256,
+               original, count=1),
     )
     try:
         for mutation in mutations:
@@ -129,6 +138,55 @@ def bundle_negatives(bundle: Path) -> None:
             raise RuntimeError('incomplete or unsafe standalone bundle was accepted')
     finally:
         path.write_text(original)
+
+
+def generator_provenance_negatives(commands: Commands, source: str, folder: Path,
+                                   major: str) -> None:
+    """PGJT-135: a real same-version historical generator must fail handoff."""
+    definition = commands.sql(source, "SELECT pg_get_functiondef("
+                              "'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure);")
+    identity_guard = "    IF NEW._id IS NOT NULL AND NOT (doc?'_id') THEN RAISE EXCEPTION USING ERRCODE='PT422',MESSAGE='_id column requires _id in the document';END IF;\n"
+    comment = '        -- The changing type name must not be cached as a stable expression.\n'
+    require(definition.count(identity_guard) == 1 and definition.count(comment) == 2
+            and definition.count('pg_input_is_valid(doc->>bad,concat(sql_type))') == 2,
+            'historical generator fixture no longer matches the reviewed candidate')
+    previous = definition.replace(identity_guard, '').replace(comment, '').replace(
+        'pg_input_is_valid(doc->>bad,concat(sql_type))', 'pg_input_is_valid(doc->>bad,sql_type)')
+    notice = (ROOT / 'GENERATED_SQL_NOTICE').read_text()
+    try:
+        commands.sql(source, previous)
+        observed = commands.sql(source, "SELECT encode(sha256(convert_to(pg_get_functiondef("
+                                "'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure),"
+                                "'UTF8')),'hex');")
+        require(observed == OLD_GENERATOR_SHA256, 'fixture is not the exact 7fb535e generator')
+        require(commands.sql(source, 'SELECT count(*) FROM jsontailor.duality_view_inventory();') == '0',
+                'generator provenance check must not need an existing mapping')
+        old_bundle = folder / 'historical-bundle'
+        old_bundle.mkdir()
+        (old_bundle / 'GENERATED_SQL_NOTICE').write_text(notice)
+        spec = json.loads((ROOT / 'examples/orders_dv.spec.json').read_text())
+        body = commands.sql(source, "SELECT jsontailor.duality_view_ddl('api.orders_dv',"
+                            + literal(json.dumps(spec)) + '::jsonb);')
+        (old_bundle / 'generated.sql').write_text(
+            bundle_preamble('0.2.0', int(major), 'api.orders_dv', notice, observed)
+            + body + '\n\nCOMMIT;\n')
+        try:
+            verify_bundle(old_bundle)
+        except RuntimeError as error:
+            require('generator hash' in str(error), 'historical bundle failed for the wrong reason')
+        else:
+            raise RuntimeError('a genuine historical-generator bundle was accepted')
+        rejected_output = folder / 'rejected-historical-export'
+        try:
+            export(str(commands.pg_bin / 'psql'), source, 'api.orders_dv',
+                   ROOT / 'examples/orders_dv.spec.json', rejected_output)
+        except RuntimeError as error:
+            require('generator hash' in str(error), 'historical export failed for the wrong reason')
+        else:
+            raise RuntimeError('export from the historical generator was accepted')
+        require(not rejected_output.exists(), 'rejected generator left a handoff bundle')
+    finally:
+        commands.sql(source, definition)
 
 
 def apply_bundle(commands: Commands, database: str, path: Path, wrapped: bool = False,
@@ -213,6 +271,8 @@ def main() -> int:
             installed = commands.sql(source, "SELECT prosrc FROM pg_proc WHERE oid="
                                      "'jsontailor.duality_view_ddl(text,jsonb)'::regprocedure;")
             require(installed == candidate.strip(), "installed generator differs from the candidate")
+            require(commands.sql(source, 'SELECT count(*) FROM jsontailor.duality_view_inventory();') == '0',
+                    'standalone export must work without an existing generated mapping')
             bundle = folder / "bundle"
             export(str(commands.pg_bin / "psql"), source, "api.orders_dv",
                    ROOT / "examples/orders_dv.spec.json", bundle)
@@ -222,21 +282,26 @@ def main() -> int:
             script = (bundle / 'generated.sql').read_text()
             header = BUNDLE_HEADER.match(script)
             require(header is not None and header.group(2) == major
-                    and json.loads(header.group(3)) == 'api.orders_dv', 'bundle source header differs')
+                    and json.loads(header.group(3)) == 'api.orders_dv'
+                    and header.group(4) == EXPECTED_GENERATOR_SHA256[('0.2.0', int(major))],
+                    'bundle source header differs')
             require(header.group(1) == last(commands, source,
                     "SELECT extversion FROM pg_extension WHERE extname='pg_jsontailor';"),
                     'bundle generator version differs')
             bundle_negatives(bundle)
+            generator_provenance_negatives(commands, source, folder, major)
             commands.create(wrong)
             created.append(wrong)
             commands.run('psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', wrong,
                          '-f', str(ROOT / 'examples/shop_schema.sql'))
             commands.sql(wrong, 'CREATE SCHEMA api;')
             notice = (bundle / 'GENERATED_SQL_NOTICE').read_text()
-            preamble = bundle_preamble(header.group(1), int(major), 'api.orders_dv', notice)
+            preamble = bundle_preamble(header.group(1), int(major), 'api.orders_dv', notice,
+                                       header.group(4))
             other_major = int(major) + 1
             mismatched = folder / 'wrong-major.sql'
-            mismatched.write_text(bundle_preamble(header.group(1), other_major, 'api.orders_dv', notice)
+            mismatched.write_text(bundle_preamble(header.group(1), other_major, 'api.orders_dv', notice,
+                                                  header.group(4))
                                   + script[len(preamble):])
             late_failure = folder / 'late-failure.sql'
             late_failure.write_text(script.removesuffix('COMMIT;\n') + 'SELECT 1/0;\nCOMMIT;\n')
@@ -352,11 +417,11 @@ CREATE POLICY visible_child ON shop.order_items TO {role} USING(item_id<>2) WITH
                 merges(commands, database)
                 record(result_id, last(commands, database, f"SET ROLE {role};SELECT "
                        "jsonb_array_length(data->'items')=1 FROM api.orders_dv WHERE _id=42;") == "t")
-            record(RESULT_IDS[9], True, 'generator version, PostgreSQL major, target and embedded notice verified')
+            record(RESULT_IDS[9], True, 'pinned generator hash without an existing mapping, version, PostgreSQL major, target and embedded notice verified')
             record(RESULT_IDS[10], True, 'both invocations reject before creating generated objects')
             record(RESULT_IDS[11], True, 'untrusted hash sentinel unused; distinct ETags on both invocations')
             record(RESULT_IDS[12], True, 'own and psql transactions support CRUD and roll back failed applications')
-            record(RESULT_IDS[13], True, 'missing header, notice, BEGIN, search_path, guard, COMMIT and runtime reference rejected')
+            record(RESULT_IDS[13], True, 'missing/altered hash, real 7fb535e generator export/bundle, incomplete envelope and runtime reference rejected')
             require([row["name"] for row in results] == list(RESULT_IDS), "result inventory differs")
         finally:
             for database in reversed(created):

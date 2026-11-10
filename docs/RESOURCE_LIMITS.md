@@ -48,6 +48,30 @@ uses safe HTTP 400; unsupported body media uses 415; invalid configuration uses
 `22023`; a failed index health check uses `PT422`. Existing shape, ETag and
 native constraint SQLSTATEs retain their previous meanings.
 
+## Oversized source data
+
+One oversized root aborts an entire document-materialising collection query
+that reaches it; it is not skipped or truncated. A point read of another root
+can still work. Before a pilot, inspect child-count distribution through the
+same application role and RLS context, then monitor it against the specification's
+`stored_children` limit (counts are visibility-relative):
+
+```sql
+SELECT child_count,count(*) AS roots
+FROM (
+ SELECT o.order_id,count(i.item_id) AS child_count
+ FROM shop.orders o LEFT JOIN shop.order_items i ON i.order_id=o.order_id
+ GROUP BY o.order_id
+) AS distribution
+GROUP BY child_count ORDER BY child_count;
+```
+
+This source-table query avoids document aggregation but is not itself a bounded
+monitoring service: schedule it with reviewed timeouts and suitable indexes.
+If a root exceeds the limit, stop the affected workload and repair its source
+rows through approved operations; raising limits or regenerating alone is not
+a recovery plan. Retain counts and the agreed maximum in the deployment record.
+
 ## Runtime read capability migration
 
 An array document needs an explicit EXECUTE grant on its owner-only

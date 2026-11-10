@@ -20,6 +20,7 @@ from tools.strict_results import loads, result_rows, validate
 from tools.verify_test_coverage import attest, MANIFEST
 
 CI_FILES = {
+    'minimum-grants-results.jsonl': 'minimum_grants',
     'helper-acl-results.jsonl': 'helper_acl',
     'runtime-limits-results.jsonl': 'runtime_limits',
     'rc02-database-results.jsonl': 'rc02_database',

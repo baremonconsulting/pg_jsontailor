@@ -2,31 +2,29 @@
 
 `pg_jsontailor` generates writable JSON documents over relational PostgreSQL tables. From a compact JSON specification it creates a view, guarded write paths and optimistic concurrency controls, while the source of truth remains in ordinary PostgreSQL tables.
 
-It is useful for APIs, integration layers and migrations where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
+It is useful for APIs and integration layers where applications need document-shaped SQL or REST access without replacing the relational model. A generated view can be exposed through PostgREST and supports optimistic concurrency through document ETags.
 
 The design is inspired by the general duality-view model: one logical JSON
 document can be read from and written back to normalised relational tables.
 `pg_jsontailor` is an independent, focused PostgreSQL product and makes no
 Oracle JSON Relational Duality View or ORDS compatibility claim.
+Oracle, ORDS, PostgreSQL, PostgREST and other names belong to their owners and
+are used only descriptively; no affiliation or endorsement is implied.
 
-## Status
+## Who it is for
 
-Release metadata: `0.2.0` / `development`.
-
-The unreleased 0.2.0 development line is being prepared for selected,
-controlled pilots under separately signed written pilot terms, on a best-effort
-basis and without warranty. PostgreSQL 17 and 18 are the supported released majors;
-PostgreSQL 19 is tested on its pre-release build only until general
-availability. A pilot requires a pinned candidate, the documented functional
-and security gates and customer-specific acceptance. This is not a
-production-readiness or unrestricted-workload claim.
-The repository includes regression, isolation, RLS and tested reference
-PostgREST scenarios; final candidate evidence is collected only after freeze.
+For developers and operators evaluating a small document API over existing
+relational tables, with reviewed database privileges and a controlled endpoint.
+It is not a general document database, a partial-JSON-update API or a qualified
+high-contention write-heavy service. Start in a disposable database; a customer
+pilot requires the separate [pilot readiness](docs/PILOT_READINESS.md) process.
 
 The current implementation supports:
 
 - one root table;
-- an optional read-only many-to-one object;
+- an optional read-only many-to-one object: INSERT ignores edited non-key object
+  fields and reads return the referenced values; replacement checks them when
+  `object.etag=true` and otherwise ignores them (see [object semantics](docs/API.md#errors));
 - an optional writable one-to-many array;
 - document reads, inserts, full replacements and guarded deletes;
 - optimistic concurrency using the first 128 bits of SHA-256 as 32 uppercase hexadecimal ETags (not authentication tokens);
@@ -36,7 +34,7 @@ The current implementation supports:
 
 ## Runtime requirements
 
-- PostgreSQL 17, 18 or 19;
+- tested PostgreSQL 17 and 18 (released), and pinned PostgreSQL 19 pre-release until GA;
 - permission to place the extension control and SQL files in the PostgreSQL extension directory.
 
 `pg_jsontailor` is implemented entirely in SQL and PL/pgSQL. It does not compile or install a shared library.
@@ -51,7 +49,7 @@ make install
 
 For this installation method, GNU Make, PGXS and the matching PostgreSQL server development package are required only to locate the correct installation directories and copy the files. They do not compile product code.
 
-Packagers may instead install these two files directly into PostgreSQL's `share/extension` directory:
+Packagers may instead install these two files directly into PostgreSQL's `share/extension` directory, and must include `LICENSE` with their package:
 
 ```text
 pg_jsontailor.control
@@ -79,21 +77,6 @@ A third route is available when the target service does not allow
 same PostgreSQL major, then apply it as the target database owner. Follow
 [cookbook recipe 8](docs/cookbook/08-no-extension.md). No managed provider is
 claimed as qualified by that generic procedure.
-
-## Development requirements
-
-The following tools are needed only for development, regression testing and optional integration scenarios:
-
-- PostgreSQL server development files and PGXS;
-- GNU Make;
-- Python 3 for the extended test and benchmark tools;
-- PostgREST 16.5 for the optional REST scenarios.
-
-Run the extension regression and isolation suites against an available test instance:
-
-```sh
-make installcheck
-```
 
 ## Quick start
 
@@ -155,15 +138,20 @@ The shipped fixture and specification produce this actual document:
 <!-- quickstart-smoke:start -->
 ```sh
 set -euo pipefail
-quickstart_db="pgjt_quickstart_$$"
+quickstart_db="${PGJT_QUICKSTART_DB:-pgjt_quickstart_$$}"
 createdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
 trap 'dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"' EXIT
 psql -X -v ON_ERROR_STOP=1 -d "$quickstart_db" \
   -v spec="$(tr -d '\n' < examples/orders_dv.spec.json)" \
   -f examples/quickstart.sql
-dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
-trap - EXIT
-echo quickstart/cleanup=PASS
+if [ "${KEEP_PGJT_QUICKSTART:-0}" = 1 ]; then
+  trap - EXIT
+  printf 'quickstart/retained=%s\n' "$quickstart_db"
+else
+  dropdb --maintenance-db="${PGDATABASE:-postgres}" "$quickstart_db"
+  trap - EXIT
+  echo quickstart/cleanup=PASS
+fi
 ```
 <!-- quickstart-smoke:end -->
 
@@ -175,11 +163,46 @@ deletes the inserted order and its child using the current ETag. It leaves the
 seeded order untouched before the database is removed. `psql` variables use
 literal quoting (`:'spec'`); application clients should bind query parameters.
 
-The same DDL can be inspected before execution:
+The default path prints `quickstart/cleanup=PASS` and removes the database. To
+continue directly with cookbook recipes 5 and 7, invoke the block with
+`PGJT_QUICKSTART_DB=pgjt_cookbook KEEP_PGJT_QUICKSTART=1`; it instead prints
+`quickstart/retained=pgjt_cookbook`. Complete both recipes against that retained
+database, then remove it with `dropdb pgjt_cookbook`.
 
-```sql
-SELECT jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb);
+## What gets created
+
+For the complete shipped `api.orders_dv` mapping:
+
+- Four views: `api.orders_dv`, `api.orders_dv__root_binding`,
+  `api.orders_dv__object_binding`, `api.orders_dv__array_binding`.
+- Seven functions: `api.orders_dv__insert()`, `api.orders_dv__update()`,
+  `api.orders_dv__delete()`, `api.orders_dv__guard()`, `api.orders_dv__check()`,
+  `api.orders_dv__bounded_array(bigint)`, `api.orders_dv__delete_document(bigint,text)`.
+- Six triggers on `api.orders_dv`: `orders_dv__insert`, `orders_dv__update`,
+  `orders_dv__delete`, `orders_dv__guard_insert`, `orders_dv__guard_update`,
+  `orders_dv__guard_delete`.
+- Seven helper ACL-revocation blocks (owner-only execution), and the
+  `pg_jsontailor metadata v1: ` view comment with the specification and provenance.
+
+To save exact UTF-8 DDL bytes, use a disposable `generator` database containing
+the extension and matching source schema. Run from the repository root:
+
+<!-- ddl-review-smoke:start -->
+```sh
+set -euo pipefail
+umask 077
+spec="$(tr -d '\n' < examples/orders_dv.spec.json)"
+printf '%s\n' "SELECT encode(convert_to(jsontailor.duality_view_ddl('api.orders_dv', :'spec'::jsonb),'UTF8'),'hex');" | \
+  psql -XAt -v ON_ERROR_STOP=1 -v spec="$spec" -d generator | \
+  python3 -c 'import sys;sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+  > generated.raw.sql
+sha256sum generated.raw.sql
 ```
+<!-- ddl-review-smoke:end -->
+
+See the [generated DDL outline](docs/cookbook/generated-ddl-outline.md), including
+the real public view definition, and [recipe 3](docs/cookbook/03-review-ddl.md)
+for approval and private evidence retention. Raw SQL is inspection-only.
 
 `create_duality_view()` executes immediately, returns void and displays no DDL.
 It regenerates the output of `duality_view_ddl()` rather than reading a saved file.
@@ -202,9 +225,30 @@ Generated functions contain copied write logic. Follow [`docs/UPGRADING.md`](doc
 Before a controlled deployment, complete the fit, acceptance, SLO and release
 checks in [`docs/PILOT_READINESS.md`](docs/PILOT_READINESS.md).
 
-PostgreSQL 17, 18 and 19 can also route a documented subset of native SQL `MERGE` through the generated insert, update and delete paths. The source key must be unique, updates remain complete ETag-checked replacements, deletes require an ETag action condition, and the `WHEN NOT MATCHED` branch must be used only when creation is intended. See [`docs/MERGE.md`](docs/MERGE.md) for the supported subset and copyable staging examples.
+The tested PostgreSQL 17/18 released builds and pinned PostgreSQL 19 pre-release build can also route a documented subset of native SQL `MERGE` through the generated insert, update and delete paths. The source key must be unique, updates remain complete ETag-checked replacements, deletes require an ETag action condition, and the `WHEN NOT MATCHED` branch must be used only when creation is intended. See [`docs/MERGE.md`](docs/MERGE.md) for the supported subset and copyable staging examples.
+
+## Status
+
+Release metadata: `0.2.0` / `development`.
+
+Version 0.2.0 is unreleased. Baremon-led customer pilots are offered only under
+separately signed written pilot terms, on a best-effort basis and without warranty.
+These pilot-service conditions do not restrict rights granted by LICENSE.
+PostgreSQL 17 and 18 are tested released majors; PostgreSQL 19 is tested only on
+the pinned pre-release build until general availability.
+A pilot needs a fixed source version, passing functional/security checks and
+the customer's written acceptance.
+Passing tests do not establish production readiness or a support commitment.
 
 ## Testing
+
+For maintainers, development tools are PostgreSQL server development files and
+PGXS, GNU Make, Python 3, and PostgREST 16.5 for the reference REST scenarios.
+Run regression and isolation tests against a disposable test instance:
+
+```sh
+make installcheck
+```
 
 See [`docs/TESTING.md`](docs/TESTING.md) for the suite inventory, PostgreSQL
 matrix, PostgREST schedule and local safety notes.
@@ -215,7 +259,7 @@ The write path uses set-based array reconciliation and set-wise validation.
 Cost grows with the mapped child collection: a root-only change still locks,
 validates and reconciles that collection. High-contention write-heavy
 workloads are unqualified. Final exact-SHA measurements on PostgreSQL 17, 18
-and 19 are pending the release freeze, and no current figures are published.
+and the pinned 19 pre-release build are pending final source approval, and no current figures are published.
 The benchmark compares the candidate with lower-contract direct SQL using
 signed installation evidence, semantic assertions and three independently
 restarted paired-sample sessions. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
@@ -238,11 +282,13 @@ The complete mapped-type, foreign-key, identity and source-shape limits are in
 `pg_jsontailor` is released under the PostgreSQL License. See [`LICENSE`](LICENSE).
 
 Exported generated SQL contains copied implementation logic. Standalone
-redistributions must retain the complete copyright, permission and disclaimer
+copies must retain the complete copyright, permission and disclaimer
 text in [`GENERATED_SQL_NOTICE`](GENERATED_SQL_NOTICE). See the
 [`standalone deployment example`](examples/standalone/README.md) and bundle
 verifier; this does not claim rights over user-authored data or specifications,
-or imply a warranty, support commitment or SLA.
+or imply a warranty, support commitment or SLA. Keep the whole bundle, including
+the complete notice, for deployment, contractor handover and backups. The notice
+lives in the SQL script, not in the generated database objects.
 
 Copyright © 2026 Baremon s.r.o.
 

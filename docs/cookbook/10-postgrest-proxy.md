@@ -9,6 +9,10 @@ Expose only the reviewed document API through the fail-closed HTTP boundary.
 PostgREST 16.5, reviewed application role, trusted TLS/authentication ingress,
 and the same dedicated service UID for PostgREST and the boundary. Clients have
 no database credentials or arbitrary-SQL route. Raw PostgREST has no TCP listener.
+Ingress must enforce header and body timeouts, a whole-request deadline,
+request buffering, authenticated rate limits and per-tenant quotas. The proxy's
+per-recv timeout is not a whole-request deadline. Python 3 and curl are required
+for the synthetic probes. Use only a disposable synthetic mapping for write probes.
 
 ## Steps
 
@@ -52,6 +56,22 @@ Route trusted ingress only to loopback port 3050. The following synthetic
 probes assume the configured authentication permits the test caller; include
 the deployment's approved Authorization header where required:
 
+`db-max-rows = 1000` is the actual enforcing control for collection row count.
+The boundary does not invent a missing `limit` and a client cannot bypass this
+database-facing cap with a `Range` larger than 1000. On staging, through the
+real ingress and authentication, verify that a request without `limit` and an
+oversized `Range` each return at most 1000 rows, an explicit smaller limit is
+honoured, and the role-level statement timeout returns the documented safe
+error. Repeat these row-bound and timeout checks before every REST pilot. Use
+only synthetic data; never expose an uncapped control service.
+
+Configuration/start commands are service-manager deployment templates. Request
+status expectations below are verified in CI only by `tests/run_postgrest.py`
+(`PGJT-48/http-get`, `http-complete-patch`, `http-delete-rpc`) and
+`tests/http_security_contract.py` (`PGJT-113/http-query-preferences`). The database
+documentation smoke does not certify a live customer HTTP stack; repeat these
+checks on staging with its actual authentication and ingress configuration.
+
 ```sh
 curl --fail --silent --show-error 'http://127.0.0.1:3050/orders_dv?_id=eq.42'
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -59,6 +79,50 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   -X POST http://127.0.0.1:3050/rpc/sql)" = 404
 ```
+
+The four request examples below create and remove one synthetic document; do
+not substitute a customer document. The final RPC uses the ETag returned by
+PATCH, not the earlier read. With authentication enabled, add the deployment's
+approved header to every curl invocation; never write credentials to public logs.
+
+```sh
+set -euo pipefail
+umask 077
+http_probe="$(mktemp -d)"
+trap 'rm -f "$http_probe/insert.json" "$http_probe/read.json" "$http_probe/patch.json" "$http_probe/patched.json" "$http_probe/delete.json"; rmdir "$http_probe"' EXIT
+test "$(curl --silent --show-error --output "$http_probe/insert.json" --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' -H 'Prefer: return=representation' \
+  --data '{"data":{"status":"recipe-http","customer":{"customerId":7},"items":[]}}' \
+  http://127.0.0.1:3050/orders_dv)" = 201
+document_id="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[0]["_id"])' "$http_probe/insert.json")"
+# Read: 200, one row containing data and _metadata.etag.
+test "$(curl --silent --show-error --output "$http_probe/read.json" --write-out '%{http_code}' \
+  "http://127.0.0.1:3050/orders_dv?_id=eq.${document_id}")" = 200
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]))[0]["data"];d["status"]="recipe-patched";print(json.dumps({"data":d}))' \
+  "$http_probe/read.json" > "$http_probe/patch.json"
+# Complete-document PATCH with one identity: 200 and the new ETag.
+test "$(curl --silent --show-error --output "$http_probe/patched.json" --write-out '%{http_code}' \
+  -X PATCH -H 'Content-Type: application/json' -H 'Prefer: return=representation' \
+  --data-binary "@$http_probe/patch.json" \
+  "http://127.0.0.1:3050/orders_dv?_id=eq.${document_id}")" = 200
+# Rejected upsert: 400, no upstream call and no document change.
+test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' --data-binary "@$http_probe/patch.json" \
+  'http://127.0.0.1:3050/orders_dv?on_conflict=_id')" = 400
+python3 -c 'import json,sys;r=json.load(open(sys.argv[1]))[0];print(json.dumps({"expected_id":r["_id"],"expected_etag":r["data"]["_metadata"]["etag"]}))' \
+  "$http_probe/patched.json" > "$http_probe/delete.json"
+# RPC delete: 200, the deleted document; do not use DELETE on the view route.
+test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  -H 'Content-Type: application/json' --data-binary "@$http_probe/delete.json" \
+  http://127.0.0.1:3050/rpc/orders_dv__delete_document)" = 200
+```
+
+Real error example: a PATCH without `_metadata.etag` returns HTTP 428 / PT428.
+Its cause is a missing replacement token; read the current complete document,
+apply the intended change and submit that retained token. Do not manufacture a
+current-token subquery to bypass the client's precondition. If a probe fails
+after creation, retain its synthetic identity privately and reconcile/delete it
+through the reviewed RPC before rerunning; a timeout may follow COMMIT.
 
 From the actual customer network, probe every historical/raw PostgREST TCP
 address and port: any HTTP response, even 401/404, means reachable and NO-GO.

@@ -196,6 +196,8 @@ jobs:
             --output "$RUNNER_TEMP/partition-results.jsonl"
           python3 tests/helper_acl_matrix.py --psql "$PGBIN/psql" \
             --database jsontailor_ci --result "$RUNNER_TEMP/helper-acl-results.jsonl"
+          python3 tests/minimum_grants_matrix.py --psql "$PGBIN/psql" \
+            --database jsontailor_ci --result "$RUNNER_TEMP/minimum-grants-results.jsonl"
           python3 tests/runtime_limits_matrix.py --psql "$PGBIN/psql" \
             --database jsontailor_ci --result "$RUNNER_TEMP/runtime-limits-results.jsonl"
           python3 tests/rc02_database_regressions.py --psql "$PGBIN/psql" \
@@ -214,6 +216,7 @@ jobs:
             "$RUNNER_TEMP/security-results.jsonl" \
             "$RUNNER_TEMP/partition-results.jsonl" \
             "$RUNNER_TEMP/helper-acl-results.jsonl" \
+            "$RUNNER_TEMP/minimum-grants-results.jsonl" \
             "$RUNNER_TEMP/runtime-limits-results.jsonl" \
             "$RUNNER_TEMP/rc02-database-results.jsonl" \
             "$RUNNER_TEMP/rc02-read-results.jsonl"
@@ -300,6 +303,7 @@ jobs:
           "$PGBIN/psql" -X -v spec="$(cat examples/orders_dv.spec.json)" \
             -d jsontailor_ci -f tests/setup_postgrest.sql
           mkdir -m 700 "$RUNNER_TEMP/postgrest-private"
+          mkdir -m 700 "$RUNNER_TEMP/postgrest-uncapped-private"
           cat > "$RUNNER_TEMP/postgrest.conf" <<EOF
           db-uri = "postgresql://jt_postgrest_authenticator@127.0.0.1:${PGPORT}/jsontailor_ci"
           db-schemas = "api"
@@ -315,21 +319,50 @@ jobs:
           "$RUNNER_TEMP/postgrest" "$RUNNER_TEMP/postgrest.conf" \
             > "$RUNNER_TEMP/postgrest.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/postgrest.pid"
+          cat > "$RUNNER_TEMP/postgrest-uncapped.conf" <<EOF
+          db-uri = "postgresql://jt_postgrest_authenticator@127.0.0.1:${PGPORT}/jsontailor_ci"
+          db-schemas = "api"
+          db-anon-role = "jt_postgrest_anon"
+          server-host = "127.0.0.1"
+          server-port = 3054
+          server-unix-socket = "$RUNNER_TEMP/postgrest-uncapped-private/upstream.sock"
+          server-unix-socket-mode = "600"
+          admin-server-port = 3053
+          log-level = "warn"
+          EOF
+          "$RUNNER_TEMP/postgrest" "$RUNNER_TEMP/postgrest-uncapped.conf" \
+            > "$RUNNER_TEMP/postgrest-uncapped.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/postgrest-uncapped.pid"
           for attempt in {1..80}; do
             curl -fsS http://127.0.0.1:3051/ready >/dev/null && break
             test "$attempt" -lt 80 || { echo 'PostgREST readiness failed; inspect encrypted diagnostics'; exit 1; }
+            sleep 0.25
+          done
+          for attempt in {1..80}; do
+            curl -fsS http://127.0.0.1:3053/ready >/dev/null && break
+            test "$attempt" -lt 80 || { echo 'Uncapped PostgREST readiness failed; inspect encrypted diagnostics'; exit 1; }
             sleep 0.25
           done
           python3 tools/http_boundary.py \
             --upstream-socket "$RUNNER_TEMP/postgrest-private/upstream.sock" \
             --view orders_dv --view concurrent_dv --view fresh_acl_dv > "$RUNNER_TEMP/boundary.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/boundary.pid"
+          python3 tools/http_boundary.py \
+            --upstream-socket "$RUNNER_TEMP/postgrest-uncapped-private/upstream.sock" \
+            --view orders_dv --host 127.0.0.1 --port 3055 > "$RUNNER_TEMP/boundary-uncapped.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/boundary-uncapped.pid"
           for attempt in {1..80}; do
-            curl -fsS http://127.0.0.1:3050/orders_dv >/dev/null && break
+            curl -fsS 'http://127.0.0.1:3050/orders_dv?_id=eq.42' >/dev/null && break
+            test "$attempt" -lt 80 || exit 1
+            sleep 0.25
+          done
+          for attempt in {1..80}; do
+            curl -fsS 'http://127.0.0.1:3055/orders_dv?_id=eq.42' >/dev/null && break
             test "$attempt" -lt 80 || exit 1
             sleep 0.25
           done
           python3 tests/run_postgrest.py \
+            --uncapped-base http://127.0.0.1:3055 \
             --transcript "$RUNNER_TEMP/postgrest-transcript.md" \
             --result "$RUNNER_TEMP/postgrest-results.jsonl"
           python3 tests/http_security_contract.py --psql "$PGBIN/psql" \
@@ -363,8 +396,13 @@ jobs:
         run: |
           test ! -f "$RUNNER_TEMP/boundary.pid" \
             || kill "$(cat "$RUNNER_TEMP/boundary.pid")" || true
+          test ! -f "$RUNNER_TEMP/boundary-uncapped.pid" \
+            || kill "$(cat "$RUNNER_TEMP/boundary-uncapped.pid")" || true
           test ! -f "$RUNNER_TEMP/postgrest.pid" \
             || kill "$(cat "$RUNNER_TEMP/postgrest.pid")" \
+            || true
+          test ! -f "$RUNNER_TEMP/postgrest-uncapped.pid" \
+            || kill "$(cat "$RUNNER_TEMP/postgrest-uncapped.pid")" \
             || true
 
       - name: Redact PostgREST evidence
@@ -406,6 +444,7 @@ jobs:
             --result "shapes=$RUNNER_TEMP/shape-results.jsonl" \
             --result "security=$RUNNER_TEMP/security-results.jsonl" \
             --result "helper_acl=$RUNNER_TEMP/helper-acl-results.jsonl" \
+            --result "minimum_grants=$RUNNER_TEMP/minimum-grants-results.jsonl" \
             --result "runtime_limits=$RUNNER_TEMP/runtime-limits-results.jsonl" \
             --result "rc02_database=$RUNNER_TEMP/rc02-database-results.jsonl" \
             --result "rc02_read=$RUNNER_TEMP/rc02-read-results.jsonl" \

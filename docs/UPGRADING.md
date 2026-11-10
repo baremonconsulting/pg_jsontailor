@@ -5,12 +5,11 @@ extension files does not alter an existing view. Keep each specification and
 reviewed bundle in source control, then regenerate only through a planned
 deployment transaction.
 
-The 0.2.0 generated write functions remove per-document subtransactions from
-ordinary bulk writes. Regenerate existing duality views after installing this
-version; upgrading the extension alone does not replace SQL already copied
-into generated objects.
-
-Generated views contain copied SQL and PL/pgSQL. Upgrading the `pg_jsontailor` extension changes the generator, but does not rewrite objects that were generated earlier. Regenerate each mapping when release notes identify a generated write-path change or after a supported source-schema change.
+First identify whether the stored specification still names the intended source
+schema. If it does, use the name-preserving regeneration procedure below. If a
+mapped name, JSON field or source identity changes, update the specification and
+use transactional recreation instead. Back up and rehearse restoration before
+either procedure; a successful generator installation is not a mapping upgrade.
 
 The current replacement path stabilises ETag-included referenced objects with
 `FOR SHARE`. Before regenerating, verify that replacement and MERGE roles have
@@ -27,9 +26,10 @@ Any view generated before the selected pilot candidate must be regenerated from
 that pinned full commit and retained verified bundle before the pilot. Public
 release still requires the separate tag, benchmark and release-authority gate.
 
-The mixed-type validation correction changes the generator definition and its
-provenance hash. Regenerate every view made by an earlier 0.2.0 development
-snapshot; reinstalling the extension alone is insufficient.
+Compare each deployed mapping's recorded generator hash with the installed
+generator and retain the reviewed SQL and observed catalogue manifest. Earlier
+development mappings must be regenerated from the selected source version;
+reinstalling the extension alone is insufficient.
 
 ## Source-schema change matrix
 

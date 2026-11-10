@@ -6,11 +6,18 @@ pg_jsontailor uses security-invoker views and fixed `search_path` values in gene
 
 | Operation | Required access |
 |---|---|
-| Read root-only document | `USAGE` on schemas and `SELECT` on the view and source tables |
-| Read an array | Read access plus `grant_array_reader` (or direct `EXECUTE` for a standalone deployment) |
-| Insert or replace | `INSERT`/`UPDATE` on the view and operation-specific privileges on mapped tables and sequences |
-| Delete by RPC | `DELETE` on the view, mapped-table privileges and `grant_delete_rpc` (or direct `EXECUTE`) |
-| Inspect health | `EXECUTE` on the generated `__check()` function |
+| Read root-only document | `SELECT` on the view and every mapped table needed by the document |
+| Read an array | Root read plus `grant_array_reader` (or exact-signature `EXECUTE` for standalone deployment) |
+| Insert | `USAGE` on the API and source schemas; `SELECT, INSERT` on the view and inserted mapped tables; `SELECT` on referenced tables; array-reader capability when returning an array. Identity columns need no sequence grant; a `serial` default needs `USAGE` on its exact sequence. |
+| Complete replacement | `USAGE` on both schemas; `SELECT, UPDATE` on the view and mapped tables, operation-specific child `INSERT`/`DELETE`, and array-reader capability. An ETag-covered object also needs a lock-capable column privilege documented by the mapping. |
+| Delete by RPC | `USAGE` on the API and source schemas; `SELECT, DELETE` on the view and mapped root/child tables; array-reader and `grant_delete_rpc` (or their exact standalone function signatures) |
+| Inspect health | `USAGE` on the API and source schemas plus `EXECUTE` on the exact generated `__check()` function |
+
+Schema `USAGE` is required when resolving functions and relations for writes,
+RPCs and health checks. A caller selecting an already-resolved view does not
+need source-schema `USAGE` merely for that read; it still needs the mapped-table
+`SELECT` privileges required by security-invoker execution. Grant no sequence
+privilege for identity columns and never use `ALL SEQUENCES` as a shortcut.
 
 Security-invoker views and triggers require source-table privileges on the
 executing database role. Those privileges also allow direct SQL to bypass
@@ -18,6 +25,8 @@ document ETags. Therefore the role must be reachable only through the reviewed
 document endpoint, not through an arbitrary SQL interface; RLS must enforce the
 same tenant boundary on every source table. Default privileges must not grant
 generated helpers or source tables to `PUBLIC` or unrelated roles.
+Only the schema owner should hold `CREATE` on the API schema; runtime roles
+receive `USAGE`, not `CREATE`.
 
 Schema default privileges can independently grant DML, including `DELETE`, on
 the generated writable view while generated helper functions remain owner-only.

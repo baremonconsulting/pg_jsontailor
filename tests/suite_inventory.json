@@ -1,8 +1,15 @@
 {
   "schema_version": 1,
   "suites": {
+    "minimum_grants": [
+      "PGJT-134/identity-insert-needs-no-sequence-grant",
+      "PGJT-134/serial-needs-exact-usage-only",
+      "PGJT-134/replacement-with-array",
+      "PGJT-134/rpc-delete",
+      "PGJT-134/each-documented-capability-is-required"
+    ],
     "public_contract": ["PGJT-67/etag-coverage", "PGJT-67/direct-delete-predicate", "PGJT-67/mapping-restrictions"],
-    "docs_quickstart": ["PGJT-65/readme-quickstart", "PGJT-116/no-extension-runbook", "PGJT-117/task-cookbook", "PGJT-122/documentation-examples-executed", "PGJT-126/deployment-paths", "PGJT-127/rls-cookbook", "PGJT-128/literal-cookbook", "PGJT-129/socket-cookbook", "PGJT-130/deployed-manifest"],
+    "docs_quickstart": ["PGJT-65/readme-quickstart", "PGJT-116/no-extension-runbook", "PGJT-117/task-cookbook", "PGJT-122/documentation-examples-executed", "PGJT-126/deployment-paths", "PGJT-127/rls-cookbook", "PGJT-128/literal-cookbook", "PGJT-129/socket-cookbook", "PGJT-130/deployed-manifest", "PGJT-118/generated-ddl-review"],
     "synthetic_pilot": ["PGJT-112/synthetic-health", "PGJT-112/synthetic-readback", "PGJT-112/synthetic-filter-paging", "PGJT-112/synthetic-insert", "PGJT-112/synthetic-replacement", "PGJT-112/synthetic-etags", "PGJT-112/synthetic-errors", "PGJT-112/synthetic-rest-surface", "PGJT-112/synthetic-delete-rpc", "PGJT-112/synthetic-operational-read", "PGJT-112/synthetic-mixed-types", "PGJT-113/synthetic-write-boundary", "PGJT-112/synthetic-restore", "PGJT-112/synthetic-cleanup"],
     "upgrade_docs": ["PGJT-66/name-preserving-regeneration", "PGJT-66/mapped-rename-recreation", "PGJT-66/dependency-rollback", "PGJT-66/acl-rls-overload-preservation"],
     "standalone": ["PGJT-68/export-candidate", "PGJT-68/clean-runtime", "PGJT-68/crud-etags", "PGJT-68/direct-rpc-delete", "PGJT-68/merge", "PGJT-68/health-binding-guards", "PGJT-68/rls-acl", "PGJT-68/custom-restore", "PGJT-68/plain-restore", "PGJT-114/self-protecting-header", "PGJT-114/wrong-major", "PGJT-114/hostile-search-path", "PGJT-114/transaction-invocations", "PGJT-114/bundle-negatives"],
@@ -93,6 +100,7 @@
       "PGJT-112/type-pairs-isolated",
       "PGJT-112/transaction-order-matrix",
       "PGJT-112/multirow-mixed-types",
+      "PGJT-146/multirow-merge",
       "PGJT-112/mixed-invalid-values-atomic"
     ],
     "shapes": [
@@ -102,7 +110,9 @@
       "PGJT-45/identity-default-matrix",
       "PGJT-45/failure-atomicity",
       "PGJT-45/deferrable-merge-matrix",
-      "PGJT-115/insert-column-identity"
+      "PGJT-115/insert-column-identity",
+      "PGJT-146/column-identity-paths",
+      "PGJT-146/insert-identity-mutation"
     ],
     "security": [
       "PGJT-46/source-privilege-matrix",
@@ -160,6 +170,8 @@
       "PGJT-49/maintenance-database-integration"
     ],
     "postgrest": [
+      "PGJT-142/postgrest-row-bound",
+      "PGJT-142/postgrest-no-row-bound-negative",
       "PGJT-48/http-get",
       "PGJT-48/http-complete-patch",
       "PGJT-48/http-stale-etag",
@@ -233,6 +245,7 @@
       "PGJT-90/typed-prefilter-keyset"
     ],
     "http_security": [
+      "PGJT-142/postgrest-statement-timeout",
       "PGJT-57/immediate-raw-disclosure-control",
       "PGJT-57/immediate-sentinel-rollback",
       "PGJT-57/deferred-raw-disclosure-control",

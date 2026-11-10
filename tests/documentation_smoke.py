@@ -21,7 +21,7 @@ RESULT_IDS = ("PGJT-65/readme-quickstart", "PGJT-116/no-extension-runbook",
               "PGJT-117/task-cookbook", "PGJT-122/documentation-examples-executed",
               "PGJT-126/deployment-paths", "PGJT-127/rls-cookbook",
               "PGJT-128/literal-cookbook", "PGJT-129/socket-cookbook",
-              "PGJT-130/deployed-manifest")
+              "PGJT-130/deployed-manifest", "PGJT-118/generated-ddl-review")
 ORDERS_DDL_SHA256 = {
     "17": "b6816672d208858b61f1b3e87ed8d64c85e5404614241ae50af284c691253882",
     "18": "0e2dba7f9fc01794b9a6db5b5c3b2ec53099568f34724c5442f21565e4d62d5a",
@@ -127,25 +127,29 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
         def unpadded_ddl_command():
             examples = blocks("docs/cookbook/03-review-ddl.md", "sh")
             require(len(examples) == 1, "DDL command block inventory changed")
-            # Bind the documented generator database placeholder; do not repair
-            # SQL, psql options or quoting in the command being tested.
-            script, bindings = re.subn(r"(?<!\S)-d[ \t]+generator(?=\s|$)",
-                                       "-d " + database, examples[0])
-            require(bindings == 2, "DDL command requires two generator database placeholders")
+            readme_section = (ROOT / "README.md").read_text().split(
+                "<!-- ddl-review-smoke:start -->", 1)[1].split("<!-- ddl-review-smoke:end -->", 1)[0]
+            readme_script = readme_section.split("```sh\n", 1)[1].split("```", 1)[0]
             env = os.environ.copy()
             env["PATH"] = str(commands.pg_bin) + os.pathsep + env["PATH"]
             env["spec"] = json.dumps(spec)
-            with tempfile.TemporaryDirectory(prefix="pgjt122-ddl-") as temporary:
-                (Path(temporary) / "examples").symlink_to(ROOT / "examples", target_is_directory=True)
-                (Path(temporary) / ".git").symlink_to(ROOT / ".git", target_is_directory=True)
-                result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
-                                        cwd=temporary, env=env, text=True,
-                                        capture_output=True, timeout=60)
-                require(result.returncode == 0, "documented DDL command failed: " + result.stderr)
-                generated = Path(temporary) / "generated.raw.sql"
-                require(generated.is_file(), "documented DDL command did not create generated.raw.sql")
-                require(generated.read_bytes() == expected_bytes,
-                        "documented DDL output differs or includes psql padding/headers")
+            for name, published, expected_bindings in (("recipe03", examples[0], 2),
+                                                        ("README", readme_script, 1)):
+                # Bind only the published database placeholder; do not repair the command.
+                script, bindings = re.subn(r"(?<!\S)-d[ \t]+generator(?=\s|$)",
+                                           "-d " + database, published)
+                require(bindings == expected_bindings, name + ": generator placeholders differ")
+                with tempfile.TemporaryDirectory(prefix="pgjt122-ddl-") as temporary:
+                    (Path(temporary) / "examples").symlink_to(ROOT / "examples", target_is_directory=True)
+                    (Path(temporary) / ".git").symlink_to(ROOT / ".git", target_is_directory=True)
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                            cwd=temporary, env=env, text=True,
+                                            capture_output=True, timeout=60)
+                    require(result.returncode == 0, name + " DDL command failed: " + result.stderr)
+                    generated = Path(temporary) / "generated.raw.sql"
+                    require(generated.is_file(), name + " did not create generated.raw.sql")
+                    require(generated.read_bytes() == expected_bytes,
+                            name + " DDL differs or includes psql padding/headers")
 
         check("3/unpadded-ddl-command", unpadded_ddl_command)
 
@@ -164,6 +168,12 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
   AND tgrelid='api.orders_dv'::regclass);""")
             require(counts == "4:7:6", "shipped DDL artefact object counts differ: " + counts)
             outline = examples[2]
+            public_definition = outline.split(
+                "CREATE VIEW api.orders_dv WITH (security_invoker=true) AS\n", 1)[1].split(
+                "\n\n-- [3]", 1)[0].strip()
+            require(public_definition == commands.sql(database,
+                    "SELECT pg_get_viewdef('api.orders_dv'::regclass,true);"),
+                    "outline public view is not the actual pg_get_viewdef output")
             for marker in ("CREATE VIEW", "CREATE FUNCTION", "CREATE TRIGGER",
                            "REVOKE ALL", "COMMENT ON VIEW"):
                 require(marker in outline, "annotated DDL outline lacks " + marker)
@@ -210,6 +220,13 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
             require({s["identity"] for s in before["sources"]} == {
                 "shop.orders", "shop.customers", "shop.order_items"},
                 "manifest source inventory differs")
+            readme_list = (ROOT / "README.md").read_text().split("## What gets created", 1)[1].split(
+                "<!-- ddl-review-smoke:start -->", 1)[0]
+            for identity in ([v["identity"] for v in before["views"]]
+                             + [f["identity"] for f in before["functions"]]
+                             + [t["name"] for t in before["triggers"]]):
+                require("`" + identity + "`" in readme_list,
+                        "README object list differs from actual 4:7:6 inventory: " + identity)
             commands.sql(database, "ALTER TRIGGER orders_dv__guard_insert ON api.orders_dv "
                          "RENAME TO orders_dv__guard_insert_probe;")
             try:
@@ -234,6 +251,11 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
 
         def no_extension_runbook():
             with tempfile.TemporaryDirectory(prefix="pgjt116-runbook-") as temporary:
+                # Recipe 8's host-side attestation uses this generator's installation.
+                sharedir = Path(commands.run("pg_config", "--sharedir").stdout.strip())
+                installed_sql = sharedir / "extension/pg_jsontailor--0.2.0.sql"
+                require(installed_sql.read_bytes() == (ROOT / "sql/pg_jsontailor--0.2.0.sql").read_bytes(),
+                        "installed generator SQL differs before standalone export")
                 bundle = Path(temporary) / "standalone-orders"
                 prefix = "pgjt116_" + uuid.uuid4().hex[:10]
                 target, owner, app = prefix + "_db", prefix + "_owner", prefix + "_app"
@@ -420,7 +442,7 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
             """Execute every SQL fence in the P0 cookbook with its documented bindings."""
             expected_blocks = {
                 "01-try-it.md": 1, "02-map-tables.md": 1,
-                "04-create-and-verify.md": 1, "05-application-role.md": 2,
+                "04-create-and-verify.md": 1, "05-application-role.md": 3,
                 "06-read-list-filter.md": 1, "07-write-etags.md": 1,
                 "08-no-extension.md": 2, "09-remove-and-rollback.md": 1,
             }
@@ -429,16 +451,36 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
             require({name: len(value) for name, value in sql.items()} == expected_blocks,
                     "P0 SQL block inventory changed")
             commands.sql(database, sql["01-try-it.md"][0])
-            commands.sql(database, sql["02-map-tables.md"][0])
-            create = sql["04-create-and-verify.md"][0].replace(
-                "api.orders_dv", "api.cookbook_orders").replace(
-                ":'spec'::jsonb", literal(json.dumps(spec)) + "::jsonb")
-            commands.sql(database, create)
-            require(commands.sql(database,
-                    "SELECT api.cookbook_orders__check()->>'status';") == "OK",
-                    "cookbook create/health block failed")
+            own_tables = commands.sql(database, sql["02-map-tables.md"][0])
+            own_documents = [json.loads(line) for line in own_tables.splitlines() if line.startswith("{")]
+            require(own_documents == [{"_id": 1, "title": "Launch", "tasks": [{"id": 10, "label": "Review"}]}]
+                    and "OK" in own_tables.splitlines(), "own-tables mapping/health result differs")
+            require(commands.sql(database, "SELECT to_regnamespace('recipe_mapping') IS NULL;") == "t",
+                    "own-tables recipe did not roll back")
+            for key, value, message in (
+                ("table", "orders", "root.table must have two parts"),
+                ("fields", {"x": "no_such_column"}, "invalid or unsupported root.fields.x"),
+                ("key", "status", "root.key is not a single-column primary key"),
+            ):
+                invalid = json.loads(json.dumps(spec))
+                invalid["root"][key] = value
+                expected_failure(commands, database, "SELECT jsontailor.duality_view_ddl("
+                                 "'api.invalid_mapping'," + literal(json.dumps(invalid)) + "::jsonb);",
+                                 "22023", message)
+            create_database = database + "_create"
+            commands.create(create_database)
+            try:
+                commands.sql(create_database, "CREATE EXTENSION pg_jsontailor;CREATE SCHEMA api;")
+                commands.run("psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", create_database,
+                             "-f", str(ROOT / "examples/shop_schema.sql"))
+                create = sql["04-create-and-verify.md"][0].replace(
+                    ":'spec'::jsonb", literal(json.dumps(spec)) + "::jsonb")
+                commands.sql(create_database, create)
+                require(commands.sql(create_database, "SELECT api.orders_dv__check()->>'status';") == "OK",
+                        "literal separate-database create/health block failed")
+            finally:
+                commands.drop(create_database)
             role = "pgjt_cookbook_app"
-            commands.sql(database, "CREATE ROLE " + role + " NOLOGIN;")
             try:
                 for grant_block in sql["05-application-role.md"]:
                     commands.sql(database, grant_block.replace("app_role", role))
@@ -456,6 +498,10 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
                     " AND has_function_privilege('" + role + "',"
                     "'api.orders_dv__delete_document(bigint,text)','EXECUTE');")
                 require(acl == "t", "cookbook grant matrix is not least privilege")
+                count_probe = next(block for block in blocks("docs/RESOURCE_LIMITS.md", "sql")
+                                   if "SELECT child_count" in block)
+                require("2|1" in commands.sql(database, "SET ROLE " + role + ";" + count_probe).splitlines(),
+                        "oversized-source distribution query did not count the seeded children")
                 commands.sql(database, "SET ROLE " + role + ";" + sql["06-read-list-filter.md"][0])
                 before = commands.sql(database, "SELECT data FROM api.orders_dv WHERE _id=42;")
                 result = commands.run("psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-d", database,
@@ -512,10 +558,10 @@ def documentation_examples(pg_bin: Path, maintenance: str) -> dict:
             require(len(snippets) == 1, "RLS recipe SQL inventory changed")
             output = commands.sql(database, snippets[0])
             lines = output.splitlines()
-            require("f" not in lines and lines.count("t") >= 8,
+            require("f" not in lines and lines.count("t") == 12,
                     "RLS cookbook positive/negative controls differ: " + output)
             require(lines.count("UPDATE 0") == 2 and lines.count("DELETE 0") == 2
-                    and lines.count("UPDATE 1") == 2 and "INSERT 0 1" in lines,
+                    and lines.count("UPDATE 1") == 2 and lines.count("INSERT 0 1") == 2,
                     "RLS cookbook did not execute both tenants and CRUD controls")
             require(commands.sql(database, "SELECT NOT EXISTS(SELECT FROM pg_roles WHERE "
                                  "rolname IN ('pgjt_recipe_tenant_a','pgjt_recipe_tenant_b')) "
@@ -602,7 +648,8 @@ def main() -> int:
             promoted(RESULT_IDS[5], "127/rls-cookbook"),
             promoted(RESULT_IDS[6], "128/literal-cookbook"),
             promoted(RESULT_IDS[7], "129/socket-cookbook"),
-            promoted(RESULT_IDS[8], "130/deployed-manifest")]
+            promoted(RESULT_IDS[8], "130/deployed-manifest"),
+            promoted(RESULT_IDS[9], "3/ddl-artefact")]
     if args.output:
         args.output.write_text("".join(json.dumps(item, sort_keys=True) + "\n" for item in rows))
     for item in rows:

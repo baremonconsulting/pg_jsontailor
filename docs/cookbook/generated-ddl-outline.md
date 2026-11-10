@@ -11,7 +11,7 @@ on PostgreSQL 17, and 225,964 bytes with SHA-256
 on PostgreSQL 18 and 19. PostgreSQL 18 introduced the `conenforced` catalogue
 check, which accounts for the intentional difference.
 The documentation smoke test regenerates the output on every supported
-PostgreSQL major and fails on either a structural or byte-level difference.
+PostgreSQL major and fails on an object-inventory or byte-level difference.
 
 For `examples/orders_dv.spec.json`, the generator creates:
 
@@ -78,8 +78,27 @@ FROM shop.orders WHERE false;
 
 -- [2] Public invoker view: assembles the root, object, array and ETag document.
 CREATE VIEW api.orders_dv WITH (security_invoker=true) AS
-SELECT o.order_id AS _id, /* generated jsonb document projection */ NULL::jsonb AS data
-FROM shop.orders AS o;
+ SELECT r.order_id AS _id,
+    d.payload || jsonb_build_object('_metadata', jsonb_build_object('etag', upper(encode(substr(sha256(convert_to(jsonb_set(d.payload, ARRAY['customer'::text],
+        CASE
+            WHEN jsonb_typeof(d.payload -> 'customer'::text) = 'object'::text THEN jsonb_build_object('customerId', d.payload #> ARRAY['customer'::text, 'customerId'::text])
+            ELSE 'null'::jsonb
+        END)::text, 'UTF8'::name)), 1, 16), 'hex'::text)))) AS data
+   FROM shop.orders r
+     CROSS JOIN LATERAL ( SELECT (jsonb_build_object('_id', r.order_id, 'status', r.status, 'created', r.created_at) || jsonb_build_object('customer', ( SELECT jsonb_build_object('name', o.name, 'customerId', o.customer_id) AS jsonb_build_object
+                   FROM shop.customers o
+                  WHERE o.customer_id = r.customer_id))) || jsonb_build_object('items',
+                CASE
+                    WHEN api.orders_dv__bounded_array(( SELECT count(*) AS count
+                       FROM ( SELECT 1 AS "?column?"
+                               FROM shop.order_items a
+                              WHERE a.order_id = r.order_id
+                             LIMIT 10001) bounded)) THEN COALESCE(( SELECT jsonb_agg(jsonb_build_object('qty', a.quantity, 'price', a.unit_price, 'itemId', a.item_id, 'product', a.product) ORDER BY a.item_id) AS jsonb_agg
+                       FROM shop.order_items a
+                      WHERE a.order_id = r.order_id), '[]'::jsonb)
+                    ELSE NULL::jsonb
+                END) AS payload
+         OFFSET 0) d;
 
 -- [3] Owner-only bounded helper: checks cardinality before array aggregation.
 CREATE FUNCTION api.orders_dv__bounded_array(bigint) RETURNS boolean
